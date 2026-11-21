@@ -121,3 +121,4 @@ You can use, study, share and change it. If you share a changed version, it must
 
 > Use ReXUI only where it is legal, and follow your VPS provider's terms.
 > 
+Co-Authored-By: Claude <noreply@anthropic.com>

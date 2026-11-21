@@ -1811,7 +1811,7 @@ def ddns_update():
 def ddns_save(d):
     s=sload(); dm=str(d.get('dom','')).strip().lower()
     dm=re.sub(r'\.duckdns\.org$','',dm)
-    if dm and not re.fullmatch(r'[a-z0-9-]{1,63}',dm): raise Err('Subdomain must be like alikot (or alikot.duckdns.org)')
+    if dm and not re.fullmatch(r'[a-z0-9-]{1,63}',dm): raise Err('Subdomain must be like myserver (or myserver.duckdns.org)')
     tk=str(d.get('tok','')).strip()
     if tk.startswith('•'): tk=s['ddns_tok']
     if tk and not re.fullmatch(r'[0-9a-f-]{36}',tk): raise Err('The token is the long code shown at the top of duckdns.org after you log in')
@@ -2186,6 +2186,8 @@ a.btn{text-decoration:none;color:var(--t)}a.btn.pri{color:#fff}
 @media(max-width:860px){.kps{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.kps .kp:last-child{grid-column:span 2}.g4{gap:10px}.hero{padding:16px}.hero h2{font-size:18px}.hb{width:100%;flex-wrap:nowrap}.hb .btn{flex:1 1 0;justify-content:center;white-space:nowrap;padding:8px 6px;font-size:13px;min-width:0}.kp{padding:11px 12px;gap:10px}.gc .ap{display:none}.gi .sub{font-size:11.5px}.ring{width:52px;height:52px}.gt{gap:9px}.kt b{font-size:18px}.ki{width:34px;height:34px}}
 @media(prefers-reduced-motion:reduce){.hdot{animation:none}}
 .pwr{display:block;padding:12px 18px 16px;font-size:12px;color:var(--m);text-decoration:none}.pwr:hover b{color:var(--a)}.pwm{display:none;text-align:center;font-size:12px;color:var(--m);margin:18px 0 4px;text-decoration:none}@media(max-width:860px){.pwm{display:block}}
+.tri b,.pair b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tri>div,.pair>div{min-width:0}
+@media(min-width:861px) and (max-width:1100px){.kps{grid-template-columns:repeat(6,minmax(0,1fr))}.kps .kp{grid-column:span 2}.kps .kp:nth-child(n+4){grid-column:span 3}.tri b{font-size:17px}.pair b{font-size:19px}}
 </style><style id="acs"></style></head><body>
 <div id="lg" hidden><div class="lbg" aria-hidden="true"><i></i><i></i><i></i></div><form class="lcard" id="lf"><div class="lhead"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><p id="ltg">Sign in to the panel</p></div>
 <label for="lu">Username</label><div class="fi"><span data-i="user"></span><input id="lu" autocomplete="username" autocapitalize="none" spellcheck="false"></div>
@@ -2560,7 +2562,7 @@ $('#pg').innerHTML=`<div class="stabs" role="tablist" aria-label="Settings secti
 <div class="mr" style="justify-content:flex-start;margin-top:10px"><button type="button" class="btn sm" id="xuk">Check for update</button><button type="button" class="btn sm pri" id="xun">Update now</button></div>
 <label class="ck"><input type="checkbox" id="xua" ${s.xauto?'checked':''}> Update automatically every Sunday around 05:00 (server time). If the new version fails, the old one is put back. You get a Telegram message.</label><div class="err" id="xue"></div></div>
 <form class="card" id="ddc"><div class="lab">${I('globe',15)}DuckDNS</div><p class="note" style="margin-top:8px">Keeps your free duckdns.org domain pointed at this server. Log in at duckdns.org, the token is at the top of the page. Leave both empty to turn it off.</p>
-<label for="ddd">Subdomain</label><input id="ddd" value="${X(s.ddns_dom)}" placeholder="alikot (for alikot.duckdns.org)" autocapitalize="none" spellcheck="false">
+<label for="ddd">Subdomain</label><input id="ddd" value="${X(s.ddns_dom)}" placeholder="myserver (for myserver.duckdns.org)" autocapitalize="none" spellcheck="false">
 <label for="ddt">Token</label><input id="ddt" value="${X(s.ddmask)}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocapitalize="none" spellcheck="false"><div id="ddi"></div>
 <div class="err" id="dde"></div><button class="btn pri">Save and update</button></form>
 <div class="card" id="mtc"><div class="lab">${I('disk',15)}Disk cleanup and swap</div><div id="mti"><p class="note" style="margin-top:8px">Loading...</p></div>

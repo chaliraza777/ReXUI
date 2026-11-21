@@ -1,3 +1,5 @@
+<div align="center">
+
 # ReXUI
 
 **Self-hosted SSH + Xray panel with one-file installer**
@@ -7,6 +9,26 @@ SSH · SSL · SSH WebSocket · UDPGW · VLESS (XHTTP, TCP TLS, Reality) · Troja
 ![version](https://img.shields.io/badge/version-1.0-1f6feb) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
 
 </div>
+
+---
+
+<p align="center"><img src="screenshots/dashboard-dark.png" alt="ReXUI dashboard (dark)" width="100%"></p>
+
+## Screenshots
+
+| Dashboard (light) | Users |
+|---|---|
+| <img src="screenshots/dashboard-light.png" alt="Dashboard light"> | <img src="screenshots/users.png" alt="Users table"> |
+| **User details** | **Settings** |
+| <img src="screenshots/user-details.png" alt="User details"> | <img src="screenshots/settings.png" alt="Settings"> |
+| **Login** | **Share card** |
+| <img src="screenshots/login.jpg" alt="Login page"> | <img src="screenshots/share-card.png" alt="Share card" width="60%"> |
+
+| Phone: dashboard | Phone: users | User's own page |
+|---|---|---|
+| <img src="screenshots/mobile-dashboard.png" alt="Phone dashboard"> | <img src="screenshots/mobile-users.png" alt="Phone users"> | <img src="screenshots/mobile-user-page.png" alt="User page"> |
+
+<sub>Screenshots use demo data.</sub>
 
 ---
 
@@ -120,6 +142,16 @@ You can use, study, share and change it. If you share a changed version, it must
 © 2026 Ali ([chaliraza777](https://github.com/chaliraza777))
 
 > Use ReXUI only where it is legal, and follow your VPS provider's terms.
-> 
-Co-Authored-By: Claude <noreply@anthropic.com>
-Built by Ali with help from Claude (Anthropic).
+>
+---
+
+<div align="center">
+
+# ❤️ Built by **Ali** & **Claude**
+
+### 🤖 **Claude** by Anthropic
+**AI partner who helped build ReXUI, line by line**
+
+<sub>Idea, testing and every decision: Ali · Code and design: Ali & Claude</sub>
+
+</div>

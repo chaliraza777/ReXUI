@@ -1,6 +1,6 @@
 #!/bin/bash
 # ReXUI v1.0 installer
-# Self-hosted SSH + Xray panel: SSH, SSL, SSH WebSocket (+TLS), UDPGW, Xray (VLESS XHTTP TLS / TCP TLS / Reality / XHTTP, Trojan),
+# Self-hosted SSH + Xray panel: SSH, SSL, SSH WebSocket (+TLS), UDPGW, Xray (VLESS XHTTP TLS / TCP TLS / Reality / XHTTP, Trojan), OpenVPN (TCP + HTTP proxy), Hysteria2 (UDP), DNS tunnel (dnstt) + V2Ray,
 # web panel with users, subscriptions, data and device limits, Telegram alerts, backups, 2FA, and a terminal menu.
 # Run as root on Ubuntu or Debian:  bash install.sh   (running it again updates ReXUI and keeps users and settings)
 # https://github.com/chaliraza777/ReXUI · License: GPL-3.0 · (c) 2026 Ali (chaliraza777)
@@ -8,23 +8,24 @@ set -e
 trap 'echo -e "\n\033[1;31mERROR: failed at line $LINENO\033[0m"' ERR
 [ "$EUID" -ne 0 ] && { echo "Please run as root"; exit 1; }
 SSH_PORT_DEF=22
-SSL_PORT=443; WS_PORT=8880; WSTLS_PORT=2083; UDPGW_PORT=7300; VWSTLS_PORT=8443; VTCP_PORT=2053; VWS_PORT=8080; REALITY_PORT=8444; TROJAN_PORT=2096
+SSL_PORT=443; WS_PORT=8880; WSTLS_PORT=2083; UDPGW_PORT=7300; VWSTLS_PORT=8443; VTCP_PORT=2053; VWS_PORT=8080; REALITY_PORT=8444; TROJAN_PORT=2096; OVPN1_PORT=1194; OVPN2_PORT=110; SQUID_PORT=3128; HY_PORT=443; HY_HOP=20000-30000; HYV=2.13.0; DNSTTV=v1.20240513.0
 LIB=/usr/local/lib/tunnel
 step(){ echo -e "\n\033[1;36m[$1/11]\033[0m $2"; }
-busy(){ if ss -tlnp | grep ":$1 " | grep -qv -e stunnel -e python3 -e xray; then echo "Port $1 is already in use:"; ss -tlnp | grep ":$1 "; exit 1; fi; }
+busy(){ if ss -tlnp | grep ":$1 " | grep -qv -e stunnel -e python3 -e xray -e squid -e openvpn; then echo "Port $1 is already in use:"; ss -tlnp | grep ":$1 "; exit 1; fi; }
 [ -f /etc/tunnel/config ] && . /etc/tunnel/config
 if [ -z "$PANEL_PORT" ]; then
   PANEL_PORT=$(shuf -i 20000-59999 -n1)
   while ss -tln | grep -q ":$PANEL_PORT "; do PANEL_PORT=$(shuf -i 20000-59999 -n1); done
 fi
 [ -n "$WEB_PATH" ] || WEB_PATH=$(tr -dc a-z0-9 </dev/urandom | head -c 10)
-for p in $SSL_PORT $WS_PORT $WSTLS_PORT $PANEL_PORT $VWSTLS_PORT $VTCP_PORT $VWS_PORT $REALITY_PORT $TROJAN_PORT; do busy $p; done
+for p in $SSL_PORT $WS_PORT $WSTLS_PORT $PANEL_PORT $VWSTLS_PORT $VTCP_PORT $VWS_PORT $REALITY_PORT $TROJAN_PORT $OVPN1_PORT $OVPN2_PORT $SQUID_PORT; do busy $p; done
 export DEBIAN_FRONTEND=noninteractive
 mkdir -p /etc/tunnel/cert $LIB
 
 step 1 "Packages"
 apt-get update -qq
-apt-get install -y -qq openssh-server stunnel4 fail2ban cmake build-essential git openssl curl cron python3 socat unzip iptables >/dev/null
+apt-get install -y -qq openssh-server stunnel4 fail2ban cmake build-essential git openssl curl cron python3 socat unzip iptables openvpn squid >/dev/null
+[ -c /dev/net/tun ] || echo -e "\033[1;33mWARNING: /dev/net/tun is missing. OpenVPN needs TUN: enable it in your VPS control panel (OpenVZ / LXC) or ask your provider.\033[0m"
 
 step 2 "SSH tuning"
 mkdir -p /etc/ssh/sshd_config.d
@@ -33,8 +34,8 @@ cat > /etc/ssh/sshd_config.d/00-tunnel.conf <<S
 PasswordAuthentication yes
 UseDNS no
 TCPKeepAlive yes
-ClientAliveInterval 30
-ClientAliveCountMax 3
+ClientAliveInterval 15
+ClientAliveCountMax 2
 AllowTcpForwarding yes
 Compression no
 S
@@ -55,6 +56,11 @@ VTCP_PORT=$VTCP_PORT
 VWS_PORT=$VWS_PORT
 REALITY_PORT=$REALITY_PORT
 TROJAN_PORT=$TROJAN_PORT
+OVPN1_PORT=$OVPN1_PORT
+OVPN2_PORT=$OVPN2_PORT
+SQUID_PORT=$SQUID_PORT
+HY_PORT=$HY_PORT
+HY_HOP=$HY_HOP
 S
 
 step 3 "SSL + WS TLS (stunnel4, 10-year certificate)"
@@ -188,8 +194,26 @@ net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_notsent_lowat=16384
 net.core.somaxconn=65535
+net.core.netdev_max_backlog=16384
 fs.file-max=1048576
 S
+# many users: bigger connection-tracking table (OpenVPN NAT), forget dead connections sooner
+modprobe nf_conntrack 2>/dev/null || true
+mkdir -p /etc/modules-load.d /etc/modprobe.d /etc/sysctl.d
+echo nf_conntrack > /etc/modules-load.d/rexui-conntrack.conf
+echo "options nf_conntrack hashsize=65536" > /etc/modprobe.d/rexui-conntrack.conf
+[ -w /sys/module/nf_conntrack/parameters/hashsize ] && echo 65536 > /sys/module/nf_conntrack/parameters/hashsize 2>/dev/null || true
+cat > /etc/sysctl.d/99-rexui-conntrack.conf <<S
+net.netfilter.nf_conntrack_max=262144
+net.netfilter.nf_conntrack_tcp_timeout_established=7200
+net.netfilter.nf_conntrack_tcp_timeout_time_wait=30
+net.netfilter.nf_conntrack_udp_timeout=30
+net.netfilter.nf_conntrack_udp_timeout_stream=120
+S
+# keep system logs small
+mkdir -p /etc/systemd/journald.conf.d
+printf '[Journal]\nSystemMaxUse=200M\nRuntimeMaxUse=100M\n' > /etc/systemd/journald.conf.d/rexui.conf
+systemctl restart systemd-journald 2>/dev/null || true
 sysctl --system >/dev/null 2>&1 || echo "WARNING: some sysctl settings were not applied"
 
 step 7 "Fail2ban"
@@ -237,12 +261,44 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 S
 
+echo "Hysteria2 v$HYV (UDP)"
+case $(uname -m) in x86_64) HA=amd64;; aarch64|arm64) HA=arm64;; *) HA=;; esac
+if [ -z "$HA" ]; then echo "WARNING: Hysteria2 is not available for $(uname -m), UDP users will not work"
+elif /usr/local/bin/hysteria version 2>/dev/null | grep -q "v$HYV"; then echo "Hysteria2 is up to date"
+else
+  HT=$(mktemp -d); HU="https://github.com/apernet/hysteria/releases/download/app/v$HYV"
+  if curl -fsSL --max-time 180 -o $HT/hy "$HU/hysteria-linux-$HA" && curl -fsSL --max-time 60 -o $HT/hashes.txt "$HU/hashes.txt"; then
+    HW=$(grep -E "[ /*]hysteria-linux-$HA\$" $HT/hashes.txt | awk '{print $1}' | head -1); HG=$(sha256sum $HT/hy | awk '{print $1}')
+    if [ -n "$HW" ] && [ "$HW" = "$HG" ]; then install -m 755 $HT/hy /usr/local/bin/hysteria; echo "Hysteria2 installed (checksum OK)"
+    else echo "WARNING: Hysteria2 checksum did not match, it was NOT installed"; fi
+  else echo "WARNING: Hysteria2 download failed, UDP users will not work until you run the installer again"; fi
+  rm -rf $HT
+fi
+
+echo "DNS tunnel (dnstt $DNSTTV)"
+if [ -x /usr/local/bin/dnstt-server ]; then echo "DNS tunnel is installed"
+else
+  case $(uname -m) in x86_64) GA=amd64;; aarch64|arm64) GA=arm64;; *) GA=;; esac
+  GT=$(mktemp -d)
+  GF=$( [ -n "$GA" ] && curl -fsSL --max-time 60 "https://go.dev/dl/?mode=json" 2>/dev/null | python3 -c "
+import json,sys
+for r in json.load(sys.stdin):
+    for f in r['files']:
+        if f['os']=='linux' and f['arch']=='$GA' and f['kind']=='archive': print(f['filename'],f['sha256']); sys.exit()" 2>/dev/null || true)
+  if [ -n "$GF" ] && echo "Building the DNS tunnel from source (1-3 minutes)..." && curl -fsSL --max-time 600 -o $GT/go.tgz "https://go.dev/dl/${GF% *}" && [ "$(sha256sum $GT/go.tgz | awk '{print $1}')" = "${GF#* }" ]; then
+    tar -C $GT -xzf $GT/go.tgz
+    if GOPATH=$GT/gp GOCACHE=$GT/gc GOBIN=/usr/local/bin GOTOOLCHAIN=local $GT/go/bin/go install "www.bamsoftware.com/git/dnstt.git/dnstt-server@$DNSTTV" >/dev/null 2>&1; then echo "DNS tunnel installed"
+    else echo "WARNING: the DNS tunnel could not be built, DNS users will not work until you run the installer again"; fi
+  else echo "WARNING: Go could not be downloaded or checked, the DNS tunnel was not installed"; fi
+  rm -rf $GT
+fi
+
 step 9 "Web panel"
 mkdir -p /opt/tunnel-panel
 cat > /opt/tunnel-panel/panel.py <<'PANELPY'
 #!/usr/bin/env python3
 # ReXUI panel: one user = SSH + Xray (VLESS), subscription, GB limit, device limit, monthly reset, online/kick, backup/restore
-import os,sys,re,json,time,hmac,hashlib,secrets,ssl,shutil,socket,subprocess as sp,threading,datetime,pwd,platform,uuid,base64,html,http.server
+import os,sys,re,json,time,hmac,hashlib,secrets,ssl,shutil,socket,subprocess as sp,threading,datetime,pwd,platform,uuid,base64,html,http.server,urllib.request
 from urllib.parse import quote
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
 T='/etc/tunnel'; CONF=T+'/config'; LOGIN=T+'/panel.json'; UDB=T+'/users.json'; SETF=T+'/settings.json'; OLDDB='/etc/tunnel-users'
@@ -324,7 +380,7 @@ def sload():
     s={'addr':'','sni':'','host':'','path':'/vless','rsni':'www.microsoft.com','rpriv':'','rpub':'','rsid':'',
        'btorrent':True,'bads':False,'warp':'off','wsites':'geosite:google,geosite:openai,geosite:netflix',
        'b25':True,'autodel':0,'tgtoken':'','tgchat':'','brand':'','tagline':'','accent':'blue',
-       'health':True,'report':False,'rhour':9,'tgbackup':False,'reboot':'off','rbday':0,'rbtime':'04:00','announce':'','cname':'{user}-{proto}','flag':'','autoclean':True,'rports':{},'fsite':'off','ftitle':'','xauto':False,'ddns_dom':'','ddns_tok':''}
+       'health':True,'report':False,'rhour':9,'tgbackup':False,'reboot':'off','rbday':0,'rbtime':'04:00','announce':'','cname':'{user}-{proto}','flag':'','autoclean':True,'rports':{},'fsite':'off','ftitle':'','xauto':False,'ddns_dom':'','ddns_tok':'','ovhost':'','dns_ns':'','hy_bw':0}
     try: s.update({k:v for k,v in json.loads(rd(SETF)).items() if k in s})
     except Exception: pass
     return s
@@ -524,23 +580,26 @@ def auto_delete():
     if gone:
         log('auto delete:',gone); xray_apply(); tg_send('ReXUI: deleted %d expired user(s): %s'%(len(gone),', '.join(gone)))
 def bulk(d):
-    a=str(d.get('action','')); sc=str(d.get('scope','active')); names=d.get('names')
-    if a not in ('days','reset','disable','enable','delete') or sc not in ('active','all'): raise Err('bad request')
+    a=str(d.get('action','')); sc=str(d.get('scope','active')); names=d.get('names'); bk=d.get('kind')
+    if a not in ('days','reset','disable','enable','delete','dev') or sc not in ('active','all'): raise Err('bad request')
     if names is not None:
         if not isinstance(names,list) or not names or len(names)>5000: raise Err('Select at least one user')
         names={str(x) for x in names}
-    elif a not in ('days','reset'): raise Err('bad request')
-    days=ival(d,'days',1,3650,1) if a=='days' else 0; why=textval(d.get('reason'),200,'Reason') if a=='disable' else ''; n=0; gone=[]
+    elif a not in ('days','reset','dev'): raise Err('bad request')
+    days=ival(d,'days',1,3650,1) if a=='days' else 0; dv=ival(d,'dev',0,100,2) if a=='dev' else 0; why=textval(d.get('reason'),200,'Reason') if a=='disable' else ''; n=0; gone=[]
     with UL:
         us=uload()
         for u in us:
             if names is not None:
                 if u['name'] not in names: continue
             elif sc=='active' and ustate(u)!='active': continue
+            if names is None and bk in ('v2ray','ssh') and kind(u) not in (bk,'both'): continue
+            if names is None and bk in ('ovpn','hy2','dns') and kind(u)!=bk: continue
             if a=='days':
                 if u['exp']=='never' and not u.get('fdays'): continue
                 add_days(u,days)
             elif a=='reset': u['up']=u['down']=0
+            elif a=='dev': u['dev']=dv
             elif a=='disable': u['en']=False; u['reason']=why
             elif a=='enable': u['en']=True; u['reason']=''
             elif a=='delete': rmuser(u['name']); gone.append(u['name'])
@@ -592,10 +651,21 @@ UL=threading.RLock(); NAME=re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}')
 def uload():
     try: return json.loads(rd(UDB)) or []
     except Exception: return []
-def usave(us): wjson(UDB,us)
-def newu(n,pw,e,lim=0.0,sni='',host='',dev=1,rday=0):
+def usave(us):
+    tmp=UDB+'.tmp'
+    with open(tmp,'w') as f: json.dump(us,f,separators=(',',':'))
+    os.chmod(tmp,0o600); os.replace(tmp,UDB)
+KINDS=('v2ray','ssh','both','ovpn','hy2','dns')
+def kind(u): return u.get('kind') or 'both'
+def hasx(u): return kind(u) in ('v2ray','both')
+def hassh(u): return kind(u) in ('ssh','both')
+def kindval(v):
+    k=str(v or 'both')
+    if k not in KINDS: raise Err('Unknown user type')
+    return k
+def newu(n,pw,e,lim=0.0,sni='',host='',dev=2,rday=0):
     return {'name':n,'pw':pw,'uuid':str(uuid.uuid4()),'exp':e,'lim':lim,'up':0,'down':0,'sni':sni,'host':host,
-            'en':True,'lk':False,'sub':secrets.token_hex(16),'created':today(),'dev':dev,'rday':rday,'lreset':today()[:7],'note':'','hist':{},'trial':False,'expts':0,'fdays':0,'reason':'','rtarget':'','rsni':''}
+            'en':True,'lk':False,'sub':secrets.token_hex(16),'created':today(),'dev':dev,'rday':rday,'lreset':today()[:7],'note':'','hist':{},'trial':False,'expts':0,'fdays':0,'reason':'','rtarget':'','rsni':'','kind':'both','ovs':''}
 def noteval(d):
     t=re.sub(r'[\x00-\x09\x0b-\x1f\x7f]','',str(d.get('note','') or '')).strip()
     if len(t)>500: raise Err('Note is too long (max 500 characters)')
@@ -649,7 +719,7 @@ def add_days(u,days):
     else:
         b=max(today(),u['exp']); u['exp']=(datetime.date.fromisoformat(b)+datetime.timedelta(days=days)).isoformat()
     setexp(u['name'],u['exp'])
-def mkuser(us,n,p,e,lim=0.0,sni='',host='',dev=1,rday=0,note='',**kw):
+def mkuser(us,n,p,e,lim=0.0,sni='',host='',dev=2,rday=0,note='',**kw):
     if not NAME.fullmatch(n) or n.isdigit(): raise Err('Username can use letters, numbers, _ . - (max 32, no spaces)')
     if any(x['name']==n for x in us): raise Err('This user already exists')
     try:
@@ -663,8 +733,9 @@ def mkuser(us,n,p,e,lim=0.0,sni='',host='',dev=1,rday=0,note='',**kw):
     run('chpasswd',inp='%s:%s\n'%(n,p))
     b=newu(n,p,e,lim,sni,host,dev,rday); b['note']=note; b.update(kw); us.append(b); setexp(n,e); return b
 def rmuser(n):
-    run('pkill','-KILL','-u',n); time.sleep(.3); run('userdel','-r',n); IPSEEN.pop(n,None)
-def trial_new():
+    ov_forget(n); ov_kill(n); hy_kick(n); run('pkill','-KILL','-u',n); time.sleep(.3); run('userdel','-r',n); IPSEEN.pop(n,None)
+def trial_new(d=None):
+    k=kindval((d or {}).get('kind','both'))
     with UL:
         us=uload(); names={x['name'] for x in us}
         for _ in range(50):
@@ -673,7 +744,7 @@ def trial_new():
             try: pwd.getpwnam(n); continue
             except KeyError: break
         ts=time.time()+86400
-        b=mkuser(us,n,secrets.token_urlsafe(6),datetime.date.fromtimestamp(ts).isoformat(),2.0,dev=1,note='Trial account',trial=True,expts=ts)
+        b=mkuser(us,n,secrets.token_urlsafe(6),datetime.date.fromtimestamp(ts).isoformat(),2.0,dev=2,note='Trial account',trial=True,expts=ts,kind=k)
         usave(us)
     enforce(); xray_apply(); ssh_rules(True); return {'ok':1,'name':b['name']}
 def trial_cleanup():
@@ -684,12 +755,12 @@ def trial_cleanup():
             if u.get('trial') and ustate(u) in ('expired','limit'): rmuser(u['name']); gone.append(u['name'])
         if gone: usave([u for u in us if u['name'] not in gone])
     if gone: log('trial ended:',gone); xray_apply(); tg_send('ReXUI: trial ended and deleted: %s'%', '.join(gone))
-CSVF=['name','password','expiry','data_limit_gb','used_gb','devices','reset_day','sni','host','note','created','status','reality_target','reality_sni']
+CSVF=['name','type','password','expiry','data_limit_gb','used_gb','devices','reset_day','sni','host','note','created','status','reality_target','reality_sni']
 def csv_export():
     import csv,io
     o=io.StringIO(); w=csv.writer(o); w.writerow(CSVF)
     for u in uload():
-        w.writerow([u['name'],u['pw'],('first-use+%d'%u['fdays']) if u.get('fdays') else u['exp'],u['lim'] or 0,round((u['up']+u['down'])/GB,3),u.get('dev',0),u.get('rday',0),
+        w.writerow([u['name'],kind(u),u['pw'],('first-use+%d'%u['fdays']) if u.get('fdays') else u['exp'],u['lim'] or 0,round((u['up']+u['down'])/GB,3),u.get('dev',0),u.get('rday',0),
                     u['sni'],u['host'],u.get('note',''),u.get('created',''),ustate(u),u.get('rtarget',''),u.get('rsni','')])
     return o.getvalue().encode()
 def csv_import(d):
@@ -720,7 +791,8 @@ def csv_import(d):
                     if not lo<=v<=hi: raise Err('%s must be between %g and %g'%(k,lo,hi))
                     return v
                 lim=num('data_limit_gb',0,100000); dev=num('devices',0,100,int); rday=num('reset_day',0,28,int); used=num('used_gb',0,1e7)
-                b=mkuser(us,n,r.get('password') or secrets.token_urlsafe(8),e,lim,hostok(r.get('sni'),'SNI'),hostok(r.get('host'),'Host'),dev,rday,noteval(r),fdays=fd,rtarget=rtc(r.get('reality_target','')),rsni=rsni_val(r.get('reality_sni')))
+                k_=kindval(r.get('type') or 'both')
+                b=mkuser(us,n,r.get('password') or secrets.token_urlsafe(8),e,lim,hostok(r.get('sni'),'SNI'),hostok(r.get('host'),'Host'),dev,rday,noteval(r),fdays=fd,rtarget=rtc(r.get('reality_target','')),rsni=rsni_val(r.get('reality_sni')),kind=k_)
                 b['down']=int(used*GB); ok.append(n)
             except Err as x: bad.append('Row %d (%s): %s'%(i,n or 'no name',x))
         usave(us)
@@ -730,11 +802,13 @@ def uapi(a,d):
     with UL:
         us=uload(); u=next((x for x in us if x['name']==n),None)
         if a=='add':
-            p=str(d.get('pw','')); pwok(p); days=ival(d,'days',0,3650); lim=fval(d,'lim',0,100000)
-            dev=ival(d,'dev',0,100,1); rday=ival(d,'rday',0,28,0); first=bool(d.get('first')) and days>0
+            k=kindval(d.get('kind','both')); p=str(d.get('pw',''))
+            if k in ('v2ray','ovpn','dns') and not p: p=secrets.token_urlsafe(9)
+            pwok(p); days=ival(d,'days',0,3650); lim=fval(d,'lim',0,100000)
+            dev=ival(d,'dev',0,100,2); rday=ival(d,'rday',0,28,0); first=bool(d.get('first')) and days>0
             sni=hostok(d.get('sni'),'SNI'); host=hostok(d.get('host'),'Host'); note=noteval(d); rt=rtarget_val(d.get('rtarget')); rs=rsni_val(d.get('rsni'))
             e='never' if days==0 or first else (datetime.date.today()+datetime.timedelta(days=days)).isoformat()
-            mkuser(us,n,p,e,lim,sni,host,dev,rday,note,fdays=days if first else 0,rtarget=rt,rsni=rs); usave(us)
+            mkuser(us,n,p,e,lim,sni,host,dev,rday,note,fdays=days if first else 0,rtarget=rt,rsni=rs,kind=k); usave(us)
         elif not u: raise Err('User not found')
         elif a=='edit':
             p=str(d.get('pw','')); days=ival(d,'days',0,3650,0); lim=fval(d,'lim',0,100000)
@@ -745,12 +819,16 @@ def uapi(a,d):
             if 'rsni' in d: u['rsni']=rsni_val(d.get('rsni'))
             if days: add_days(u,days)
             if p: run('chpasswd',inp='%s:%s\n'%(n,p)); u['pw']=p
+            if p and hashy(u): hy_kick(n)
             if rday!=u.get('rday',0): u['lreset']=today()[:7]
             u['lim'],u['sni'],u['host'],u['dev'],u['rday']=lim,sni,host,dev,rday
             if 'note' in d: u['note']=noteval(d)
             usave(us)
         elif a=='newsub': u['sub']=secrets.token_hex(16); usave(us)
         elif a=='newuuid': u['uuid']=str(uuid.uuid4()); usave(us)
+        elif a=='newcert':
+            if not hasov(u): raise Err('This user has no OpenVPN account')
+            ov_forget(n); u['ovs']=''; usave(us); ov_allow(us); ov_kill(n); return {'ok':1}
         elif a=='toggle':
             u['en']=not u.get('en',True); u['reason']='' if u['en'] else textval(d.get('reason'),200,'Reason'); usave(us)
         elif a=='reset': u['up']=u['down']=0; usave(us)
@@ -777,6 +855,11 @@ def cert_fp():
         FP.clear(); FP[pem]=hashlib.sha256(ssl.PEM_cert_to_DER_cert(m[0])).hexdigest() if m else ''
     return FP[pem]
 def links(u):
+    if hashy(u): return hy_links(u)
+    if hasdns(u): return dns_links(u)
+    if not hasx(u): return []
+    return _links(u)
+def _links(u):
     s=sload(); ci=certinfo(); a=pub_addr(s); cn=ci['name'] if ci['src']!='self-signed' else ''
     sni=u.get('sni') or s['sni'] or ci['domain']; host=u.get('host') or s['host'] or ci['domain'] or a
     ok=bool(cn) and bool(sni) and (sni==cn or (cn.startswith('*.') and sni.endswith(cn[1:])))
@@ -802,8 +885,8 @@ def detail(n):
     s=sload(); ci=certinfo(); a=pub_addr(s)
     return {'name':u['name'],'pw':u['pw'],'uuid':u['uuid'],'exp':u['exp'],'lim':u['lim'],'used':u['up']+u['down'],'up':u['up'],'down':u['down'],
             'sni':u['sni'],'host':u['host'],'rtarget':u.get('rtarget',''),'rsni_u':u.get('rsni',''),'rt':ureal(u,s)[0],'rport':rport(ureal(u,s)[0],s),'st':ustate(u),'created':u.get('created',''),'dev':u.get('dev',0),'rday':u.get('rday',0),
-            'note':u.get('note',''),'hist':hist30(u),'fdays':u.get('fdays',0),'trial':u.get('trial',False),'expts':u.get('expts',0),'reason':u.get('reason',''),
-            'ssh':sessions().get(u['name'],0),'ips':xips(u['name']),'sub':sub_url(u),'links':[{'name':k,'url':v} for k,v in links(u)],
+            'note':u.get('note',''),'hist':hist30(u),'fdays':u.get('fdays',0),'trial':u.get('trial',False),'expts':u.get('expts',0),'reason':u.get('reason',''),'kind':kind(u),
+            'ssh':sessions().get(u['name'],0),'ips':xips_on(u['name']),'ovpn':ov_info(u),'hy2':hy_info(u),'dns':dns_info(u),'sub':sub_url(u),'links':[{'name':k,'url':v} for k,v in links(u)],
             'addr':a,'whost':u['host'] or s['host'] or ci['domain'] or a,'path':s['path'],'rsni':s['rsni'],
             'plaindomain':bool((s['addr'] and re.search('[a-z]',s['addr'])) or ci['domain']),
             'ports':{k:str(P(k,d)) for k,d in (('SSH_PORT',22),('SSL_PORT',443),('WS_PORT',8880),('WSTLS_PORT',2083),('UDPGW_PORT',7300),
@@ -852,7 +935,57 @@ def purge():
         run(f,'-w','-F','REXUI_SMTP'); run(f,'-w','-X','REXUI_SMTP')
 
 # ---------- Xray ----------
-XLOCK=threading.Lock(); XHASH=['']; XBAD=['','']; XACT={}
+XLOCK=threading.Lock(); XHASH=['']; XBAD=['','']; XACT={}; XCUR=[None,'']
+def xskel(cfg):
+    c=json.loads(json.dumps(cfg))
+    for i in c['inbounds']: i.get('settings',{}).pop('clients',None)
+    return json.dumps(c,sort_keys=True)
+def xclients(cfg):
+    return {i['tag']:{x['email']:json.dumps(x,sort_keys=True) for x in i.get('settings',{}).get('clients',[])} for i in cfg['inbounds']}
+def xray_live(old,new,ch):
+    """Apply a change that only adds, removes or edits users through the Xray API, so nobody is disconnected.
+    Returns False when a restart is needed (other settings changed, Xray not running, or the API failed)."""
+    if not old or XCUR[1]!=ch or xskel(old)!=xskel(new): return False
+    if run('systemctl','is-active','--quiet','xray').returncode: return False
+    oc,nc=xclients(old),xclients(new); rm={}; add={}
+    for t in nc:
+        o,n=oc.get(t,{}),nc[t]
+        r=[e for e in o if e not in n or o[e]!=n[e]]; a=[e for e in n if e not in o or o[e]!=n[e]]
+        if r: rm[t]=r
+        if a: add[t]=a
+    if not rm and not add: return True
+    for t,es in rm.items():
+        for i in range(0,len(es),200):
+            part=es[i:i+200]; out=run(XBIN,'api','rmu','-s',XAPI,'-tag='+t,*part,t=30)
+            m=re.search(r'Removed (\d+) user',out.stdout+out.stderr)
+            if not m or int(m[1])!=len(part): log('xray live remove failed on',t,(out.stdout+out.stderr).strip()[-200:]); return False
+    if add:
+        ibs=[]
+        for i in new['inbounds']:
+            if i['tag'] in add:
+                x=json.loads(json.dumps(i)); keep=set(add[i['tag']])
+                x['settings']['clients']=[c for c in x['settings']['clients'] if c['email'] in keep]; x.pop('streamSettings',None); x.pop('sniffing',None)
+                x['settings'].pop('fallbacks',None); ibs.append(x)
+        f=XD+'/live-users.json'
+        with open(f,'w') as fh: json.dump({'inbounds':ibs},fh)
+        os.chmod(f,0o600)
+        try: out=run(XBIN,'api','adu','-s',XAPI,f,t=60)
+        finally:
+            try: os.remove(f)
+            except OSError: pass
+        m=re.search(r'Added (\d+) user',out.stdout+out.stderr)
+        if not m or int(m[1])!=sum(len(v) for v in add.values()): log('xray live add failed:',(out.stdout+out.stderr).strip()[-200:]); return False
+    log('xray users updated live: +%d -%d'%(sum(len(v) for v in add.values()),sum(len(v) for v in rm.values())))
+    # users that are gone completely (disabled, ended, deleted): close their open connections, like a restart used to
+    gone={e for t in oc for e in oc[t]}-{e for t in nc for e in nc[t]}
+    if gone:
+        now=time.time()
+        for n in gone:
+            for ip in list(IPSEEN.get(n,{})):
+                if not shared(ip,n): BANS[ip]=max(BANS.get(ip,0),now+60)
+            IPSEEN.pop(n,None)
+        bans_apply()
+    return True
 def xstats():
     d={}
     if not os.path.exists(XBIN): return d
@@ -870,7 +1003,7 @@ def xstats():
 def xray_apply(force=False):
     if not os.path.exists(XBIN): return
     with XLOCK:
-        s=reality_keys(); act=[u for u in uload() if ustate(u)=='active']; cl=[{'id':u['uuid'],'email':u['name'],'level':0} for u in act]
+        s=reality_keys(); act=[u for u in uload() if ustate(u)=='active' and hasx(u)]; cl=[{'id':u['uuid'],'email':u['name'],'level':0} for u in act]
         c,k=CD+'/xray.crt',CD+'/xray.key'
         if not (os.path.exists(c) and os.path.exists(k)): c,k=XSC,XSK
         cert={'certificates':[{'certificateFile':XD+'/cert.crt','keyFile':XD+'/key.key'}]}
@@ -887,6 +1020,10 @@ def xray_apply(force=False):
              ib('vless-xhttp',P('VWS_PORT',8080),'xhttp',False),
              {'tag':'trojan-tls','listen':'0.0.0.0','port':P('TROJAN_PORT',2096),'protocol':'trojan','settings':dict({'clients':[{'password':u['uuid'],'email':u['name'],'level':0} for u in act]},**({'fallbacks':[{'dest':FBP}]} if s['fsite']!='off' else {})),
               'streamSettings':{'network':'tcp','security':'tls','tlsSettings':dict(cert,**({'alpn':['http/1.1']} if s['fsite']!='off' else {}))},'sniffing':sn}]
+        if dns_on():
+            dl=[u for u in uload() if hasdns(u) and ustate(u)=='active']
+            ibs.append({'tag':'vless-dns','listen':'127.0.0.1','port':DNSUP,'protocol':'vless','settings':{'clients':[{'id':u['uuid'],'email':u['name'],'level':0} for u in dl],'decryption':'none'},
+                        'streamSettings':{'network':'tcp','security':'none'},'sniffing':sn})
         if s['rpriv']:
             dt=s['rsni']+':443'; grp={dt:[]}
             for u in act:
@@ -897,7 +1034,7 @@ def xray_apply(force=False):
                             'settings':{'clients':[{'id':u['uuid'],'email':u['name'],'level':0,'flow':'xtls-rprx-vision'} for u,_ in L],'decryption':'none'},
                             'streamSettings':{'network':'tcp','security':'reality','realitySettings':{'target':t,'serverNames':names,'privateKey':s['rpriv'],'shortIds':[s['rsid']]}},
                             'sniffing':sn})
-        obs=[{'protocol':'freedom','tag':'direct'},{'protocol':'blackhole','tag':'block'}]; rules=[]
+        obs=[{'protocol':'freedom','tag':'direct','streamSettings':{'sockopt':{'domainStrategy':'UseIPv4v6'}}},{'protocol':'blackhole','tag':'block'}]; rules=[]
         if s['btorrent']: rules.append({'type':'field','protocol':['bittorrent'],'outboundTag':'block'})
         if s['bads'] and geo_ok(): rules.append({'type':'field','domain':['geosite:category-ads-all'],'outboundTag':'block'})
         w=None
@@ -913,8 +1050,9 @@ def xray_apply(force=False):
                 dm=[x for x in ws if not x.startswith('geoip:')]; ip=[x for x in ws if x.startswith('geoip:')]
                 if dm: rules.append({'type':'field','domain':dm,'outboundTag':'warp'})
                 if ip: rules.append({'type':'field','ip':ip,'outboundTag':'warp'})
-        cfg={'log':{'loglevel':'warning','access':XLOG},'api':{'tag':'api','listen':XAPI,'services':['StatsService']},'stats':{},
-             'policy':{'levels':{'0':{'statsUserUplink':True,'statsUserDownlink':True}},'system':{'statsInboundUplink':True,'statsInboundDownlink':True}},
+        cfg={'log':{'loglevel':'warning','access':XLOG},'api':{'tag':'api','listen':XAPI,'services':['StatsService','HandlerService']},'stats':{},
+             'policy':{'levels':{'0':{'statsUserUplink':True,'statsUserDownlink':True,'handshake':4,'connIdle':150,'uplinkOnly':2,'downlinkOnly':4}},'system':{'statsInboundUplink':True,'statsInboundDownlink':True}},
+             'dns':{'servers':['1.1.1.1','8.8.8.8','localhost'],'queryStrategy':'UseIP','disableCache':False},
              'inbounds':ibs,'outbounds':obs,'routing':{'domainStrategy':'AsIs','rules':rules}}
         txt=json.dumps(cfg,indent=1); h=hashlib.sha256((txt+rd(c)+rd(k)).encode()).hexdigest()
         if h==XHASH[0] and not force: return
@@ -937,32 +1075,52 @@ def xray_apply(force=False):
             XBAD[0],XBAD[1]=h,msg; return msg
         try: os.chown(XLOG,nu,g); os.chmod(XLOG,0o640)
         except OSError: pass
-        collect(); os.replace(tmp,XD+'/config.json'); run('systemctl','restart','xray'); XHASH[0]=h
-        log('xray config updated, active users:',len(cl))
+        ch=hashlib.sha256((rd(c)+rd(k)).encode()).hexdigest(); live=False
+        if not force:
+            try: live=xray_live(XCUR[0],cfg,ch)
+            except Exception as e: log('xray live update error:',repr(e))
+        os.replace(tmp,XD+'/config.json')
+        if not live: collect(); run('systemctl','restart','xray'); log('xray config updated, active users:',len(cl))
+        XHASH[0]=h; XCUR[0]=cfg; XCUR[1]=ch
 
 # ---------- collect + enforce ----------
 def hist30(u):
     h=u.get('hist') or {}; t=datetime.date.today()
     return [[d,h.get(d,[0,0])[0],h.get(d,[0,0])[1]] for d in ((t-datetime.timedelta(days=i)).isoformat() for i in range(29,-1,-1))]
-def collect():
+UACC={}; ULAST=[0.0]
+def collect(flush=False):
     ssh_collect(); xs=xstats(); xstats_in(); now=time.time()
+    try: ov_poll()
+    except Exception as e: log('openvpn poll:',repr(e))
+    try: hy_poll()
+    except Exception as e: log('hysteria poll:',repr(e))
+    op=dict(OVPEND); OVPEND.clear(); hp_=dict(HYPEND); HYPEND.clear()
+    tr_proto('Hysteria2',sum(v['up'] for v in hp_.values()),sum(v['down'] for v in hp_.values()))
     tr_proto('SSH',sum(v['up'] for v in PEND.values()),sum(v['down'] for v in PEND.values()))
+    tr_proto('OpenVPN',sum(v['up'] for v in op.values()),sum(v['down'] for v in op.values()))
     for n,v in xs.items():
         if v['up'] or v['down']: XACT[n]=now
-    if not (xs or PEND): return
+    # add up usage in memory and write users.json at most every 30 s (many users = big file)
+    for uid,v in list(PEND.items()):
+        try: n=pwd.getpwuid(uid).pw_name
+        except (KeyError,TypeError): continue
+        if v['up'] or v['down']: e=UACC.setdefault(n,[0,0]); e[0]+=v['up']; e[1]+=v['down']
+    PEND.clear()
+    for src in (xs,op,hp_):
+        for n,v in src.items():
+            if v and (v['up'] or v['down']): e=UACC.setdefault(n,[0,0]); e[0]+=v['up']; e[1]+=v['down']
+    if not UACC or (not flush and now-ULAST[0]<30): return
     with UL:
-        us=uload(); ch=False
+        acc=dict(UACC); UACC.clear(); ULAST[0]=now; us=uload(); ch=False
         for u in us:
-            x=xs.get(u['name']); uid=uidof(u['name']); y=PEND.pop(uid,None) if uid else None
-            for z in (x,y):
-                if z and (z['up'] or z['down']):
-                    u['up']+=z['up']; u['down']+=z['down']; ch=True
-                    if u.get('fdays'):
-                        u['exp']=(datetime.date.today()+datetime.timedelta(days=u['fdays'])).isoformat(); u['fdays']=0; setexp(u['name'],u['exp']); log('first use, expiry starts:',u['name'],u['exp'])
-                    h=u.setdefault('hist',{}); e=h.setdefault(today(),[0,0]); e[0]+=z['up']; e[1]+=z['down']
-                    if len(h)>31:
-                        for k in sorted(h)[:-31]: h.pop(k)
-        PEND.clear()
+            z=acc.get(u['name'])
+            if not z: continue
+            u['up']+=z[0]; u['down']+=z[1]; ch=True
+            if u.get('fdays'):
+                u['exp']=(datetime.date.today()+datetime.timedelta(days=u['fdays'])).isoformat(); u['fdays']=0; setexp(u['name'],u['exp']); log('first use, expiry starts:',u['name'],u['exp'])
+            h=u.setdefault('hist',{}); e=h.setdefault(today(),[0,0]); e[0]+=z[0]; e[1]+=z[1]
+            if len(h)>31:
+                for k in sorted(h)[:-31]: h.pop(k)
         if ch: usave(us)
 def enforce():
     with UL:
@@ -971,7 +1129,7 @@ def enforce():
             rd_=int(u.get('rday',0) or 0)
             if rd_ and int(t[8:10])>=rd_ and u.get('lreset')!=ym:
                 u['up']=u['down']=0; u['lreset']=ym; ch=True; log('monthly reset:',u['name'])
-            act=ustate(u,t)=='active'
+            act=ustate(u,t)=='active' and hassh(u)
             if not act and not u.get('lk'):
                 run('usermod','-L',u['name']); run('pkill','-KILL','-u',u['name']); u['lk']=True; ch=True
             elif act and u.get('lk'):
@@ -980,8 +1138,12 @@ def enforce():
                 ss=ss if ss is not None else sessions()
                 if ss.get(u['name']): run('pkill','-KILL','-u',u['name'])
         if ch: usave(us)
+        try: ov_enforce(us)
+        except Exception as e: log('openvpn enforce:',repr(e))
+        try: hy_enforce(us)
+        except Exception as e: log('hysteria enforce:',repr(e))
 # ---------- Xray access log: online IPs, device limit ----------
-IPSEEN={}; XOFF=[None]; WIN=120; BANS={}; BANSET=[None]; BANT=120
+IPSEEN={}; XOFF=[None]; WIN=60; BANS={}; BANSET=[None]; BANT=120
 LRE=re.compile(r'from (?:tcp:|udp:)?\[?([0-9A-Fa-f.:]+?)\]?:\d+ accepted .*?email: (\S+)')
 def xlog_read():
     try: sz=os.path.getsize(XLOG)
@@ -1003,11 +1165,14 @@ def xlog_read():
     for n in list(IPSEEN):
         IPSEEN[n]={ip:v for ip,v in IPSEEN[n].items() if v[1]>=cut}
         if not IPSEEN[n]: IPSEEN.pop(n)
+XONW=35
+def xon(n): return time.time()-XACT.get(n,0)<XONW
+def xips_on(n): return xips(n) if xon(n) else []
 def xips(n):
     now=time.time(); return [{'ip':ip,'ago':int(now-v[1]),'ban':int(max(0,BANS.get(ip,0)-now)),'shared':shared(ip,n)} for ip,v in sorted(IPSEEN.get(n,{}).items(),key=lambda x:x[1][0])]
 def bans_apply():
     now=time.time()
-    for ip in [ip for ip,t in BANS.items() if t<=now]: BANS.pop(ip)
+    for ip in [ip for ip,t in BANS.items() if t<=now or ip.startswith('127.') or ip=='::1']: BANS.pop(ip)
     cur=tuple(sorted(BANS))
     if cur==BANSET[0] or not shutil.which('iptables'): return
     ports=','.join(str(P(k,d)) for k,d in (('VWSTLS_PORT',8443),('VTCP_PORT',2053),('VWS_PORT',8080),('REALITY_PORT',8444),('TROJAN_PORT',2096)))
@@ -1020,7 +1185,7 @@ def bans_apply():
     BANSET[0]=cur
 def shared(ip,n): return any(ip in v for m,v in IPSEEN.items() if m!=n)
 def kick(n):
-    run('pkill','-KILL','-u',n); now=time.time()
+    ov_kill(n); hy_kick(n); run('pkill','-KILL','-u',n); now=time.time()
     for ip in list(IPSEEN.get(n,{})):
         if not shared(ip,n): BANS[ip]=max(BANS.get(ip,0),now+60)
     IPSEEN.pop(n,None); bans_apply()
@@ -1035,16 +1200,511 @@ def devices():
         for ip,_ in ips[lim:]:
             if BANS.get(ip,0)<now and not shared(ip,n): BANS[ip]=now+BANT; log('device limit: blocked',ip,'for',n)
     bans_apply()
+    try: ov_devices(uload())
+    except Exception as e: log('openvpn devices:',repr(e))
 def online():
     ss=sessions(); out=[]
     for u in uload():
-        n=u['name']; ips=xips(n); s=ss.get(n,0)
-        if s or ips: out.append({'name':n,'ssh':s,'ips':ips,'dev':u.get('dev',0)})
+        n=u['name']; ips=xips_on(n); s=ss.get(n,0); ov=[{'ip':c['ip'],'since':c['since']} for c in OVON.get(n,[])]; hy=HYON.get(n,0)
+        if s or ips or ov or hy: out.append({'name':n,'ssh':s,'ips':ips,'ov':ov,'hy':hy,'dev':u.get('dev',0),'kind':kind(u)})
     return out
+
+# ---------- OpenVPN (TCP, two ports) + Squid HTTP proxy ----------
+OVD=T+'/ovpn'; OVCL=OVD+'/clients'; OVBIN='/usr/sbin/openvpn'; SQC='/etc/squid/squid.conf'
+OVNET='10.8.0.0/15'; OVL=threading.Lock(); OVPREV={}; OVPEND={}; OVON={}; OVINIT=set(); OVVER=[None]
+OVBASE=('rx1194','rx110')
+def ovcores(): return max(1,min(os.cpu_count() or 1,4))
+def ovi():
+    """(instance, listen port, subnet, public port). One OpenVPN process uses one CPU core, so each public port gets
+    one instance per core (up to 4). Extra instances listen on internal ports and get new connections from iptables."""
+    out=[]; i=0
+    for base,key,dflt in (('rx1194','OVPN1_PORT',1194),('rx110','OVPN2_PORT',110)):
+        pp=P(key,dflt)
+        for j in range(ovcores()):
+            out.append((base if j==0 else '%s-%d'%(base,j),pp if j==0 else 19400+i,'10.%d.%d.0'%(8+i//16,(i%16)*16),pp)); i+=1
+    return out
+def ovports():
+    r=[]
+    for _,_,_,pp in ovi():
+        if pp not in r: r.append(pp)
+    return r
+def ov_on(): return os.path.exists(OVBIN) or bool(shutil.which('openvpn'))
+def hasov(u): return kind(u)=='ovpn'
+OVCNF='''[req]
+distinguished_name=dn
+prompt=no
+[dn]
+CN=ReXUI
+[ca]
+basicConstraints=critical,CA:TRUE
+keyUsage=critical,keyCertSign,cRLSign
+subjectKeyIdentifier=hash
+[srv]
+basicConstraints=CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+[cli]
+basicConstraints=CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=clientAuth
+'''
+OVUP='''#!/bin/sh
+# ReXUI: fair share per user on the tunnel (CAKE per client address), fq_codel when CAKE is missing
+tc qdisc replace dev "$1" root cake besteffort dsthost 2>/dev/null || tc qdisc replace dev "$1" root fq_codel 2>/dev/null
+exit 0
+'''
+OVCONNECT='''#!/bin/sh
+# ReXUI: only users in the allow list (name + certificate serial) can connect
+exec awk -v c="$common_name" -v s="$tls_serial_0" '$1==c && (s=="" || $2==s){f=1} END{exit !f}' %s/allow
+'''%OVD
+def ossl(*a):
+    r=run('openssl',*a,t=90)
+    if r.returncode: raise Err('openssl: '+((r.stderr or '').strip().splitlines() or ['failed'])[-1][-160:])
+    return r
+def ov_issue(cn,ext,crt,key,days=3650):
+    sr=secrets.randbits(62)|(1<<62); tmp=OVD+'/tmp-'+secrets.token_hex(4)
+    try:
+        ossl('req','-new','-newkey','rsa:2048','-nodes','-keyout',tmp+'.key','-out',tmp+'.csr','-subj','/CN='+cn,'-config',OVD+'/openssl.cnf')
+        ossl('x509','-req','-in',tmp+'.csr','-CA',OVD+'/ca.crt','-CAkey',OVD+'/ca.key','-set_serial',str(sr),'-days',str(days),'-sha256',
+             '-extfile',OVD+'/openssl.cnf','-extensions',ext,'-out',tmp+'.crt')
+        os.chmod(tmp+'.key',0o600); os.replace(tmp+'.key',key); os.replace(tmp+'.crt',crt)
+    finally:
+        for x in ('.key','.csr','.crt'):
+            try: os.remove(tmp+x)
+            except OSError: pass
+    return sr
+def ov_tc():
+    k=secrets.token_hex(256)
+    return '#\n# 2048 bit OpenVPN static key\n#\n-----BEGIN OpenVPN Static key V1-----\n'+'\n'.join(k[i:i+32] for i in range(0,512,32))+'\n-----END OpenVPN Static key V1-----\n'
+def ov_pki():
+    os.makedirs(OVCL,exist_ok=True); os.chmod(OVD,0o700)
+    if rd(OVD+'/openssl.cnf')!=OVCNF:
+        with open(OVD+'/openssl.cnf','w') as f: f.write(OVCNF)
+    if not (os.path.exists(OVD+'/ca.crt') and os.path.exists(OVD+'/ca.key')):
+        for f in os.listdir(OVCL): os.remove(os.path.join(OVCL,f))
+        for f in ('server.crt','server.key'):
+            try: os.remove(OVD+'/'+f)
+            except OSError: pass
+        ossl('req','-x509','-newkey','rsa:2048','-nodes','-keyout',OVD+'/ca.key','-out',OVD+'/ca.crt','-days','7300','-sha256',
+             '-subj','/CN=ReXUI CA '+secrets.token_hex(3),'-config',OVD+'/openssl.cnf','-extensions','ca')
+        os.chmod(OVD+'/ca.key',0o600); log('openvpn: new certificate authority')
+    if not (os.path.exists(OVD+'/server.crt') and os.path.exists(OVD+'/server.key')):
+        ov_issue('ReXUI server','srv',OVD+'/server.crt',OVD+'/server.key',7300)
+    if not os.path.exists(OVD+'/tc.key'):
+        with open(OVD+'/tc.key','w') as f: f.write(ov_tc())
+        os.chmod(OVD+'/tc.key',0o600)
+def ov_ver():
+    if OVVER[0] is None:
+        m=re.search(r'OpenVPN (\d+)\.(\d+)',run(shutil.which('openvpn') or OVBIN,'--version',t=10).stdout or '')
+        OVVER[0]=(int(m[1]),int(m[2])) if m else (2,5)
+    return OVVER[0]
+def ov_server_conf(name,port,net,idx=0):
+    v=ov_ver()
+    L=['# ReXUI OpenVPN (%s). Made by the panel, changes are overwritten.'%name,'port %d'%port,'proto tcp','dev rxtun%d'%idx,'dev-type tun','topology subnet',
+       'server %s 255.255.240.0'%net,'ca %s/ca.crt'%OVD,'cert %s/server.crt'%OVD,'key %s/server.key'%OVD,'dh none','tls-crypt %s/tc.key'%OVD,
+       'tls-version-min 1.2','remote-cert-tls client',
+       'push "redirect-gateway def1 bypass-dhcp"','push "dhcp-option DNS 1.1.1.1"','push "dhcp-option DNS 8.8.8.8"',
+       'keepalive 10 30','duplicate-cn','persist-key','persist-tun','tcp-nodelay','max-clients 2000','txqueuelen 1000','sndbuf 0','rcvbuf 0',
+       'script-security 2','client-connect %s/connect.sh'%OVD,'up %s/up.sh'%OVD,'management %s/%s.sock unix'%(OVD,name),'verb 2','mute 20']
+    if v>=(2,5): L+=['data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305:AES-256-CBC','data-ciphers-fallback AES-256-CBC']
+    else: L+=['cipher AES-256-GCM','ncp-ciphers AES-256-GCM:AES-128-GCM']
+    return '\n'.join(L)+'\n'
+def ov_squid_conf():
+    return '\n'.join(['# ReXUI: HTTP proxy only for OpenVPN (CONNECT to this server, OpenVPN ports). Made by the panel.',
+        'http_port %d'%P('SQUID_PORT',3128),'acl rx_dst dst 127.0.0.1','acl rx_ports port '+' '.join(map(str,ovports())),'acl CONNECT method CONNECT',
+        'http_access allow CONNECT rx_dst rx_ports','http_access deny all','via off','forwarded_for delete','cache deny all',
+        'access_log none','cache_log /dev/null','max_filedescriptors 65535','client_idle_pconn_timeout 1 minute','coredump_dir /var/spool/squid','visible_hostname rexui','shutdown_lifetime 1 seconds'])+'\n'
+def wtext(path,txt,mode=0o600):
+    if rd(path)==txt: return False
+    with open(path+'.tmp','w') as f: f.write(txt)
+    os.chmod(path+'.tmp',mode); os.replace(path+'.tmp',path); return True
+def ov_setup(restart=True):
+    """Certificates, server configs, connect script, allow list and Squid config. Restarts only what changed."""
+    if not ov_on(): return
+    with OVL:
+        ov_pki()
+        wtext(OVD+'/connect.sh',OVCONNECT,0o700); wtext(OVD+'/up.sh',OVUP,0o700)
+        if not os.path.exists(OVD+'/allow'): wtext(OVD+'/allow','')
+        names=set()
+        for idx,(name,port,net,_) in enumerate(ovi()):
+            names.add(name); new=not os.path.exists(OVD+'/'+name+'.conf')
+            if wtext(OVD+'/'+name+'.conf',ov_server_conf(name,port,net,idx)) and restart:
+                if name in OVBASE or not new: run('systemctl','restart','rexui-ovpn@'+name)
+            if name not in OVBASE and restart and (new or run('systemctl','is-active','--quiet','rexui-ovpn@'+name).returncode):
+                run('systemctl','enable','--now','rexui-ovpn@'+name)
+        for f in os.listdir(OVD):
+            m=re.fullmatch(r'(rx(?:1194|110)-\d+)\.conf',f)
+            if m and m[1] not in names:
+                run('systemctl','disable','--now','rexui-ovpn@'+m[1]); os.remove(OVD+'/'+f)
+        if os.path.isdir('/etc/squid'):
+            if os.path.exists(SQC) and not os.path.exists(SQC+'.orig') and 'ReXUI' not in rd(SQC): shutil.copyfile(SQC,SQC+'.orig')
+            if wtext(SQC,ov_squid_conf(),0o644) and restart: run('systemctl','restart','squid')
+    ov_allow(); ov_net(True)
+def ov_net(force=False):
+    if not ov_on() or not shutil.which('iptables'): return
+    if not force and rd('/proc/sys/net/ipv4/ip_forward').strip()=='1' and run('iptables','-w','-C','FORWARD','-j','REXUI_FWD').returncode==0 and run('iptables','-w','-t','nat','-C','POSTROUTING','-j','REXUI_NAT').returncode==0: return
+    if rd('/proc/sys/net/ipv4/ip_forward').strip()!='1': run('sysctl','-qw','net.ipv4.ip_forward=1')
+    wtext('/etc/sysctl.d/99-rexui-ovpn.conf','net.ipv4.ip_forward=1\n',0o644)
+    i=lambda *a:run('iptables','-w',*a)
+    i('-N','REXUI_FWD'); i('-F','REXUI_FWD'); i('-t','nat','-N','REXUI_NAT'); i('-t','nat','-F','REXUI_NAT')
+    i('-A','REXUI_FWD','-s',OVNET,'-d',OVNET,'-j','DROP')
+    if sload()['b25']: i('-A','REXUI_FWD','-s',OVNET,'-p','tcp','-m','multiport','--dports','25,465,587','-j','REJECT')
+    i('-A','REXUI_FWD','-s',OVNET,'-p','tcp','--tcp-flags','SYN,RST','SYN','-j','TCPMSS','--clamp-mss-to-pmtu')
+    i('-A','REXUI_FWD','-s',OVNET,'-j','ACCEPT'); i('-A','REXUI_FWD','-d',OVNET,'-m','conntrack','--ctstate','RELATED,ESTABLISHED','-j','ACCEPT')
+    i('-t','nat','-A','REXUI_NAT','-s',OVNET,'!','-d',OVNET,'-j','MASQUERADE')
+    # spread new OpenVPN connections over the instances of each public port (one per CPU core)
+    i('-t','nat','-N','REXUI_OVLB'); i('-t','nat','-F','REXUI_OVLB'); i('-N','REXUI_OVIN'); i('-F','REXUI_OVIN')
+    grp={}
+    for name,lp,_,pp in ovi(): grp.setdefault(pp,[]).append(lp)
+    for pp,lps in grp.items():
+        k=len(lps)
+        for j in range(1,k):
+            i('-t','nat','-A','REXUI_OVLB','-p','tcp','-m','addrtype','--dst-type','LOCAL','--dport',str(pp),'-m','statistic','--mode','random',
+              '--probability','%.5f'%(1.0/(k-j+1)),'-j','REDIRECT','--to-ports',str(lps[j]))
+            i('-A','REXUI_OVIN','-p','tcp','--dport',str(lps[j]),'-m','conntrack','--ctstate','DNAT','-j','ACCEPT')
+    for ch_ in ('PREROUTING','OUTPUT'):
+        if i('-t','nat','-C',ch_,'-j','REXUI_OVLB').returncode: i('-t','nat','-I',ch_,'1','-j','REXUI_OVLB')
+    if i('-C','INPUT','-j','REXUI_OVIN').returncode: i('-I','INPUT','1','-j','REXUI_OVIN')
+    if i('-C','FORWARD','-j','REXUI_FWD').returncode: i('-I','FORWARD','1','-j','REXUI_FWD')
+    if i('-t','nat','-C','POSTROUTING','-j','REXUI_NAT').returncode: i('-t','nat','-I','POSTROUTING','1','-j','REXUI_NAT')
+def ov_net_purge():
+    i=lambda *a:run('iptables','-w',*a)
+    while i('-D','FORWARD','-j','REXUI_FWD').returncode==0: pass
+    while i('-t','nat','-D','POSTROUTING','-j','REXUI_NAT').returncode==0: pass
+    for ch_ in ('PREROUTING','OUTPUT'):
+        while i('-t','nat','-D',ch_,'-j','REXUI_OVLB').returncode==0: pass
+    while i('-D','INPUT','-j','REXUI_OVIN').returncode==0: pass
+    i('-t','nat','-F','REXUI_OVLB'); i('-t','nat','-X','REXUI_OVLB'); i('-F','REXUI_OVIN'); i('-X','REXUI_OVIN')
+    i('-F','REXUI_FWD'); i('-X','REXUI_FWD'); i('-t','nat','-F','REXUI_NAT'); i('-t','nat','-X','REXUI_NAT')
+def ov_cert(name):
+    """Make sure the user has a client certificate. Returns (cert, key)."""
+    if not ov_on(): raise Err('OpenVPN is not installed on this server. Run the installer again to add it.')
+    with UL:
+        us=uload(); u=next((x for x in us if x['name']==name),None)
+        if not u or not hasov(u): raise Err('This user has no OpenVPN account')
+        c,k=OVCL+'/'+name+'.crt',OVCL+'/'+name+'.key'
+        if not (u.get('ovs') and os.path.exists(c) and os.path.exists(k)):
+            with OVL: ov_pki(); u['ovs']=str(ov_issue(name,'cli',c,k))
+            usave(us); log('openvpn: certificate made for',name)
+    ov_allow(); return rd(c),rd(k)
+def ov_forget(name):
+    for x in ('.crt','.key'):
+        try: os.remove(OVCL+'/'+name+x)
+        except OSError: pass
+def ov_allow(us=None):
+    if not ov_on() or not os.path.isdir(OVD): return
+    us=us if us is not None else uload(); t=today()
+    txt=''.join('%s %s\n'%(u['name'],u['ovs']) for u in us if hasov(u) and u.get('ovs') and ustate(u,t)=='active')
+    with OVL: wtext(OVD+'/allow',txt)
+def ov_cmd(name,cmd):
+    """Send one command to the OpenVPN management socket and wait for its full reply.
+    'quit' must not be sent in the same write: OpenVPN drops the queued reply when it closes."""
+    p=OVD+'/'+name+'.sock'
+    if not os.path.exists(p): return ''
+    multi=cmd.startswith('status')
+    try:
+        s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.settimeout(4); s.connect(p); b=b''
+        while b'\n' not in b:
+            c=s.recv(4096)
+            if not c: break
+            b+=c
+        b=b.split(b'\n',1)[1] if b.startswith(b'>INFO') and b'\n' in b else b
+        s.sendall((cmd+'\n').encode())
+        while len(b)<(8<<20):
+            t=b.replace(b'\r',b'')
+            if multi and (t.startswith(b'END\n') or b'\nEND\n' in t): break
+            if not multi and re.search(rb'(^|\n)(SUCCESS|ERROR):[^\n]*\n',t): break
+            c=s.recv(65536)
+            if not c: break
+            b+=c
+        try: s.sendall(b'quit\n')
+        except OSError: pass
+        s.close(); return b.decode('utf-8','replace')
+    except OSError: return ''
+def ov_clients(name):
+    hdr=None; out=[]
+    for l in ov_cmd(name,'status 3').splitlines():
+        f=l.rstrip('\r').split('\t')
+        if len(f)>2 and f[0]=='HEADER' and f[1]=='CLIENT_LIST': hdr=f[2:]
+        elif f[0]=='CLIENT_LIST' and hdr:
+            r=dict(zip(hdr,f[1:]))
+            try: out.append({'name':r['Common Name'],'ip':r['Real Address'].rsplit(':',1)[0],'rx':int(r['Bytes Received']),'tx':int(r['Bytes Sent']),
+                             'since':int(r.get('Connected Since (time_t)') or 0),'cid':r.get('Client ID',''),'inst':name})
+            except (KeyError,ValueError): pass
+    return out
+def ov_poll():
+    if not ov_on(): return
+    on={}; seen=set()
+    for name,_,_,_ in ovi():
+        cl=ov_clients(name)
+        for c in cl:
+            k=(name,c['cid'],c['since']); seen.add(k); p=OVPREV.get(k)
+            if p is not None or name in OVINIT:
+                up,dn=c['rx']-(p[0] if p else 0),c['tx']-(p[1] if p else 0)
+                if up>0 or dn>0: e=OVPEND.setdefault(c['name'],{'up':0,'down':0}); e['up']+=max(0,up); e['down']+=max(0,dn)
+            OVPREV[k]=(c['rx'],c['tx']); on.setdefault(c['name'],[]).append(c)
+        if os.path.exists(OVD+'/'+name+'.sock'): OVINIT.add(name)
+    for k in [k for k in OVPREV if k not in seen]: OVPREV.pop(k)
+    OVON.clear(); OVON.update(on)
+def ov_kill(name,cid=None,inst=None):
+    for n,_,_,_ in ovi():
+        if inst and n!=inst: continue
+        ov_cmd(n,'client-kill %s'%cid if cid else 'kill %s'%name)
+def ov_enforce(us):
+    ov_allow(us); t=today()
+    for u in us:
+        n=u['name']
+        if OVON.get(n) and (not hasov(u) or ustate(u,t)!='active'): ov_kill(n); OVON.pop(n,None)
+    known={u['name'] for u in us}
+    for n in [n for n in OVON if n not in known]: ov_kill(n); OVON.pop(n,None)
+def ov_devices(us):
+    for u in us:
+        lim=int(u.get('dev',0) or 0); cl=OVON.get(u['name'],[])
+        if lim>0 and len(cl)>lim:
+            # keep the newest sessions: a reconnecting app leaves its old session behind until keepalive ends
+            for c in sorted(cl,key=lambda x:(x['since'],str(x['cid'])),reverse=True)[lim:]: ov_kill(u['name'],c['cid'],c['inst']); log('device limit: openvpn',u['name'],c['ip'])
+def ov_file(u,port,host,proxy):
+    s=sload(); a=pub_addr(s)
+    if port not in ovports(): raise Err('Unknown OpenVPN port')
+    host=hostok(host,'Host'); crt,key=ov_cert(u['name'])
+    L=['# %s OpenVPN · %s · TCP %d%s'%(s['brand'] or 'ReXUI',u['name'],port,' via HTTP proxy' if proxy else ''),'client','dev tun','proto tcp']
+    if proxy:
+        L+=['remote 127.0.0.1 %d'%port,'http-proxy %s %d'%(a,P('SQUID_PORT',3128))]
+        if host: L+=['http-proxy-option CUSTOM-HEADER Host %s'%host,'http-proxy-option CUSTOM-HEADER X-Online-Host %s'%host,'http-proxy-option CUSTOM-HEADER X-Forward-Host %s'%host]
+    else: L+=['remote %s %d'%(a,port)]
+    L+=['resolv-retry infinite','nobind','persist-key','persist-tun','remote-cert-tls server','cipher AES-256-GCM','connect-retry 3 10','verb 3',
+        '<ca>',rd(OVD+'/ca.crt').strip(),'</ca>','<cert>',re.search(r'-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----',crt)[0],'</cert>',
+        '<key>',key.strip(),'</key>','<tls-crypt>',rd(OVD+'/tc.key').strip(),'</tls-crypt>']
+    return ('\n'.join(L)+'\n').encode()
+def ov_args(q):
+    from urllib.parse import parse_qs
+    q=parse_qs(q); g=lambda k,d='':(q.get(k) or [d])[0]
+    try: port=int(g('port',str(ovports()[0])))
+    except ValueError: raise Err('Unknown OpenVPN port')
+    return port,g('host',sload()['ovhost']),g('proxy','1')!='0'
+def ov_set(d):
+    s=sload(); s['ovhost']=hostok(d.get('ovhost'),'Host'); wjson(SETF,s,0o600); return {'ok':1}
+PEMRE=re.compile(r'-----BEGIN [A-Z ]+-----[A-Za-z0-9+/=\s]+-----END [A-Z ]+-----\s*')
+OVFILES=('ca.crt','ca.key','server.crt','server.key','tc.key')
+def ov_backup():
+    if not all(os.path.exists(OVD+'/'+f) for f in OVFILES): return None
+    o={f:rd(OVD+'/'+f) for f in OVFILES}; cl={}
+    for u in uload():
+        c,k=OVCL+'/'+u['name']+'.crt',OVCL+'/'+u['name']+'.key'
+        if hasov(u) and u.get('ovs') and os.path.exists(c) and os.path.exists(k): cl[u['name']]=[rd(c),rd(k)]
+    o['clients']=cl; return o
+def ov_restore(o,names):
+    if not isinstance(o,dict): return
+    ok=lambda t:isinstance(t,str) and len(t)<20000 and PEMRE.fullmatch(t)
+    tc=o.get('tc.key','')
+    if not all(ok(o.get(f)) for f in OVFILES if f!='tc.key') or not (isinstance(tc,str) and 'OpenVPN Static key V1' in tc and len(tc)<4000): log('restore: openvpn certificates skipped'); return
+    with OVL:
+        os.makedirs(OVCL,exist_ok=True); os.chmod(OVD,0o700)
+        for f in OVFILES: wtext(OVD+'/'+f,o[f],0o644 if f.endswith('.crt') else 0o600)
+        for f in os.listdir(OVCL): os.remove(os.path.join(OVCL,f))
+        for n,v in (o.get('clients') or {}).items():
+            if n in names and isinstance(v,list) and len(v)==2 and ok(v[0]) and ok(v[1]):
+                wtext(OVCL+'/'+n+'.crt',v[0],0o644); wtext(OVCL+'/'+n+'.key',v[1])
+    if ov_on():
+        ov_setup(); run('systemctl','restart','rexui-ovpn@rx1194','rexui-ovpn@rx110')
+def ov_info(u):
+    if not hasov(u): return None
+    return {'on':ov_on(),'ports':ovports(),'proxy':P('SQUID_PORT',3128),'host':sload()['ovhost'],
+            'sess':[{'ip':c['ip'],'since':c['since'],'port':dict((n,pp) for n,_,_,pp in ovi()).get(c['inst'],0)} for c in OVON.get(u['name'],[])]}
+
+# ---------- Hysteria2 (UDP) ----------
+HYD=T+'/hy2'; HYBIN='/usr/local/bin/hysteria'; HYL=threading.Lock(); HYON={}; HYPEND={}; HYH=['']; HYHOPS=[None]
+HYAUTH=('127.0.0.1',10086); HYSTAT='127.0.0.1:10087'
+def hy_on(): return os.path.exists(HYBIN)
+def hashy(u): return kind(u)=='hy2'
+def hyport(): return P('HY_PORT',443)
+def hyhop():
+    v=str(E.get('HY_HOP','20000-30000') or '').strip()
+    m=re.fullmatch(r'(\d{1,5})-(\d{1,5})',v)
+    if not m or v=='0': return None
+    a,b=int(m[1]),int(m[2])
+    return (a,b) if 1<=a<b<=65535 and not a<=hyport()<=b else None
+def hy_secret(name):
+    p=HYD+'/'+name
+    v=rd(p).strip()
+    if not re.fullmatch(r'[0-9a-f]{32}',v):
+        v=secrets.token_hex(16); os.makedirs(HYD,exist_ok=True); os.chmod(HYD,0o700); wtext(p,v)
+    return v
+def hy_conf():
+    s=sload(); L=['# ReXUI Hysteria2. Made by the panel, changes are overwritten.','listen: :%d'%hyport(),
+       'tls:','  cert: %s/cert.crt'%HYD,'  key: %s/key.key'%HYD,'  sniGuard: disable',
+       'auth:','  type: http','  http:','    url: http://%s:%d/%s/auth'%(HYAUTH[0],HYAUTH[1],hy_secret('auth.token')),
+       'trafficStats:','  listen: %s'%HYSTAT,'  secret: %s'%hy_secret('stats.secret'),
+       *(['bandwidth:','  up: %d mbps'%int(s['hy_bw']),'  down: %d mbps'%int(s['hy_bw'])] if int(s.get('hy_bw') or 0)>0 else []),
+       'masquerade:','  type: string','  string:','    content: "404 page not found"','    statusCode: 404',
+       'acl:','  inline:']
+    L+=['    - reject(%s)'%x for x in ('127.0.0.0/8','10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','169.254.0.0/16','100.64.0.0/10','::1/128','fc00::/7','fe80::/10')]
+    if s['b25']: L+=['    - reject(all, tcp/25)','    - reject(all, tcp/465)','    - reject(all, tcp/587)']
+    L+=['    - direct(all)','outbounds:','  - name: direct','    type: direct','    direct:','      mode: 46']
+    return '\n'.join(L)+'\n'
+def hy_setup(restart=True):
+    """Config, certificate and port hopping. Restarts Hysteria only when something changed."""
+    if not hy_on(): return
+    with HYL:
+        os.makedirs(HYD,exist_ok=True); os.chmod(HYD,0o700)
+        c,k=CD+'/xray.crt',CD+'/xray.key'
+        if not (os.path.exists(c) and os.path.exists(k)): c,k=XSC,XSK
+        ch=wtext(HYD+'/cert.crt',rd(c),0o600)|wtext(HYD+'/key.key',rd(k),0o600)|wtext(HYD+'/config.yaml',hy_conf())
+        if ch and restart: run('systemctl','restart','rexui-hy2')
+    hy_hop(True)
+def hy_hop(force=False):
+    if not hy_on() or not shutil.which('iptables'): return
+    h=hyhop(); key=(h,hyport())
+    if not force and key==HYHOPS[0] and run('iptables','-w','-t','nat','-C','PREROUTING','-j','REXUI_HOP').returncode==0: return
+    for f in FAM:
+        i=lambda *a:run(f,'-w','-t','nat',*a)
+        i('-N','REXUI_HOP'); i('-F','REXUI_HOP')
+        if h: i('-A','REXUI_HOP','-p','udp','-m','addrtype','--dst-type','LOCAL','--dport','%d:%d'%h,'-j','REDIRECT','--to-ports',str(hyport()))
+        if i('-C','PREROUTING','-j','REXUI_HOP').returncode: i('-I','PREROUTING','1','-j','REXUI_HOP')
+    HYHOPS[0]=key
+def hy_purge():
+    for f in FAM:
+        i=lambda *a:run(f,'-w','-t','nat',*a)
+        while i('-D','PREROUTING','-j','REXUI_HOP').returncode==0: pass
+        i('-F','REXUI_HOP'); i('-X','REXUI_HOP')
+def hy_api(path,body=None):
+    req=urllib.request.Request('http://'+HYSTAT+path,data=json.dumps(body).encode() if body is not None else None,
+                               headers={'Authorization':hy_secret('stats.secret'),'Content-Type':'application/json'},method='POST' if body is not None else 'GET')
+    try:
+        with urllib.request.urlopen(req,timeout=4) as r: t=r.read()
+        return json.loads(t) if t.strip() else {}
+    except Exception: return None
+def hy_set(d):
+    try: v=int(float(d.get('hy_bw') or 0))
+    except (TypeError,ValueError): raise Err('Speed must be a number')
+    if not 0<=v<=10000: raise Err('Speed must be 0 to 10000 Mbps')
+    s=sload(); s['hy_bw']=v; wjson(SETF,s,0o600); hy_setup(); return {'ok':1}
+def hy_poll():
+    if not hy_on(): return
+    t=hy_api('/traffic?clear=1')
+    if isinstance(t,dict):
+        for n,v in t.items():
+            try: up,dn=int(v.get('tx',0)),int(v.get('rx',0))
+            except (TypeError,ValueError,AttributeError): continue
+            if up or dn: e=HYPEND.setdefault(n,{'up':0,'down':0}); e['up']+=up; e['down']+=dn
+    o=hy_api('/online')
+    HYON.clear()
+    if isinstance(o,dict): HYON.update({n:int(c) for n,c in o.items() if isinstance(c,int) and c>0})
+def hy_kick(*names):
+    if hy_on() and names: hy_api('/kick',list(names))
+def hy_enforce(us):
+    t=today(); bad=[u['name'] for u in us if HYON.get(u['name']) and (not hashy(u) or ustate(u,t)!='active')]
+    known={u['name'] for u in us}; bad+=[n for n in HYON if n not in known]
+    bad+=[u['name'] for u in us if u['name'] not in bad and int(u.get('dev',0) or 0) and HYON.get(u['name'],0)>int(u['dev'])]
+    if bad: hy_kick(*bad); [HYON.pop(n,None) for n in bad]
+HYFAIL={}
+def hy_auth(d):
+    """Called by Hysteria for every new client. auth = "username:password"."""
+    a=str(d.get('auth','')); ip=str(d.get('addr','')).rsplit(':',1)[0].strip('[]'); now=time.time()
+    f=HYFAIL.get(ip,[0,0])
+    if now>f[1]: f=[0,0]
+    if f[0]>=20: return {'ok':False}
+    n,_,p=a.partition(':')
+    u=next((x for x in uload() if x['name']==n),None)
+    ok=bool(u) and hashy(u) and bool(p) and hmac.compare_digest(p.encode(),str(u.get('pw','')).encode()) and ustate(u)=='active'
+    if not ok:
+        HYFAIL[ip]=[f[0]+1,now+600]; return {'ok':False}
+    lim=int(u.get('dev',0) or 0)
+    if lim and HYON.get(n,0)>=lim: return {'ok':False}
+    HYON[n]=HYON.get(n,0)+1
+    return {'ok':True,'id':n}
+class HyAuthH(BaseHTTPRequestHandler):
+    def log_message(self,*a): pass
+    def do_POST(self):
+        try:
+            if self.path!='/%s/auth'%hy_secret('auth.token'): raise ValueError
+            n=int(self.headers.get('Content-Length',0) or 0)
+            if n>4096: raise ValueError
+            r=hy_auth(json.loads(self.rfile.read(n) or b'{}'))
+        except Exception: r={'ok':False}
+        b=json.dumps(r).encode(); self.send_response(200 if r.get('ok') else 403)
+        self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)
+def hy_auth_server():
+    class S(ThreadingHTTPServer): daemon_threads=True; allow_reuse_address=True
+    try: S(HYAUTH,HyAuthH).serve_forever()
+    except OSError as e: log('hysteria auth server:',e)
+def hy_links(u,s=None):
+    s=s or sload(); ci=certinfo(); a=pub_addr(s); A='['+a+']' if ':' in a else a; cn=ci['name'] if ci['src']!='self-signed' else ''
+    sni=u.get('sni') or s['sni'] or ci['domain']
+    ok=bool(cn) and bool(sni) and (sni==cn or (cn.startswith('*.') and sni.endswith(cn[1:])))
+    q=('sni='+quote(sni)+'&' if sni else '')+('insecure=0' if ok else 'insecure=1'+('&pinSHA256='+cert_fp() if cert_fp() else ''))
+    au=quote(u['name'],safe='')+':'+quote(u['pw'],safe='')
+    out=[('Hysteria2','hysteria2://%s@%s:%d/?%s#%s'%(au,A,hyport(),q,cfgname(u,'hy2','Hysteria2',s)))]
+    h=hyhop()
+    if h: out.append(('Hysteria2 (port hopping)','hysteria2://%s@%s:%d,%d-%d/?%s#%s'%(au,A,hyport(),h[0],h[1],q,cfgname(u,'hy2-hop','Hysteria2 hop',s))))
+    return out
+def hy_info(u):
+    if not hashy(u): return None
+    h=hyhop(); return {'on':hy_on(),'port':hyport(),'hop':'%d-%d'%h if h else '','online':HYON.get(u['name'],0)}
+
+# ---------- DNS tunnel (dnstt) + V2Ray ----------
+DNSD=T+'/dns'; DNSBIN='/usr/local/bin/dnstt-server'; DNSUP=10809; DNSL=threading.Lock(); DNSRULE=[None]
+def dns_on(): return os.path.exists(DNSBIN)
+def hasdns(u): return kind(u)=='dns'
+def dns_ns(): return sload()['dns_ns']
+def dns_keys():
+    if not dns_on(): return ''
+    os.makedirs(DNSD,exist_ok=True); os.chmod(DNSD,0o700)
+    if not (os.path.exists(DNSD+'/server.key') and os.path.exists(DNSD+'/server.pub')):
+        r=run(DNSBIN,'-gen-key','-privkey-file',DNSD+'/server.key','-pubkey-file',DNSD+'/server.pub',t=30)
+        if r.returncode: log('dnstt key:',(r.stderr or '').strip()[-200:]); return ''
+        os.chmod(DNSD+'/server.key',0o600); log('dns tunnel: new key')
+    return rd(DNSD+'/server.pub').strip()
+def dns_setup(restart=True):
+    """Key, start script and the UDP 53 redirect. The tunnel runs only when a nameserver domain is set."""
+    if not dns_on(): return
+    with DNSL:
+        dns_keys(); ns=dns_ns()
+        sh='#!/bin/sh\n# ReXUI DNS tunnel. Made by the panel, changes are overwritten.\n'+(
+            'exec %s -udp :5300 -privkey-file %s/server.key %s 127.0.0.1:%d\n'%(DNSBIN,DNSD,ns,DNSUP) if ns else 'echo "Set the DNS tunnel domain in the panel (Settings -> DNS)"; exit 0\n')
+        ch=wtext(DNSD+'/run.sh',sh,0o700)
+        if restart and (ch or (ns and run('systemctl','is-active','--quiet','rexui-dns').returncode)):
+            run('systemctl','enable' if ns else 'disable','rexui-dns'); run('systemctl','restart' if ns else 'stop','rexui-dns')
+    dns_redirect(True)
+def dns_redirect(force=False):
+    if not dns_on() or not shutil.which('iptables'): return
+    on=bool(dns_ns())
+    if not force and on==DNSRULE[0] and (not on or run('iptables','-w','-t','nat','-C','PREROUTING','-j','REXUI_DNS').returncode==0): return
+    for f in FAM:
+        i=lambda *a:run(f,'-w','-t','nat',*a)
+        i('-N','REXUI_DNS'); i('-F','REXUI_DNS')
+        if on: i('-A','REXUI_DNS','-p','udp','-m','addrtype','--dst-type','LOCAL','--dport','53','-j','REDIRECT','--to-ports','5300')
+        if i('-C','PREROUTING','-j','REXUI_DNS').returncode: i('-I','PREROUTING','1','-j','REXUI_DNS')
+    DNSRULE[0]=on
+def dns_purge():
+    for f in FAM:
+        i=lambda *a:run(f,'-w','-t','nat',*a)
+        while i('-D','PREROUTING','-j','REXUI_DNS').returncode==0: pass
+        i('-F','REXUI_DNS'); i('-X','REXUI_DNS')
+def dns_set(d):
+    v=hostok(d.get('dns_ns'),'DNS tunnel domain')
+    if v and (v.count('.')<2 or re.fullmatch(r'[\d.]+',v)): raise Err('Use a subdomain of your own domain, like t.example.com')
+    if v.endswith('duckdns.org'): raise Err('DuckDNS cannot delegate a nameserver. Use your own domain.')
+    s=sload(); s['dns_ns']=v; wjson(SETF,s,0o600); dns_setup(); xray_apply(); return {'ok':1}
+def dns_links(u,s=None):
+    s=s or sload()
+    return [('V2Ray inside the DNS tunnel','vless://%s@127.0.0.1:%d?encryption=none&security=none&type=tcp#%s'%(u['uuid'],DNSUP,cfgname(u,'dns','DNS V2Ray',s)))]
+def dns_info(u=None):
+    if u is not None and not hasdns(u): return None
+    ns=dns_ns()
+    return {'on':dns_on(),'ns':ns,'pub':rd(DNSD+'/server.pub').strip() if dns_on() else '','ip':IPS['v4'] or local_ip(),
+            'nsh':'ns.'+ns.split('.',1)[1] if ns.count('.')>=2 else ''}
 
 # ---------- backup / restore ----------
 def backup_obj():
-    return {'app':'rexui','ver':2,'date':datetime.datetime.now().isoformat(timespec='seconds'),'users':uload(),'settings':sload()}
+    o={'app':'rexui','ver':2,'date':datetime.datetime.now().isoformat(timespec='seconds'),'users':uload(),'settings':sload()}
+    try:
+        ob=ov_backup()
+        if ob: o['ovpn']=ob
+    except Exception as e: log('backup openvpn:',repr(e))
+    k,pb=rd(DNSD+'/server.key').strip(),rd(DNSD+'/server.pub').strip()
+    if re.fullmatch(r'[0-9a-f]{64}',k) and re.fullmatch(r'[0-9a-f]{64}',pb): o['dns']={'key':k,'pub':pb}
+    return o
 def backup_file(path=None):
     os.makedirs(BKD,exist_ok=True); os.chmod(BKD,0o700)
     path=path or BKD+'/rexui-'+today()+'.json'; wjson(path,backup_obj())
@@ -1077,6 +1737,13 @@ def restore(o):
             run('chpasswd',inp='%s:%s\n'%(n,b['pw'] or secrets.token_urlsafe(12))); run('usermod','-U',n); setexp(n,b['exp'])
             us[n]=b
         usave(list(us.values()))
+    if o.get('ovpn'):
+        try: ov_restore(o['ovpn'],{b['name'] for b in good})
+        except Exception as e: log('restore openvpn:',repr(e))
+    dk=o.get('dns') if isinstance(o.get('dns'),dict) else {}
+    if re.fullmatch(r'[0-9a-f]{64}',str(dk.get('key',''))) and re.fullmatch(r'[0-9a-f]{64}',str(dk.get('pub',''))):
+        os.makedirs(DNSD,exist_ok=True); os.chmod(DNSD,0o700)
+        if wtext(DNSD+'/server.key',dk['key']+'\n')|wtext(DNSD+'/server.pub',dk['pub']+'\n',0o644) and dns_on() and dns_ns(): run('systemctl','restart','rexui-dns')
     enforce(); ssh_rules(True); xray_apply(True)
     return {'ok':1,'users':len(good)}
 BKLAST=['']
@@ -1099,24 +1766,28 @@ def auto_backup():
     if c.get('src')=='domain' and c.get('days') is not None and c['days']<=20: tg_send('⚠️ ReXUI: the Let\'s Encrypt certificate for %s did not renew automatically (%d days left). Run menu → SSL certificate → Renew on the server.'%(c['name'],c['days']))
     elif c.get('days') is not None and c['days'] in (30,14,7,3,1,0): tg_send('ReXUI: your certificate for %s expires in %d day(s).'%(c['name'],c['days']))
 
+def ustate_part(uh):
+    """Users for the live view. When nothing changed since the browser's last copy, send only the hash."""
+    L=users_list(); h=hashlib.sha1(json.dumps(L,sort_keys=True).encode()).hexdigest()[:16]
+    return {'uh':h} if uh and uh==h else {'users':L,'uh':h}
 def users_list():
     on=sessions(); now=time.time(); out=[]
     for u in uload():
-        st=ustate(u); nip=len(IPSEEN.get(u['name'],{})); o=on.get(u['name'],0)+(nip or (1 if now-XACT.get(u['name'],0)<30 else 0))
-        out.append({'name':u['name'],'exp':u['exp'],'lim':u['lim'],'used':u['up']+u['down'],'on':o,'dev':u.get('dev',0),'rday':u.get('rday',0),'note':u.get('note','')[:80],'created':u.get('created',''),'fdays':u.get('fdays',0),'trial':u.get('trial',False),'expts':u.get('expts',0),
+        st=ustate(u); nip=len(IPSEEN.get(u['name'],{})); o=on.get(u['name'],0)+len(OVON.get(u['name'],[]))+HYON.get(u['name'],0)+((nip or 1) if now-XACT.get(u['name'],0)<XONW else 0)
+        out.append({'name':u['name'],'exp':u['exp'],'lim':u['lim'],'used':u['up']+u['down'],'on':o,'dev':u.get('dev',0),'rday':u.get('rday',0),'note':u.get('note','')[:80],'created':u.get('created',''),'fdays':u.get('fdays',0),'trial':u.get('trial',False),'expts':u.get('expts',0),'kind':kind(u),
                     'st':'online' if st=='active' and o else st})
     return out
 
 # ---------- services ----------
-def listening():
+def listening(udp=False):
     s=set()
-    for f in ('/proc/net/tcp','/proc/net/tcp6'):
+    for f in (('/proc/net/udp','/proc/net/udp6') if udp else ('/proc/net/tcp','/proc/net/tcp6')):
         for l in rd(f).splitlines()[1:]:
             p=l.split()
-            if len(p)>3 and p[3]=='0A': s.add(int(p[1].rsplit(':',1)[1],16))
+            if len(p)>3 and p[3]==('07' if udp else '0A'): s.add(int(p[1].rsplit(':',1)[1],16))
     return s
-UNITS=['ssh','sshd','stunnel4','ws-ssh','badudp','fail2ban','xray']
-RESTART={'ssh','stunnel4','ws-ssh','badudp','fail2ban','xray'}
+UNITS=['ssh','sshd','stunnel4','ws-ssh','badudp','fail2ban','xray','rexui-ovpn@rx1194','rexui-ovpn@rx110','squid','rexui-hy2','rexui-dns']
+RESTART={'ssh','stunnel4','ws-ssh','badudp','fail2ban','xray','rexui-ovpn@rx1194','rexui-ovpn@rx110','squid','rexui-hy2','rexui-dns'}
 def units():
     st={}
     for blk in run('systemctl','show','-p','Id,LoadState,ActiveState',*[u+'.service' for u in UNITS]).stdout.strip().split('\n\n'):
@@ -1125,7 +1796,7 @@ def units():
         if i: st[i]=(kv.get('LoadState',''),kv.get('ActiveState',''))
     return st
 def services():
-    st=units(); ls=listening()
+    st=units(); ls=listening(); lu=listening(True)
     def s(u):
         for x in (['ssh','sshd'] if u=='ssh' else [u]):
             if x in st and st[x][0] not in ('not-found',''): return st[x]
@@ -1134,11 +1805,35 @@ def services():
     for name,u,port in [('SSH','ssh',P('SSH_PORT',22)),('SSL','stunnel4',P('SSL_PORT',443)),('SSH WS','ws-ssh',P('WS_PORT',8880)),
                         ('SSH WS TLS','stunnel4',P('WSTLS_PORT',2083)),('UDPGW','badudp',P('UDPGW_PORT',7300)),('Fail2ban','fail2ban',0),
                         ('VLESS XHTTP TLS','xray',P('VWSTLS_PORT',8443)),('VLESS TCP TLS','xray',P('VTCP_PORT',2053)),('VLESS XHTTP','xray',P('VWS_PORT',8080)),
-                        ('VLESS Reality','xray',P('REALITY_PORT',8444)),('Trojan TLS','xray',P('TROJAN_PORT',2096))]:
-        l,a=s(u)
-        v='NOT INSTALLED' if l=='not-found' else 'RUNNING' if a=='active' and (not port or port in ls) else 'FAILED' if a=='failed' else 'IDLE'
-        out.append({'name':name,'unit':u,'port':port,'st':v})
+                        ('VLESS Reality','xray',P('REALITY_PORT',8444)),('Trojan TLS','xray',P('TROJAN_PORT',2096)),
+                        ('OpenVPN TCP','rexui-ovpn@rx1194',P('OVPN1_PORT',1194)),('OpenVPN TCP','rexui-ovpn@rx110',P('OVPN2_PORT',110)),('HTTP proxy (Squid)','squid',P('SQUID_PORT',3128)),('Hysteria2 UDP','rexui-hy2',-hyport()),('DNS tunnel','rexui-dns',-5300)]:
+        l,a=s(u); up_=port<0; port=abs(port)
+        v='NOT INSTALLED' if l=='not-found' else 'RUNNING' if a=='active' and (not port or port in (lu if up_ else ls)) else 'FAILED' if a=='failed' else 'IDLE'
+        if (u.startswith('rexui-ovpn') or u=='squid') and not ov_on(): continue
+        if u=='rexui-hy2' and not hy_on(): continue
+        if u=='rexui-dns' and not dns_on(): continue
+        out.append({'name':name,'unit':u,'port':port,'st':v,'udp':up_})
     return out
+WDOG={}
+def watchdog():
+    """Restart a service that is enabled but not working (stopped, failed, or running without its port) for 2 checks in a row.
+    At most one restart per service every 10 minutes."""
+    now=time.time(); bad=set()
+    for x in services():
+        if x['st'] in ('IDLE','FAILED'): bad.add(x['unit'])
+    ls=listening()
+    for name,lp,_,_ in (ovi() if ov_on() else []):
+        if name not in OVBASE and lp not in ls: bad.add('rexui-ovpn@'+name)
+    if not bad:
+        WDOG.clear(); return
+    en=run('systemctl','is-enabled',*sorted(bad)).stdout.split()
+    for u,e in zip(sorted(bad),en+['']*len(bad)):
+        if e!='enabled' or (u=='rexui-dns' and not dns_ns()): WDOG.pop(u,None); continue
+        w=WDOG.setdefault(u,{'n':0,'last':0}); w['n']+=1
+        if w['n']>=2 and now-w['last']>600:
+            w['n']=0; w['last']=now; run('systemctl','restart',u); log('watchdog: restarted',u)
+            activity('server','Watchdog restarted %s (it was not working)'%u); tg_send('ReXUI watchdog: restarted %s on %s (it was not working)'%(u,INFO.get('host','server')))
+    for u in [u for u in WDOG if u not in bad]: WDOG.pop(u)
 def restart(u):
     if u not in RESTART: raise Err('This service cannot be restarted')
     r=run('systemctl','restart',u)
@@ -1195,7 +1890,10 @@ def monitor():
             S['cpu']=max(0,100*(1-(c[1]-pc[1])/max(1,c[0]-pc[0]))); S['rx'],S['tx']=max(0,(n[0]-pn[0])/dt),max(0,(n[1]-pn[1])/dt); S['rxt'],S['txt']=n
             tr_net(n[0]-pn[0],n[1]-pn[1]); pc,pn,pt=c,n,t; push('cpu',S['cpu']); push('rx',S['rx']); push('tx',S['tx']); sample(); tc,uc=conn(); push('tcp',tc); push('udp',uc)
             xlog_read()
-            if i%12==0: hm_tick(); health_check(); daily_jobs()
+            if i%12==0: hm_tick(); health_check(); daily_jobs(); ov_net(); hy_setup(); dns_redirect()
+            if i%12==6:
+                try: watchdog()
+                except Exception as e: log('watchdog:',repr(e))
             if i%120==0: hm_save(); tr_save()
             if i%360==1: threading.Thread(target=ddns_update,daemon=True).start()
             if i%2==0: collect(); enforce(); trial_cleanup(); xray_apply(); ssh_rules(); devices(); auto_backup()
@@ -1225,17 +1923,17 @@ def xinfo():
 def procinfo():
     st=rd('/proc/self/status'); m=re.search(r'VmRSS:\s+(\d+)',st); t=re.search(r'Threads:\s+(\d+)',st)
     return {'ram':int(m[1])*1024 if m else 0,'threads':int(t[1]) if t else 0}
-def state():
+def state(uh=''):
     m=mem(); du=shutil.disk_usage('/'); tc,uc=conn()
     return {'info':dict(INFO,uptime=float(rd('/proc/uptime','0').split()[0]),puptime=time.time()-START),
             'cpu':S['cpu'],'ram':[m['MemTotal']-m['MemAvailable'],m['MemTotal']],'swap':[m.get('SwapTotal',0)-m.get('SwapFree',0),m.get('SwapTotal',0)],
             'disk':[du.used,du.total],'rx':S['rx'],'tx':S['tx'],'rxt':S['rxt'],'txt':S['txt'],'hist':H,'tcp':tc,'udp':uc,
-            'ip':IPS,'stats':stats(),'tools':TOOLS,'fs':FS['err'],'xup':XUP,'ddns':dict(DDNS,dom=sload()['ddns_dom']),'stime':time.strftime('%H:%M %Z'),'svc':services(),'xray':xinfo(),'proc':procinfo(),'online':online(),'backups':sorted(os.listdir(BKD))[::-1] if os.path.isdir(BKD) else [],'users':users_list(),'cert':certinfo(),'set':dict({k:v for k,v in sload().items() if k not in ('rpriv','tgtoken','ddns_tok')},tgmask=mask(sload()['tgtoken']),ddmask=mask(sload()['ddns_tok'])),'tfa':bool(lread().get('totp')),'warp':warp_info(),'geo':geo_ok(),'addr':pub_addr(),'me':curuser(),
-            'port':E.get('PANEL_PORT',''),'path':E.get('WEB_PATH',''),'ports':dict({k:v for k,v in E.items() if k.endswith('_PORT')},REALITY_PORT=str(P('REALITY_PORT',8444)),TROJAN_PORT=str(P('TROJAN_PORT',2096)))}
+            'ip':IPS,'stats':stats(),'tools':TOOLS,'fs':FS['err'],'xup':XUP,'ddns':dict(DDNS,dom=sload()['ddns_dom']),'stime':time.strftime('%H:%M %Z'),'svc':services(),'xray':xinfo(),'proc':procinfo(),'online':online(),'backups':sorted(os.listdir(BKD))[::-1] if os.path.isdir(BKD) else [],**ustate_part(uh),'cert':certinfo(),'set':dict({k:v for k,v in sload().items() if k not in ('rpriv','tgtoken','ddns_tok')},tgmask=mask(sload()['tgtoken']),ddmask=mask(sload()['ddns_tok'])),'tfa':bool(lread().get('totp')),'warp':warp_info(),'geo':geo_ok(),'addr':pub_addr(),'me':curuser(),'ov':ov_on(),'hy':hy_on(),'dns':dns_info(),
+            'port':E.get('PANEL_PORT',''),'path':E.get('WEB_PATH',''),'ports':dict({k:v for k,v in E.items() if k.endswith('_PORT')},REALITY_PORT=str(P('REALITY_PORT',8444)),TROJAN_PORT=str(P('TROJAN_PORT',2096)),OVPN1_PORT=str(P('OVPN1_PORT',1194)),OVPN2_PORT=str(P('OVPN2_PORT',110)),SQUID_PORT=str(P('SQUID_PORT',3128)),HY_PORT=str(hyport()),HY_HOP='%d-%d'%hyhop() if hyhop() else '')}
 
 # ---------- stats: server traffic, protocols, top users ----------
 TRF=T+'/traffic.json'; TR={'days':{},'proto':{}}; TRL=threading.Lock()
-PNAME={'vless-xhttp-tls':'XHTTP TLS','vless-tcp-tls':'TCP TLS','vless-xhttp':'XHTTP','trojan-tls':'Trojan','vless-reality':'Reality'}
+PNAME={'vless-dns':'DNS V2Ray','vless-xhttp-tls':'XHTTP TLS','vless-tcp-tls':'TCP TLS','vless-xhttp':'XHTTP','trojan-tls':'Trojan','vless-reality':'Reality'}
 def tr_load():
     try:
         o=json.loads(rd(TRF)); TR['days']=o.get('days') or {}; TR['proto']=o.get('proto') or {}
@@ -1312,12 +2010,15 @@ def act_desc(r,d,res):
         if a=='toggle':
             u=next((x for x in uload() if x['name']==n),None)
             return 'Enabled user '+n if u and u.get('en',True) else 'Disabled user '+n+(' ('+str(d.get('reason'))[:60]+')' if d.get('reason') else '')
-        return {'newsub':'Made a new subscription link for %s','newuuid':'Made a new UUID for %s','add':'Added user %s','edit':'Edited user %s','reset':'Reset data usage of %s','kick':'Disconnected %s','del':'Deleted user %s'}.get(a,'')%n if a!='detail' else None
+        return {'newsub':'Made a new subscription link for %s','newuuid':'Made a new UUID for %s','newcert':'Made a new OpenVPN certificate for %s','add':'Added user %s','edit':'Edited user %s','reset':'Reset data usage of %s','kick':'Disconnected %s','del':'Deleted user %s'}.get(a,'')%n if a!='detail' else None
     if r=='/api/bulk':
-        a=d.get('action'); w={'days':'added %s days'%d.get('days'),'reset':'reset data usage','disable':'disabled','enable':'enabled','delete':'deleted'}.get(a,a)
+        a=d.get('action'); w={'days':'added %s days'%d.get('days'),'reset':'reset data usage','disable':'disabled','enable':'enabled','delete':'deleted','dev':'set device limit %s for'%d.get('dev')}.get(a,a)
         nm=d.get('names') if isinstance(d.get('names'),list) else None
         return 'Bulk: %s %s'%(w,', '.join(map(str,nm)) if nm and len(nm)<=5 else '%d user(s)'%res.get('count',0))
-    if r=='/api/trial': return 'Created trial user %s'%res.get('name','')
+    if r=='/api/trial': return 'Created %s trial user %s'%({'v2ray':'V2Ray','ssh':'SSH','ovpn':'OpenVPN','hy2':'UDP (Hysteria2)','dns':'DNS'}.get(d.get('kind'),''),res.get('name',''))
+    if r=='/api/ovpn-set': return 'Changed the OpenVPN default Host'
+    if r=='/api/dns-set': return 'Changed the DNS tunnel domain'
+    if r=='/api/hy-set': return 'Changed the UDP speed limit to %s Mbps'%(d.get('hy_bw') or 0)
     if r=='/api/csv-import': return 'Imported %d user(s) from CSV'%res.get('added',0)
     if r=='/api/restore': return 'Restored a backup (%d users)'%res.get('users',0)
     if r=='/api/svc': return 'Restarted %s'%d.get('unit','')
@@ -1562,6 +2263,7 @@ def sub_pw(tok,d,ip):
     with UL:
         us=uload(); u=next((x for x in us if hmac.compare_digest(x['sub'],tok)),None)
         if not u: raise Err('Account not found')
+        if not hassh(u): raise Err('This account has no password')
         if not hmac.compare_digest(old.encode(),str(u.get('pw','')).encode()):
             SPFAIL[tok]=[f[0]+1,time.time()+900]; time.sleep(1); raise Err('Your current password is wrong')
         if new==old: raise Err('The new password is the same as the old one')
@@ -1859,7 +2561,9 @@ class Hd(BaseHTTPRequestHandler):
     timeout=20; server_version='nginx'; sys_version=''
     def log_message(self,*a): pass
     def out(self,code,obj=None,body=None,ct='application/json',ck=None,hdr=()):
-        b=body if body is not None else json.dumps(obj).encode()
+        b=body if body is not None else json.dumps(obj,separators=(',',':')).encode(); hdr=tuple(hdr)
+        if len(b)>1500 and ct.startswith(('application/json','text/')) and 'gzip' in self.headers.get('Accept-Encoding',''):
+            import gzip; b=gzip.compress(b,5); hdr+=(('Content-Encoding','gzip'),('Vary','Accept-Encoding'))
         self.send_response(code)
         for k,v in (('Content-Type',ct),('Content-Length',str(len(b))),('Cache-Control','no-store'),('X-Frame-Options','DENY'),
                     ('X-Content-Type-Options','nosniff'),('Referrer-Policy','no-referrer'),('Content-Security-Policy',CSP))+tuple(hdr):
@@ -1878,12 +2582,17 @@ class Hd(BaseHTTPRequestHandler):
     def do_GET(self):
         p=self.path.split('?',1)[0]
         if p=='/qr.js': return self.out(200,body=rd(QRJS).encode(),ct='application/javascript; charset=utf-8')
+        m=re.fullmatch(r'/sub/([0-9a-f]{32})/ovpn',p)
+        if m:
+            u=next((x for x in uload() if hmac.compare_digest(x['sub'],m[1])),None)
+            if not u or not hasov(u): return self.nf()
+            return self.ovpn_out(u)
         m=re.fullmatch(r'/sub/([0-9a-f]{32})',p)
         if m:
             u=next((x for x in uload() if hmac.compare_digest(x['sub'],m[1])),None)
             if not u: return self.nf()
             if 'text/html' in self.headers.get('Accept','') and 'raw' not in self.path.split('?',1)[-1]:
-                d=detail(u['name']); keep=('name','pw','exp','lim','used','up','down','st','sub','links','addr','whost','ports','plaindomain','created','dev','hist','fdays','expts','reason')
+                d=detail(u['name']); keep=('name','pw','exp','lim','used','up','down','st','sub','links','addr','whost','ports','plaindomain','created','dev','hist','fdays','expts','reason','kind','ovpn','hy2','dns')
                 data=json.dumps(dict({k:d[k] for k in keep},announce=sload()['announce'],**brand())).replace('<','\\u003c').replace('>','\\u003e').replace('&','\\u0026')
                 return self.out(200,body=rd(UHTML).replace('__DATA__',data).encode(),ct='text/html; charset=utf-8')
             body=base64.b64encode('\n'.join(v for _,v in links(u)).encode())
@@ -1902,13 +2611,30 @@ class Hd(BaseHTTPRequestHandler):
         if r=='/api/users.csv':
             if not self.authed(): return self.out(401,{'e':'login'})
             return self.out(200,body=csv_export(),ct='text/csv; charset=utf-8',hdr=(('Content-Disposition','attachment; filename="rexui-users-%s.csv"'%today()),))
+        if r=='/api/ovpn':
+            if not self.authed(): return self.out(401,{'e':'login'})
+            from urllib.parse import parse_qs
+            n=(parse_qs(self.path.split('?',1)[-1] if '?' in self.path else '').get('name') or [''])[0]
+            u=next((x for x in uload() if x['name']==n),None)
+            if not u or not hasov(u): return self.out(404,{'e':'User not found'})
+            return self.ovpn_out(u)
         if r=='/api/hist': return self.out(200,HM) if self.authed() else self.out(401,{'e':'login'})
-        if r=='/api/state': return self.out(200,state()) if self.authed() else self.out(401,{'e':'login'})
+        if r=='/api/state':
+            if not self.authed(): return self.out(401,{'e':'login'})
+            m=re.search(r'[?&]uh=([0-9a-f]{16})',self.path); return self.out(200,state(m[1] if m else ''))
         if r=='/api/backup':
             if not self.authed(): return self.out(401,{'e':'login'})
             b=json.dumps(backup_obj(),indent=1).encode()
             return self.out(200,body=b,ct='application/json',hdr=(('Content-Disposition','attachment; filename="rexui-backup-%s.json"'%today()),))
         self.nf()
+    def ovpn_out(self,u):
+        try:
+            port,host,proxy=ov_args(self.path.split('?',1)[-1] if '?' in self.path else '')
+            if ustate(u)!='active': raise Err('This account is not active')
+            b=ov_file(u,port,host,proxy)
+        except Err as e: return self.out(400,body=str(e).encode(),ct='text/plain; charset=utf-8')
+        fn='%s-%d%s.ovpn'%(u['name'],port,'-proxy' if proxy else '')
+        return self.out(200,body=b,ct='application/x-openvpn-profile',hdr=(('Content-Disposition','attachment; filename="%s"'%fn),))
     def do_POST(self):
         try:
             m=re.fullmatch(r'/sub/([0-9a-f]{32})/pw',self.path.split('?',1)[0])
@@ -1971,12 +2697,12 @@ class Hd(BaseHTTPRequestHandler):
            '/api/reality-keys':new_reality,'/api/routing':lambda:routing_save(d),'/api/warp-reset':warp_reset,
            '/api/2fa/setup':lambda:tfa_setup(self.tok()),'/api/2fa/enable':lambda:tfa_enable(self.tok(),d.get('code')),'/api/2fa/disable':lambda:tfa_disable(d.get('code')),
            '/api/bulk':lambda:bulk(d),'/api/automation':lambda:automation_save(d),'/api/tg-test':lambda:tg_test(d),'/api/tg-chat':lambda:tg_findchat(d),
-           '/api/trial':trial_new,'/api/csv-import':lambda:csv_import(d),'/api/appearance':lambda:appearance_save(d),
+           '/api/trial':lambda:trial_new(d),'/api/csv-import':lambda:csv_import(d),'/api/appearance':lambda:appearance_save(d),
            '/api/logs':lambda:logs(self.tok()),'/api/session-kill':lambda:session_kill(self.tok(),d),'/api/tg-backup':tg_backup_now,
            '/api/fsite':lambda:fsite_save(d),'/api/rfind':lambda:rfind(d),'/api/rdefault':lambda:rdefault(d),'/api/xcheck':xcheck,'/api/xupdate':lambda:xup_bg(bool(d.get('force'))),
            '/api/xauto':lambda:xauto_save(d),'/api/ddns':lambda:ddns_save(d),'/api/panel-path':lambda:panel_path(d),'/api/logview':lambda:logview(d),
            '/api/maint':maint_info,'/api/cleanup':cleanup,'/api/swap':lambda:swap_set(d),'/api/autoclean':lambda:autoclean_save(d),
-           '/api/speedtest':speedtest,'/api/portcheck':portcheck,'/api/reboot':lambda:reboot_save(d),'/api/subpage':lambda:subpage_save(d)}.get(r)
+           '/api/speedtest':speedtest,'/api/portcheck':portcheck,'/api/reboot':lambda:reboot_save(d),'/api/subpage':lambda:subpage_save(d),'/api/ovpn-set':lambda:ov_set(d),'/api/dns-set':lambda:dns_set(d),'/api/hy-set':lambda:hy_set(d)}.get(r)
         if not f: raise Err('not found')
         return f()
 def ctx():
@@ -1995,7 +2721,16 @@ if __name__=='__main__':
         try: setlogin(a[1],a[2])
         except Err as e: print(e); sys.exit(1)
     elif a[0]=='user': print(curuser())
-    elif a[0]=='purge': purge()
+    elif a[0]=='purge': purge(); ov_net_purge(); hy_purge(); dns_purge()
+    elif a[0]=='dns-setup':
+        try: dns_setup(restart=False); print('DNS tunnel ready' if dns_on() else 'DNS tunnel is not installed')
+        except Exception as e: print('DNS tunnel setup failed:',e); sys.exit(1)
+    elif a[0]=='hy-setup':
+        try: hy_setup(restart=False); print('Hysteria2 ready' if hy_on() else 'Hysteria2 is not installed')
+        except Exception as e: print('Hysteria2 setup failed:',e); sys.exit(1)
+    elif a[0]=='ovpn-setup':
+        try: ov_setup(restart=False); print('OpenVPN ready' if ov_on() else 'OpenVPN is not installed')
+        except Exception as e: print('OpenVPN setup failed:',e); sys.exit(1)
     elif a[0]=='backup': print(backup_file(a[1] or None))
     elif a[0]=='restore':
         try: o=json.loads(rd(a[1]))
@@ -2006,7 +2741,18 @@ if __name__=='__main__':
         migrate(); static(); sample(); hm_load(); tr_load(); fsite_apply(); fetch_ips(); CTX=ctx()
         try: bans_apply(); smtp_apply(); enforce(); ssh_rules(True); xray_apply(True)
         except Exception as e: log('startup:',repr(e))
-        import signal; signal.signal(signal.SIGTERM,lambda *x:(hm_save(),tr_save(),os._exit(0)))
+        try: ov_setup()
+        except Exception as e: log('openvpn setup:',repr(e))
+        threading.Thread(target=hy_auth_server,daemon=True).start()
+        try: hy_setup()
+        except Exception as e: log('hysteria setup:',repr(e))
+        try: dns_setup()
+        except Exception as e: log('dns setup:',repr(e))
+        def bye(*x):
+            try: collect(True)
+            except Exception as e: log('save on stop:',repr(e))
+            hm_save(); tr_save(); os._exit(0)
+        import signal; signal.signal(signal.SIGTERM,bye)
         threading.Thread(target=monitor,daemon=True).start()
         Srv(('0.0.0.0',P('PANEL_PORT',0)),Hd).serve_forever()
     else: print('use: panel.py setlogin USER PASS | user | backup [FILE] | restore FILE | purge | run')
@@ -2067,7 +2813,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px soli
 .bar{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}.bar input{flex:1;min-width:180px}
 select{width:100%;background:var(--c);border:1px solid var(--l);border-radius:8px;padding:10px 12px}.ck{display:flex;align-items:center;gap:10px;color:var(--t);font-weight:500;margin:12px 0 0;cursor:pointer}.ck input{width:18px;height:18px;margin:0;accent-color:var(--a)}
 input,textarea{width:100%;background:var(--c);border:1px solid var(--l);border-radius:8px;padding:10px 12px}textarea{min-height:110px;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;resize:vertical}
-label{display:block;font-size:13px;color:var(--m);font-weight:600;margin:12px 0 5px}
+label{display:block;font-size:13px;color:var(--m);font-weight:600;margin:12px 0 5px}.ovf select,.ovf input:not([type=checkbox]){display:block;margin-top:6px;font-weight:400;color:var(--t)}
 .ul{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
 .uc{display:flex;flex-direction:column;gap:12px;text-align:left;width:100%;cursor:pointer;font:inherit;color:inherit}.uc:hover{border-color:var(--a)}
 .uh{display:flex;align-items:center;gap:11px}.uh b{font-size:15px;word-break:break-all}
@@ -2164,7 +2910,7 @@ button.rk{width:100%;border:0;border-bottom:1px solid var(--l);background:none;t
 #sbar b{font-size:13.5px;padding:0 4px}#sbar .sbs{width:1px;height:22px;background:var(--l)}#sbar [data-sa=x] svg{transform:rotate(45deg)}
 .uc{position:relative}.sck{display:grid;place-items:center;width:22px;height:22px;border-radius:7px;border:2px solid var(--l);color:transparent;flex:none;background:var(--c)}.sck.on{background:var(--a);border-color:var(--a);color:#fff}
 .uc.sel{border-color:var(--a);box-shadow:0 0 0 1px var(--a)}.ut tr.sel td{background:var(--a2)}
-#ul.pick{margin-bottom:90px}
+#ul.pick{margin-bottom:90px}.ulm{display:flex;justify-content:center;margin:14px 0}.ulm:empty{display:none}
 @media(max-width:860px){#sbar{bottom:calc(78px + env(safe-area-inset-bottom));flex-wrap:nowrap;overflow-x:auto;justify-content:flex-start;width:calc(100vw - 24px);scrollbar-width:none}#sbar::-webkit-scrollbar{display:none}#sbar>*{flex:none}#sbar [data-sa=x]{order:-1}#sbar .sbs{display:none}}
 .lvo{margin-top:10px;max-height:60vh;min-height:160px;overflow:auto;background:var(--c2);border:1px solid var(--l);border-radius:8px;padding:10px 12px;font:11.5px/1.55 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all;color:var(--t)}
 #sxo{position:fixed;inset:0;z-index:40;background:rgba(10,14,22,.55);display:flex;justify-content:center;align-items:flex-start;padding:10vh 12px 12px}#sxo[hidden]{display:none}
@@ -2188,6 +2934,9 @@ a.btn{text-decoration:none;color:var(--t)}a.btn.pri{color:#fff}
 .pwr{display:block;padding:12px 18px 16px;font-size:12px;color:var(--m);text-decoration:none}.pwr:hover b{color:var(--a)}.pwm{display:none;text-align:center;font-size:12px;color:var(--m);margin:18px 0 4px;text-decoration:none}@media(max-width:860px){.pwm{display:block}}
 .tri b,.pair b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tri>div,.pair>div{min-width:0}
 @media(min-width:861px) and (max-width:1100px){.kps{grid-template-columns:repeat(6,minmax(0,1fr))}.kps .kp{grid-column:span 2}.kps .kp:nth-child(n+4){grid-column:span 3}.tri b{font-size:17px}.pair b{font-size:19px}}
+.khd{margin-bottom:12px}.kts{display:inline-flex;gap:4px;padding:3px;background:var(--c);border:1px solid var(--l);border-radius:12px;max-width:100%;overflow-x:auto}
+.kts button{display:inline-flex;align-items:center;gap:7px;border:0;background:none;border-radius:9px;padding:8px 14px;font-size:14px;font-weight:600;color:var(--m);white-space:nowrap}.kts button b{font-size:12px;background:var(--c2);border-radius:10px;padding:1px 7px;color:var(--m)}
+.kts button.on{background:var(--a2);color:var(--a)}.kts button.on b{background:var(--a);color:#fff}
 </style><style id="acs"></style></head><body>
 <div id="lg" hidden><div class="lbg" aria-hidden="true"><i></i><i></i><i></i></div><form class="lcard" id="lf"><div class="lhead"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><p id="ltg">Sign in to the panel</p></div>
 <label for="lu">Username</label><div class="fi"><span data-i="user"></span><input id="lu" autocomplete="username" autocapitalize="none" spellcheck="false"></div>
@@ -2206,7 +2955,7 @@ a.btn{text-decoration:none;color:var(--t)}a.btn.pri{color:#fff}
 <script>
 const ls=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}};
 const $=s=>document.querySelector(s),X=s=>String(s??'').replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
-const P={gauge:'<path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4-6"/>',users:'<circle cx="9" cy="8" r="4"/><path d="M2 21c0-4 3-6 7-6s7 2 7 6M17 4a4 4 0 0 1 0 8M22 21c0-3-2-5-5-5.7"/>',user:'<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/>',gear:'<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/>',out:'<path d="M9 4H5v16h4M16 8l4 4-4 4M20 12H9"/>',up:'<path d="M12 19V5M6 11l6-6 6 6"/>',down:'<path d="M12 5v14M6 13l6 6 6-6"/>',cpu:'<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',ram:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18"/>',swap:'<path d="M4 8h16l-4-4M20 16H4l4 4"/>',disk:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M3 14h18M7 6.5h.01"/>',clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',panel:'<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h5"/>',globe:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',eye:'<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',eyeoff:'<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><path d="M3 3l18 18"/>',plus:'<path d="M12 5v14M5 12h14"/>',cal:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',key:'<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3"/>',lock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',unlock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/>',del:'<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>',dev:'<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',cert:'<rect x="3" y="4" width="18" height="13" rx="2"/><circle cx="12" cy="19" r="3"/><path d="M7 9h10M7 12h6"/>',refresh:'<path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5"/>',sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5"/>',moon:'<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',net:'<path d="M5 12a7 7 0 0 1 14 0M8.5 12a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="16" r="1.5"/>',shield:'<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/>',wifi:'<path d="M2 8.5a15 15 0 0 1 20 0M5 12a10 10 0 0 1 14 0M8.5 15.5a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1"/>',kick:'<circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/>',save:'<path d="M12 3v12M7 10l5 5 5-5M4 19h16"/>',upl:'<path d="M12 21V9M7 14l5-5 5 5M4 5h16"/>',chart:'<path d="M4 20V11M10 20V5M16 20v-6M21 20H3"/>',search:'<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/>',file:'<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>',grid:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',list:'<path d="M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01"/>',check:'<path d="M5 12l5 5 9-10"/>',palette:'<path d="M12 3a9 9 0 1 0 0 18c1.5 0 2-1 2-2s-1-1.5-1-2.5 1-1.5 2-1.5h2a4 4 0 0 0 4-4c0-4.4-4-8-9-8z"/><circle cx="7.5" cy="11" r="1"/><circle cx="10.5" cy="7" r="1"/><circle cx="15" cy="7.5" r="1"/>'};
+const P={gauge:'<path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4-6"/>',users:'<circle cx="9" cy="8" r="4"/><path d="M2 21c0-4 3-6 7-6s7 2 7 6M17 4a4 4 0 0 1 0 8M22 21c0-3-2-5-5-5.7"/>',user:'<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/>',gear:'<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/>',out:'<path d="M9 4H5v16h4M16 8l4 4-4 4M20 12H9"/>',up:'<path d="M12 19V5M6 11l6-6 6 6"/>',down:'<path d="M12 5v14M6 13l6 6 6-6"/>',cpu:'<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',ram:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18"/>',swap:'<path d="M4 8h16l-4-4M20 16H4l4 4"/>',disk:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M3 14h18M7 6.5h.01"/>',clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',panel:'<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h5"/>',globe:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',eye:'<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',eyeoff:'<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><path d="M3 3l18 18"/>',plus:'<path d="M12 5v14M5 12h14"/>',cal:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',key:'<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3"/>',bolt:'<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>',vpn:'<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><rect x="9" y="11" width="6" height="5" rx="1"/><path d="M10 11V9.5a2 2 0 0 1 4 0V11"/>',lock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',unlock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/>',del:'<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>',dev:'<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',cert:'<rect x="3" y="4" width="18" height="13" rx="2"/><circle cx="12" cy="19" r="3"/><path d="M7 9h10M7 12h6"/>',refresh:'<path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5"/>',sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5"/>',moon:'<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',net:'<path d="M5 12a7 7 0 0 1 14 0M8.5 12a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="16" r="1.5"/>',shield:'<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/>',wifi:'<path d="M2 8.5a15 15 0 0 1 20 0M5 12a10 10 0 0 1 14 0M8.5 15.5a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1"/>',kick:'<circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/>',save:'<path d="M12 3v12M7 10l5 5 5-5M4 19h16"/>',upl:'<path d="M12 21V9M7 14l5-5 5 5M4 5h16"/>',chart:'<path d="M4 20V11M10 20V5M16 20v-6M21 20H3"/>',search:'<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/>',file:'<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>',grid:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',list:'<path d="M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01"/>',check:'<path d="M5 12l5 5 9-10"/>',palette:'<path d="M12 3a9 9 0 1 0 0 18c1.5 0 2-1 2-2s-1-1.5-1-2.5 1-1.5 2-1.5h2a4 4 0 0 0 4-4c0-4.4-4-8-9-8z"/><circle cx="7.5" cy="11" r="1"/><circle cx="10.5" cy="7" r="1"/><circle cx="15" cy="7.5" r="1"/>'};
 const I=(k,s=18)=>`<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[k]}</svg>`;
 const fb=(b,s='')=>{const u=['B','KB','MB','GB','TB'];let i=0;b=+b||0;while(b>=1024&&i<4){b/=1024;i++}return (i?b.toFixed(2):b.toFixed(0))+' '+u[i]+s};
 const dur=s=>{s=Math.floor(s||0);const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d?`${d}d ${h}h`:h?`${h}h ${m}m`:m?`${m}m`:`${s}s`};
@@ -2247,14 +2996,15 @@ out+=`<polyline fill="none" stroke="${s.c}" stroke-width="${j?1.6:2}" vector-eff
 if(o.avg!=null){const y=(h-1-o.avg/mx*(h-4)).toFixed(1);out+=`<line x1="0" x2="${w}" y1="${y}" y2="${y}" stroke="var(--a)" stroke-dasharray="3 4" stroke-width="1.4" vector-effect="non-scaling-stroke" opacity=".8"/>`}
 const svg=`<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" preserveAspectRatio="none" aria-hidden="true">${out}</svg>`;
 if(!o.tip)return svg;TIPS[o.tip]={s:series,t:o.t,sec:o.sec};return `<div class="cw" data-tip="${o.tip}">${svg}<i class="tl" hidden></i><div class="tb" hidden></div></div>`}
-const NAV=[['ov','Overview','gauge'],['us','Users','users'],['on','Online','wifi'],['sc','Security','shield'],['st','Settings','gear'],['lo','Log out','out']];
+const NAV=[['ov','Overview','gauge'],['us:v2ray','V2Ray users','globe'],['us:ssh','SSH users','key'],['us:ovpn','OpenVPN users','vpn'],['us:hy2','UDP users','bolt'],['us:dns','DNS users','net'],['on','Online','wifi'],['sc','Security','shield'],['st','Settings','gear'],['lo','Log out','out']],BNAV=[['ov','Overview','gauge'],['us','Users','users'],['on','Online','wifi'],['sc','Security','shield'],['st','Settings','gear']];
 $('#nav').innerHTML=NAV.map(n=>`<button class="nb" data-p="${n[0]}" title="${n[1]}">${I(n[2],19)}<span>${n[1]}</span></button>`).join('');
-$('#bn').innerHTML=NAV.filter(n=>n[0]!='lo').map(n=>`<button class="bnb" data-p="${n[0]}" aria-label="${n[1]}"><i>${I(n[2],21)}</i>${n[1]}</button>`).join('');
+$('#bn').innerHTML=BNAV.map(n=>`<button class="bnb" data-p="${n[0]}" aria-label="${n[1]}"><i>${I(n[2],21)}</i>${n[1]}</button>`).join('');
 async function logout(){try{await api('api/logout')}catch(x){}show(false)}
 $('#lo2').onclick=()=>{if(confirm('Log out of the panel?'))logout()};
 $('#nav').onclick=$('#bn').onclick=e=>{const b=e.target.closest('[data-p]');if(!b)return;if(b.dataset.p=='lo')return logout();go(b.dataset.p)};
-function go(p){pg=p;HOV=null;accent(BR.accent);if(p!='us'){UV.sel=null;selbar()}document.querySelectorAll('.nb,.bnb').forEach(b=>b.classList.toggle('on',b.dataset.p==p));$('#pg').innerHTML='';render(true);window.scrollTo(0,0)}
-async function load(){try{const r=await fetch('api/state',{cache:'no-store'});if(r.status==401)return show(false);D=await r.json();const sb=D.set;if(sb.brand!=BR.brand||sb.tagline!=BR.tagline||sb.accent!=SAC){SAC=sb.accent;applyBrand(sb)}
+function navhl(){const key=pg=='us'?'us:'+UV.kind:pg;document.querySelectorAll('.nb').forEach(b=>b.classList.toggle('on',b.dataset.p==key));document.querySelectorAll('.bnb').forEach(b=>b.classList.toggle('on',b.dataset.p==pg))}
+function go(p){if(p.startsWith('us:')){if(UV.kind!=p.slice(3))UV.sel=null;UV.kind=p.slice(3);ls('rx-kind',UV.kind);p='us'}pg=p;HOV=null;accent(BR.accent);if(p!='us'){UV.sel=null;selbar()}navhl();$('#pg').innerHTML='';render(true);window.scrollTo(0,0)}
+async function load(){try{const r=await fetch('api/state'+(D&&D.uh&&D.users?'?uh='+D.uh:''),{cache:'no-store'});if(r.status==401)return show(false);{const n=await r.json();if(!n.users&&D&&D.users)n.users=D.users;D=n}const sb=D.set;if(sb.brand!=BR.brand||sb.tagline!=BR.tagline||sb.accent!=SAC){SAC=sb.accent;applyBrand(sb)}
 if(pg=='ov'&&RG!='live'&&Date.now()-HMT>60000)await loadHist();if($('#app').hidden){show(true);go(pg)}else render();hdr();$('#upd').textContent='Live · '+new Date().toLocaleTimeString()}catch(e){$('#upd').textContent='Connection lost, retrying...'}}
 function hdr(){const c=D.cert;$('#cbn').innerHTML=c.days!=null&&c.days<=30?`<div class="banner ${c.days<0?'e':'w'}" role="status">${I('cert',17)}<div><b>${c.days<0?'Your SSL certificate has expired.':'Your SSL certificate expires in '+c.days+' day'+(c.days==1?'':'s')+'.'}</b> ${X(c.name)} · Renew it, then paste the new one in Settings or use menu → 7 on the server.</div></div>`:'';
 const x=D.svc.find(s=>s.unit=='xray'),on=x&&x.st=='RUNNING';$('#xs').innerHTML=`<span class="dot" style="background:${on?'var(--g)':'var(--r)'}"></span>Xray · ${on?'Running':'Stopped'} <span class="m">v${X(D.xray.ver||'?')}</span>`}
@@ -2289,7 +3039,7 @@ const down=d.svc.filter(x=>x.st!='RUNNING'&&x.st!='NOT INSTALLED'),hr=new Date()
 $('#pg').innerHTML=`<div class="card hero"><div class="hl"><small class="m">${gr}, ${X(d.me||'admin')}</small><h2><span class="hdot" style="background:${down.length?'var(--r)':'var(--g)'}"></span>${down.length?down.length+' service'+(down.length>1?'s':'')+' stopped':'Everything is running'}</h2>
 <p class="m">${down.length?X(down.map(x=>x.name).join(', '))+' · tap a service below to restart it':`${run} services online · Xray v${X(d.xray.ver||'?')} · up ${dur(i.uptime)}`}</p></div>
 <div class="hb"><button class="btn pri" id="add">${I('plus',15)}Add user</button><button class="btn" id="trl">${I('clock',15)}Trial</button><button class="btn" data-r="xray">${I('refresh',15)}Restart Xray</button></div></div>
-<div class="kps">${kpi('Online now',on,'of '+d.users.length+' users','var(--g)','us','on','wifi')}${kpi('Active',act,ended?ended+' ended':'',  'var(--a)','us','all','users')}${kpi('Expiring soon',soon,soon?'renew them':'all good','var(--y)','us','soon','cal')}${kpi('Traffic today',fb(td[1]+td[2]),'↑ '+fb(td[2])+' ↓ '+fb(td[1]),'#8b5cf6','','','up')}${kpi('This month',fb(mo[1]+mo[2]),new Date().toLocaleString([],{month:'long'}),'#0d9488','','','chart')}</div>
+<div class="kps">${kpi('Online now',on,'of '+d.users.length+' users','var(--g)','us','on','wifi')}${kpi('Active',act,'V2Ray '+d.users.filter(u=>HX(u.kind)).length+' · SSH '+d.users.filter(u=>HS(u.kind)).length+(d.ov||d.users.some(u=>u.kind=='ovpn')?' · OVPN '+d.users.filter(u=>u.kind=='ovpn').length:'')+(d.hy||d.users.some(u=>u.kind=='hy2')?' · UDP '+d.users.filter(u=>u.kind=='hy2').length:'')+(d.users.some(u=>u.kind=='dns')?' · DNS '+d.users.filter(u=>u.kind=='dns').length:''),  'var(--a)','us','all','users')}${kpi('Expiring soon',soon,soon?'renew them':'all good','var(--y)','us','soon','cal')}${kpi('Traffic today',fb(td[1]+td[2]),'↑ '+fb(td[2])+' ↓ '+fb(td[1]),'#8b5cf6','','','up')}${kpi('This month',fb(mo[1]+mo[2]),new Date().toLocaleString([],{month:'long'}),'#0d9488','','','chart')}</div>
 <div class="g4">${gauge('CPU','cpu',d.cpu,`${i.cores} core${i.cores>1?'s':''}`,h.cpu)}${gauge('RAM','ram',pct(d.ram[0],d.ram[1]),`${fb(d.ram[0])} / ${fb(d.ram[1])}`,h.ram)}
 ${gauge('Swap','swap',d.swap[1]?pct(d.swap[0],d.swap[1]):0,d.swap[1]?`${fb(d.swap[0])} / ${fb(d.swap[1])}`:'No swap',h.swap)}${gauge('Disk','disk',pct(d.disk[0],d.disk[1]),`${fb(d.disk[1]-d.disk[0])} free`,h.disk)}</div>
 <div class="card mb"><div class="sh"><div><div class="lab">Overall speed</div><div class="sub" style="margin-top:4px">Interface total · peak ${fs(pk)}</div></div>${segR()}</div>
@@ -2313,11 +3063,12 @@ ${statsCards(d.stats)}
 <div class="card"><div class="ct"><div class="lab">${I('net',15)}Services</div><span class="m">${run} running / ${inst} installed</span></div><div class="svcg">
 ${d.svc.map(s=>`<button class="sv" data-u="${X(s.unit)}" data-n="${X(s.name)}" ${s.st=='NOT INSTALLED'?'disabled':''} aria-label="${X(s.name)} ${s.st}, tap to restart"><span class="dot" style="background:${SC[s.st]}"></span><span style="min-width:0"><b>${X(s.name)}</b><small>${s.port?'Port '+s.port:'&nbsp;'}</small></span><em style="color:${SC[s.st]}">${s.st}</em></button>`).join('')}</div></div>`}
 async function restartUnit(u,n){if(!confirm('Restart '+n+'?'))return;try{await api('api/svc',{unit:u});toast(n+' restarted');load()}catch(x){toast(x.message,1)}}
-$('#pg').onclick=e=>{if(UV.sel){const o=e.target.closest('#ul [data-open]');if(o){const n=o.dataset.open;UV.sel.has(n)?UV.sel.delete(n):UV.sel.add(n);return us()}}
+$('#pg').onclick=e=>{if(e.target.closest('#more')){UV.lim=(UV.lim||100)+100;return us()}if(UV.sel){const o=e.target.closest('#ul [data-open]');if(o){const n=o.dataset.open;UV.sel.has(n)?UV.sel.delete(n):UV.sel.add(n);return us()}}
 if(e.target.closest('#sel')){UV.sel=UV.sel?null:new Set();return us(true)}
 const g=e.target.closest('[data-go]');if(g){if(g.dataset.f)UV.f=g.dataset.f;return go(g.dataset.go)}
 const fl=e.target.closest('[data-f]');if(fl){UV.f=fl.dataset.f;return us()}
-if(e.target.closest('#trl'))return trial();
+if(e.target.closest('#trl'))return pg=='us'?trial():kpick(k=>trial(k));
+const kt=e.target.closest('[data-kind]');if(kt){UV.kind=kt.dataset.kind;ls('rx-kind',UV.kind);UV.sel=null;selbar();navhl();return us(true)}
 if(e.target.closest('#eye')){hideIp=!hideIp;return ov()}
 const t1=e.target.closest('[data-tu]');if(t1){TU=t1.dataset.tu;return ov()}const t2=e.target.closest('[data-pr]');if(t2){PRR=t2.dataset.pr;return ov()}const t3=e.target.closest('[data-trm]');if(t3){TRM=t3.dataset.trm;return ov()}
 const sk=e.target.closest('[data-sk]');if(sk){api('api/session-kill',{id:sk.dataset.sk}).then(()=>{toast('Session logged out');secp(true)}).catch(x=>toast(x.message,1));return}
@@ -2327,7 +3078,7 @@ const vw=e.target.closest('[data-v]');if(vw){UV.v=vw.dataset.v;ls('rx-view',UV.v
 const so=e.target.closest('[data-sort]');if(so){const k=so.dataset.sort;UV.rev=UV.k==k?!UV.rev:false;UV.k=k;ls('rx-sort',k);return us(true)}
 const r=e.target.closest('[data-r]');if(r)return restartUnit(r.dataset.r,r.textContent.replace('Restart ','').trim());
 const s=e.target.closest('.sv');if(s&&!s.disabled)return restartUnit(s.dataset.u,s.dataset.n);
-if(e.target.closest('#add'))return umodal();
+if(e.target.closest('#add'))return pg=='us'?umodal():kpick(k=>umodal(null,null,k));
 if(e.target.closest('#blk'))return bulkm();
 const c=e.target.closest('[data-open]');if(c)return openU(c.dataset.open);
 const k=e.target.closest('[data-kick]');if(k){const n=k.dataset.kick;if(!confirm('Disconnect '+n+' from all devices now?'))return;api('api/user/kick',{name:n}).then(()=>{toast(n+' disconnected');load()}).catch(x=>toast(x.message,1));return}
@@ -2338,40 +3089,43 @@ const ubar=(used,lim)=>{const p=lim?Math.min(100,used/(lim*1073741824)*100):0;re
 const lims=(used,lim)=>`${fb(used)} / ${lim?lim+' GB':'Unlimited'}`,hue=n=>[...n].reduce((a,c)=>a*31+c.charCodeAt(0),7)%360;
 const SR={online:0,active:1,limit:2,expired:3,disabled:4},ek=u=>u.exp=='never'?9e15:Date.parse(u.exp);
 const SO={name:['Name',(a,b)=>a.name.localeCompare(b.name)],used:['Most used',(a,b)=>b.used-a.used],exp:['Expires first',(a,b)=>ek(a)-ek(b)],new:['Newest',(a,b)=>(b.created||'').localeCompare(a.created||'')||a.name.localeCompare(b.name)],st:['Status',(a,b)=>SR[a.st]-SR[b.st]||a.name.localeCompare(b.name)]};
-const UV={v:ls('rx-view')||'cards',k:SO[ls('rx-sort')]?ls('rx-sort'):'name',rev:false,f:'all'};
+const UV={kind:['v2ray','ssh','ovpn','hy2','dns'].includes(ls('rx-kind'))?ls('rx-kind'):'v2ray',v:ls('rx-view')||'cards',k:SO[ls('rx-sort')]?ls('rx-sort'):'name',rev:false,f:'all'};
 const dnum=u=>u.exp=='never'?1e9:Math.ceil((Date.parse(u.exp+'T23:59:59')-Date.now())/864e5);
 const dleft=u=>{if(u.fdays)return 'starts on first use';if(u.expts){const h=Math.ceil((u.expts*1000-Date.now())/36e5);return h<=0?'ended':h+'h left'}if(u.exp=='never')return '';const d=dnum(u);return d<0?'ended':d==0?'today':d+'d left'};
 const expTxt=u=>u.fdays?`First use + ${u.fdays} day${u.fdays==1?'':'s'}`:u.exp=='never'?'No expiry':u.exp;
 const expiring=u=>!u.trial&&['active','online'].includes(u.st)&&(dnum(u)<=3||(u.lim>0&&u.used>=u.lim*1073741824*.9));
 const FL={all:['All',u=>1],on:['Online',u=>u.st=='online'],soon:['Expiring soon',expiring],end:['Ended',u=>['expired','limit'].includes(u.st)],off:['Disabled',u=>u.st=='disabled'],trial:['Trial',u=>u.trial]};
-const tagT=u=>u.trial?'<span class="tag">Trial</span>':'';
+const tagT=u=>(u.trial?'<span class="tag">Trial</span>':'')+(u.kind=='both'?'<span class="tag" style="background:color-mix(in srgb,#0d9488 14%,transparent);color:#0d9488">V2Ray + SSH</span>':'');
 const av=(n,s)=>`<div class="av" style="background:hsl(${hue(n)} 55% 52%)">${X(n[0]).toUpperCase()}</div>`;
 function selbar(){let b=$('#sbar');if(!UV.sel||pg!='us'){if(b)b.remove();return}if(!b){b=document.createElement('div');b.id='sbar';b.setAttribute('role','toolbar');b.setAttribute('aria-label','Selected users');document.body.append(b);b.onclick=selact}
 const n=UV.sel.size,all=UV.L&&UV.L.length&&UV.L.every(x=>UV.sel.has(x));b.innerHTML=`<b>${n} selected</b><button type="button" class="btn sm" data-sa="all">${all?'Clear':'Select all'}</button><span class="sbs"></span>
-${[['days','cal','Add days'],['reset','refresh','Reset usage'],['disable','lock','Disable'],['enable','unlock','Enable'],['delete','del','Delete']].map(x=>`<button type="button" class="btn sm${x[0]=='delete'?' dng':''}" data-sa="${x[0]}"${n?'':' disabled'}>${I(x[1],14)}${x[2]}</button>`).join('')}<button type="button" class="ib" data-sa="x" aria-label="Stop selecting">${I('plus',18)}</button>`}
+${[['days','cal','Add days'],['dev','dev','Device limit'],['reset','refresh','Reset usage'],['disable','lock','Disable'],['enable','unlock','Enable'],['delete','del','Delete']].map(x=>`<button type="button" class="btn sm${x[0]=='delete'?' dng':''}" data-sa="${x[0]}"${n?'':' disabled'}>${I(x[1],14)}${x[2]}</button>`).join('')}<button type="button" class="ib" data-sa="x" aria-label="Stop selecting">${I('plus',18)}</button>`}
 async function selact(e){const b=e.target.closest('[data-sa]');if(!b)return;const a=b.dataset.sa,names=[...UV.sel],N=names.length+' user'+(names.length==1?'':'s');
 if(a=='x'){UV.sel=null;selbar();return us(true)}if(a=='all'){const all=UV.L.every(x=>UV.sel.has(x));UV.L.forEach(x=>all?UV.sel.delete(x):UV.sel.add(x));return us()}
 const done=async(o,msg)=>{try{const r=await api('api/bulk',Object.assign({names},o));toast(msg.replace('#',r.count));if(a=='delete')UV.sel.clear();await load()}catch(x){toast(x.message,1)}};
 if(a=='days')return modal('Add days to '+N,[['days','Days to add','number','',30]],d=>api('api/bulk',{names,action:'days',days:d.days}).then(r=>{toast('Added '+d.days+' days to '+r.count+' user(s)');load()}),'Users without expiry are skipped.');
+if(a=='dev')return modal('Device limit for '+N,[['dev','Device limit (2 recommended, 0 = unlimited)','number','',2]],d=>api('api/bulk',{names,action:'dev',dev:d.dev}).then(r=>{toast('Device limit set to '+d.dev+' for '+r.count+' user(s)');load()}));
 if(a=='disable')return modal('Disable '+N,[['reason','Reason (optional, shown on their page)','text','Payment pending']],d=>api('api/bulk',{names,action:'disable',reason:d.reason}).then(r=>{toast(r.count+' user(s) disabled');load()}));
 if(a=='reset'){if(confirm('Reset data usage of '+N+'?'))done({action:'reset'},'Usage reset for # user(s)');return}
 if(a=='enable')return done({action:'enable'},'# user(s) enabled');
 if(a=='delete'){if(confirm('Delete '+N+'? This cannot be undone.\n\n'+names.slice(0,20).join(', ')+(names.length>20?' ...':'')))done({action:'delete'},'# user(s) deleted');return}}
-function us(first){if(first){$('#pg').innerHTML=`<div class="bar"><input id="q" placeholder="Search users or notes" aria-label="Search users" value="${X(UV.q||'')}"><select id="srt" aria-label="Sort users">${Object.entries(SO).map(([k,v])=>`<option value="${k}"${k==UV.k?' selected':''}>Sort: ${v[0]}</option>`).join('')}</select>
+function us(first){if(first){$('#pg').innerHTML=`<div class="khd"><div class="kts" id="kts" role="tablist" aria-label="User type"></div></div><div id="dnsb"></div><div class="bar"><input id="q" placeholder="Search users or notes" aria-label="Search users" value="${X(UV.q||'')}"><select id="srt" aria-label="Sort users">${Object.entries(SO).map(([k,v])=>`<option value="${k}"${k==UV.k?' selected':''}>Sort: ${v[0]}</option>`).join('')}</select>
 <div class="seg" role="group" aria-label="View">${[['cards','grid','Card view'],['table','list','Table view']].map(x=>`<button type="button" data-v="${x[0]}" class="${UV.v==x[0]?'on':''}" aria-pressed="${UV.v==x[0]}" aria-label="${x[2]}" title="${x[2]}">${I(x[1],16)}</button>`).join('')}</div>
-<button class="btn${UV.sel?' pri':''}" id="sel" aria-pressed="${!!UV.sel}">${I('check',16)}${UV.sel?'Done':'Select'}</button><button class="btn" id="blk">${I('users',16)}Bulk / CSV</button><button class="btn" id="trl" title="1 day, 2 GB, deleted when it ends">${I('clock',16)}Trial</button><button class="btn pri" id="add">${I('plus',16)}Add user</button></div><div class="chips" id="flt" role="group" aria-label="Filter users"></div><div id="ul"></div>`;
-$('#q').oninput=()=>{UV.q=$('#q').value;us()};$('#srt').onchange=()=>{UV.k=$('#srt').value;UV.rev=false;ls('rx-sort',UV.k);us(true)}}
-if(!FL[UV.f])UV.f='all';$('#flt').innerHTML=Object.entries(FL).map(([k,v])=>{const c=D.users.filter(v[1]).length;return k!='all'&&k!='trial'||c||k=='all'?`<button type="button" data-f="${k}" class="${UV.f==k?'on':''}" aria-pressed="${UV.f==k}">${v[0]} <b>${c}</b></button>`:''}).join('');
-const q=(UV.q||'').toLowerCase(),L=D.users.filter(FL[UV.f][1]).filter(u=>u.name.toLowerCase().includes(q)||(u.note||'').toLowerCase().includes(q)).sort(SO[UV.k][1]);if(UV.rev)L.reverse();
-UV.L=L.map(u=>u.name);if(UV.sel){const all=new Set(D.users.map(u=>u.name));UV.sel.forEach(n=>{if(!all.has(n))UV.sel.delete(n)})}selbar();
-const el=$('#ul');el.classList.toggle('pick',!!UV.sel);if(!L.length){el.className='';el.innerHTML=`<div class="empty card">${D.users.length?(UV.f!='all'?'No users in "'+FL[UV.f][0]+'"':'No user matches your search'):'No users yet. Tap "Add user" to create one.'}</div>`;return}
+<button class="btn${UV.sel?' pri':''}" id="sel" aria-pressed="${!!UV.sel}">${I('check',16)}${UV.sel?'Done':'Select'}</button><button class="btn" id="blk">${I('users',16)}Bulk / CSV</button><button class="btn" id="trl" title="1 day, 2 GB, deleted when it ends">${I('clock',16)}Trial</button><button class="btn pri" id="add">${I('plus',16)}Add ${KN[UV.kind]} user</button></div><div class="chips" id="flt" role="group" aria-label="Filter users"></div><div id="ul"></div><div id="ulm" class="ulm"></div>`;
+$('#q').oninput=()=>{UV.q=$('#q').value;UV.lim=100;us()};$('#srt').onchange=()=>{UV.k=$('#srt').value;UV.rev=false;ls('rx-sort',UV.k);us(true)}}
+const KU=D.users.filter(u=>inK(u,UV.kind));if($('#dnsb'))$('#dnsb').innerHTML=UV.kind=='dns'?DNSH():'';
+$('#kts').innerHTML=[['v2ray','globe','V2Ray users'],['ssh','key','SSH users'],['ovpn','vpn','OpenVPN users'],['hy2','bolt','UDP users'],['dns','net','DNS users']].map(x=>`<button type="button" role="tab" data-kind="${x[0]}" class="${UV.kind==x[0]?'on':''}" aria-selected="${UV.kind==x[0]}">${I(x[1],16)}${x[2]} <b>${D.users.filter(u=>inK(u,x[0])).length}</b></button>`).join('');
+if(!FL[UV.f])UV.f='all';$('#flt').innerHTML=Object.entries(FL).map(([k,v])=>{const c=KU.filter(v[1]).length;return k!='all'&&k!='trial'||c||k=='all'?`<button type="button" data-f="${k}" class="${UV.f==k?'on':''}" aria-pressed="${UV.f==k}">${v[0]} <b>${c}</b></button>`:''}).join('');
+const q=(UV.q||'').toLowerCase(),L=KU.filter(FL[UV.f][1]).filter(u=>u.name.toLowerCase().includes(q)||(u.note||'').toLowerCase().includes(q)).sort(SO[UV.k][1]);if(UV.rev)L.reverse();
+UV.L=L.map(u=>u.name);const LT=L.length,LP=L.slice(0,UV.lim||100);$('#ulm').innerHTML=LT>LP.length?`<button type="button" class="btn" id="more">Show more · ${LT-LP.length} left</button>`:'';if(UV.sel){const all=new Set(D.users.map(u=>u.name));UV.sel.forEach(n=>{if(!all.has(n))UV.sel.delete(n)})}selbar();
+const el=$('#ul');el.classList.toggle('pick',!!UV.sel);if(!L.length){el.className='';el.innerHTML=`<div class="empty card">${KU.length?(UV.f!='all'?'No users in "'+FL[UV.f][0]+'"':'No user matches your search'):'No users yet. Tap "Add user" to create one.'}</div>`;return}
 if(UV.v=='table'){el.className='card tw';const th=(k,t)=>k?`<th scope="col"><button type="button" data-sort="${k}" class="${UV.k==k?'on':''}">${t}${UV.k==k?I(UV.rev?'up':'down',12):''}</button></th>`:`<th scope="col"><button type="button" tabindex="-1" style="cursor:default">${t}</button></th>`;
 const ck=u=>UV.sel?`<span class="sck${UV.sel.has(u.name)?' on':''}" aria-hidden="true">${I('check',13)}</span>`:'';
-el.innerHTML=`<table class="ut"><thead><tr>${th('name','User')}${th('st','Status')}${th('used','Usage')}${th('exp','Expiry')}${th('','Devices')}${th('new','Created')}</tr></thead><tbody>${L.map(u=>{const n=X(u.name),dl=dleft(u);return `<tr data-open="${n}" class="${UV.sel&&UV.sel.has(u.name)?'sel':''}" tabindex="0" aria-label="Open ${n}">
+el.innerHTML=`<table class="ut"><thead><tr>${th('name','User')}${th('st','Status')}${th('used','Usage')}${th('exp','Expiry')}${th('','Devices')}${th('new','Created')}</tr></thead><tbody>${LP.map(u=>{const n=X(u.name),dl=dleft(u);return `<tr data-open="${n}" class="${UV.sel&&UV.sel.has(u.name)?'sel':''}" tabindex="0" aria-label="Open ${n}">
 <td><div class="tu">${ck(u)}${av(u.name)}<div style="min-width:0"><b>${n}</b>${tagT(u)}${u.note?`<small>${X(u.note)}</small>`:''}</div></div></td><td><span class="pill" style="color:${STC[u.st]}">${STN[u.st]}</span></td>
 <td>${lims(u.used,u.lim)}${u.lim?ubar(u.used,u.lim):''}</td><td>${u.exp=='never'&&!u.fdays?'<span class="m">No expiry</span>':X(u.fdays?'First use + '+u.fdays+'d':u.exp)+(dl&&!u.fdays?`<small class="${dl=='ended'?'bad':expiring(u)?'':'m'}" style="display:block${expiring(u)?';color:var(--y)':''}">${dl}</small>`:'')}</td>
 <td>${u.on} / ${u.dev||'∞'}</td><td class="m">${X(u.created||'-')}</td></tr>`}).join('')}</tbody></table>`;return}
-el.className='ul'+(UV.sel?' pick':'');el.innerHTML=L.map(u=>{const n=X(u.name),on=UV.sel&&UV.sel.has(u.name);return `<button class="card uc${on?' sel':''}" data-open="${n}" aria-label="${UV.sel?(on?'Unselect ':'Select ')+n:'Open '+n}"${UV.sel?` aria-pressed="${!!on}"`:''}><div class="uh">${UV.sel?`<span class="sck${on?' on':''}" aria-hidden="true">${I('check',13)}</span>`:''}${av(u.name)}<div style="min-width:0"><b>${n}</b>${tagT(u)}<small class="m" style="display:block">${lims(u.used,u.lim)}</small></div><span class="pill" style="color:${STC[u.st]}">${STN[u.st]}</span></div>
+el.className='ul'+(UV.sel?' pick':'');el.innerHTML=LP.map(u=>{const n=X(u.name),on=UV.sel&&UV.sel.has(u.name);return `<button class="card uc${on?' sel':''}" data-open="${n}" aria-label="${UV.sel?(on?'Unselect ':'Select ')+n:'Open '+n}"${UV.sel?` aria-pressed="${!!on}"`:''}><div class="uh">${UV.sel?`<span class="sck${on?' on':''}" aria-hidden="true">${I('check',13)}</span>`:''}${av(u.name)}<div style="min-width:0"><b>${n}</b>${tagT(u)}<small class="m" style="display:block">${lims(u.used,u.lim)}</small></div><span class="pill" style="color:${STC[u.st]}">${STN[u.st]}</span></div>
 ${u.note?`<small class="m" style="display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${X(u.note)}</small>`:''}${ubar(u.used,u.lim)}<div class="um"><span${expiring(u)?' style="color:var(--y)"':''}>${I('cal',14)}${X(expTxt(u))}${dleft(u)&&!u.fdays?' · '+dleft(u):''}</span><span>${I('dev',14)}${u.on} / ${u.dev||'∞'} devices</span>${u.rday?`<span>${I('refresh',14)}Resets day ${u.rday}</span>`:''}<span style="margin-left:auto" class="bl">Details ›</span></div></button>`}).join('')}
 const uaS=ua=>{ua=ua||'';const b=/Edg\//.test(ua)?'Edge':/OPR|Opera/.test(ua)?'Opera':/SamsungBrowser/.test(ua)?'Samsung Internet':/Firefox\//.test(ua)?'Firefox':/Chrome\//.test(ua)?'Chrome':/Safari\//.test(ua)?'Safari':/curl/i.test(ua)?'curl':ua?'Browser':'Unknown';
 const o=/Android/.test(ua)?'Android':/iPhone|iPad|iOS/.test(ua)?'iPhone / iPad':/Windows/.test(ua)?'Windows':/Mac OS X/.test(ua)?'Mac':/Linux/.test(ua)?'Linux':'';return o?b+' on '+o:b};
@@ -2384,21 +3138,27 @@ $('#pg').innerHTML=`<div class="card mb"><div class="ct"><div class="lab">${I('d
 <p class="note">Sessions last 12 hours. Changing the panel password logs out everyone.</p>${S.map(x=>`<div class="rk"><span class="dotc" style="background:var(--g);margin:0"></span><span class="nm"><b>${X(uaS(x.ua))}${x.me?' <span class="tag">This device</span>':''}</b><small class="m">${X(x.ip)} · logged in ${tago(x.t)}</small></span>${x.me?'':`<button class="btn sm" data-sk="${X(x.id)}">Log out</button>`}</div>`).join('')}</div>
 <div class="g2"><div class="card"><div class="ct"><div class="lab">${I('key',15)}Login history</div><span class="m" style="font-size:12.5px">last ${L.length}</span></div><div class="lst">${L.length?L.map(x=>`<div class="li"><span class="dotc" style="background:${ok(x.res)?'var(--g)':'var(--r)'}"></span><span class="tx"><b>${ok(x.res)?'Logged in':X(x.res)}</b> · ${X(x.user||'-')}<small>${X(x.ip)} · ${X(uaS(x.ua))}</small></span><span class="dt" title="${tfull(x.t)}">${tago(x.t)}</span></div>`).join(''):'<p class="note">No logins recorded yet.</p>'}</div></div>
 <div class="card"><div class="ct"><div class="lab">${I('panel',15)}Activity log</div><span class="m" style="font-size:12.5px">last ${A.length}</span></div><div class="lst">${A.length?A.map(x=>`<div class="li"><span class="tx">${X(x.a)}<small>${X(x.ip)}</small></span><span class="dt" title="${tfull(x.t)}">${tago(x.t)}</span></div>`).join(''):'<p class="note">Changes you make in the panel are listed here.</p>'}</div></div></div>`}
-function onl(){const L=D.online;const tot=L.reduce((a,x)=>a+x.ssh+x.ips.length,0);
+function onl(){const L=D.online;const tot=L.reduce((a,x)=>a+x.ssh+x.ips.length+(x.ov||[]).length+(x.hy||0),0);
 $('#pg').innerHTML=`<div class="card mb"><div class="ct"><div class="lab">${I('wifi',15)}Online users</div><span class="m">${L.length} users · ${tot} connections</span></div>
-<p class="note">SSH shows active sessions. Xray shows the IPs seen in the last 2 minutes. Kick disconnects the user and blocks their current Xray IPs for 1 minute. An IP shared with another user (common on mobile data) is never blocked.</p></div>
-${L.length?`<div class="ul">${L.map(x=>{const n=X(x.name),over=x.dev&&(x.ssh>x.dev||x.ips.length>x.dev);return `<div class="card"><div class="uh"><div class="av" style="background:hsl(${hue(x.name)} 55% 52%)">${n[0].toUpperCase()}</div><div style="min-width:0"><b>${n}</b><small class="m" style="display:block">Device limit ${x.dev||'Unlimited'}${over?' · <span class="bad">over limit</span>':''}</small></div><button class="btn sm dng" data-kick="${n}" style="margin-left:auto">${I('kick',14)}Kick</button></div>
-<div class="kv" style="margin-top:10px"><span>SSH sessions</span><b>${x.ssh}</b></div>${x.ips.map(i=>`<div class="kv"><span>Xray ${X(i.ip)}</span><b>${i.ban?'<span class="bad">Blocked '+i.ban+'s</span>':i.ago+'s ago'+(i.shared?' · shared IP':'')}</b></div>`).join('')}<button class="btn sm" data-open="${n}" style="margin-top:10px">Details</button></div>`}).join('')}</div>`:'<div class="empty card">No one is connected right now.</div>'}`}
-function bulkm(){modal('Bulk actions and CSV',[['action','Action','select','','days',[['days','Add days to expiry'],['reset','Reset data usage to 0']]],['days','Days to add (for "Add days")','number','',1],['scope','Apply to','select','','active',[['active','Active users only'],['all','All users']]]],
-async d=>{const n=d.scope=='all'?D.users.length:D.users.filter(u=>['active','online'].includes(u.st)).length;if(!confirm((d.action=='days'?'Add '+d.days+' days to ':'Reset data usage of ')+n+' user(s)?'))throw Error('Cancelled');const r=await api('api/bulk',d);toast('Done for '+r.count+' user(s)')},
+<p class="note">SSH shows active sessions. V2Ray and DNS users show while they use data (offline about 30 seconds after they stop). OpenVPN and UDP (Hysteria2) show connected devices ("via proxy" when OpenVPN uses the HTTP proxy). Kick disconnects the user and blocks their current Xray IPs for 1 minute. An IP shared with another user (common on mobile data) is never blocked.</p></div>
+${L.length?`<div class="ul">${L.map(x=>{const n=X(x.name),over=x.dev&&(x.ssh>x.dev||x.ips.length>x.dev||(x.ov||[]).length>x.dev||(x.hy||0)>x.dev);return `<div class="card"><div class="uh"><div class="av" style="background:hsl(${hue(x.name)} 55% 52%)">${n[0].toUpperCase()}</div><div style="min-width:0"><b>${n}</b><small class="m" style="display:block">Device limit ${x.dev||'Unlimited'}${over?' · <span class="bad">over limit</span>':''}</small></div><button class="btn sm dng" data-kick="${n}" style="margin-left:auto">${I('kick',14)}Kick</button></div>
+<div style="margin-top:10px">${HS(x.kind)?`<div class="kv"><span>SSH sessions</span><b>${x.ssh}</b></div>`:''}${x.hy?`<div class="kv"><span>Hysteria2 devices</span><b>${x.hy}</b></div>`:''}${(x.ov||[]).map(o=>`<div class="kv"><span>OpenVPN ${X(o.ip=='127.0.0.1'?'via proxy':o.ip)}</span><b>for ${ago(o.since)}</b></div>`).join('')}</div>${x.ips.map(i=>`<div class="kv"><span>Xray ${X(i.ip)}</span><b>${i.ban?'<span class="bad">Blocked '+i.ban+'s</span>':i.ago+'s ago'+(i.shared?' · shared IP':'')}</b></div>`).join('')}<button class="btn sm" data-open="${n}" style="margin-top:10px">Details</button></div>`}).join('')}</div>`:'<div class="empty card">No one is connected right now.</div>'}`}
+function bulkm(){modal('Bulk actions: '+KN[UV.kind]+' users',[['action','Action','select','','days',[['days','Add days to expiry'],['dev','Set device limit'],['reset','Reset data usage to 0']]],['days','Days to add (for "Add days")','number','',1],['dev','Device limit (for "Set device limit", 2 recommended)','number','',2],['scope','Apply to','select','','active',[['active','Active users only'],['all','All users']]]],
+async d=>{d.kind=UV.kind;const KU=D.users.filter(u=>inK(u,UV.kind)),n=d.scope=='all'?KU.length:KU.filter(u=>['active','online'].includes(u.st)).length;if(!confirm((d.action=='days'?'Add '+d.days+' days to ':d.action=='dev'?'Set device limit '+d.dev+' for ':'Reset data usage of ')+n+' user(s)?'))throw Error('Cancelled');const r=await api('api/bulk',d);toast('Done for '+r.count+' user(s)')},
 `Users without expiry are skipped when adding days.<span style="display:block;border-top:1px solid var(--l);margin-top:12px;padding-top:12px"><b style="color:var(--t)">CSV file</b> (Excel / Google Sheets): export all users, or import new ones. Columns: name, password, expiry (YYYY-MM-DD, days, never or first-use+30), data_limit_gb, devices, reset_day, sni, host, note. Export once to see the format.</span><span style="display:flex;gap:8px;margin-top:10px"><button type="button" class="btn sm" id="cxe">${I('save',14)}Export CSV</button><button type="button" class="btn sm" id="cxi">${I('upl',14)}Import CSV</button><input type="file" id="cxf" accept=".csv,text/csv" hidden></span>`);csvUI()}
 const rpw=()=>{const a='abcdefghjkmnpqrstuvwxyz23456789';let r='';const v=crypto.getRandomValues(new Uint32Array(10));v.forEach(x=>r+=a[x%a.length]);return r};
-function umodal(u,c){const ds=D.set,dd=D.cert.domain,def=v=>'Default: '+(v||'auto');
-const F=u?[['pw','New password (leave empty to keep)','text',''],['days',u&&u.fdays?'Add days (counting has not started yet)':'Add days (0 = no change)','number','',0],['lim','Data limit in GB (0 = unlimited)','number','',u.lim],['dev','Device limit (0 = unlimited)','number','',u.dev],['rday','Monthly data reset day, 1-28 (0 = off)','number','',u.rday],['sni','SNI for TLS configs (empty = default)','text',def(ds.sni||dd),u.sni],['host','Host (empty = default)','text',def(ds.host||dd||D.addr),u.host],['rtarget','Reality target (empty = default)','text',def(ds.rsni+':443'),u.rtarget],['rsni','Reality SNI (empty = same as target)','text',def((u.rtarget||ds.rsni+':443').split(':')[0]),u.rsni_u],['note','Note (only you see this)','area','Name, phone, payment...',u.note]]
-:[['name','Username','text','Any name, no spaces'],['pw','Password','text',''],['days','Valid for days (0 = no expiry)','number','',30],['lim','Data limit in GB (0 = unlimited)','number','',0],['dev','Device limit (0 = unlimited)','number','',1],['rday','Monthly data reset day, 1-28 (0 = off)','number','',0],['sni','SNI for TLS configs (empty = default)','text',def(ds.sni||dd)],['host','Host (empty = default)','text',def(ds.host||dd||D.addr)],['rtarget','Reality target (empty = default)','text',def(ds.rsni+':443')],['rsni','Reality SNI (empty = same as target)','text','Default: same as target'],['note','Note (only you see this)','area','Name, phone, payment...']];
-if(!u){F.splice(3,0,['first','Start the days on first connection (not today)','check']);F[1][4]=rpw();if(c){const dl=c.fdays||(c.exp=='never'?0:Math.max(1,dnum(c)));Object.assign(F[2],{4:dl});F[3][4]=!!c.fdays;F[4][4]=c.lim;F[5][4]=c.dev;F[6][4]=c.rday;F[7][4]=c.sni;F[8][4]=c.host;F[9][4]=c.rtarget;F[10][4]=c.rsni_u;F[11][4]=c.note}}
-const RI='Reality target is a real website with TLS 1.3, like www.microsoft.com:443. SNI must be a name that website answers for. Users with a different target get their own Reality port automatically.';
-modal(u?'Edit '+u.name:c?'Clone '+c.name:'Add user',F,d=>u?api('api/user/edit',Object.assign(d,{name:u.name})).then(()=>{toast('User updated');openU(u.name)}):api('api/user/add',d).then(()=>{toast('User created');openU(d.name)}),RI)}
+const KN={v2ray:'V2Ray',ssh:'SSH',both:'V2Ray + SSH',ovpn:'OpenVPN',hy2:'UDP',dns:'DNS'},HX=k=>k=='v2ray'||k=='both',HS=k=>k=='ssh'||k=='both',inK=(u,k)=>u.kind==k||((k=='v2ray'||k=='ssh')&&u.kind=='both'),SUBK=k=>HX(k)||k=='hy2';
+function umodal(u,c,kd){const ds=D.set,dd=D.cert.domain,def=v=>'Default: '+(v||'auto'),k=u?u.kind:c?c.kind:(kd||UV.kind),src=u||c||{},X_=HX(k),S_=HS(k);
+const F=[];if(!u)F.push(['name','Username','text','Any name, no spaces']);
+if(S_||k=='hy2')F.push(['pw',u?'New password (leave empty to keep)':'Password','text','',u?'':rpw()]);
+F.push(['days',u?(u.fdays?'Add days (counting has not started yet)':'Add days (0 = no change)'):'Valid for days (0 = no expiry)','number','',u?0:c?(c.fdays||(c.exp=='never'?0:Math.max(1,dnum(c)))):30]);
+if(!u)F.push(['first','Start the days on first connection (not today)','check','',c?!!c.fdays:false]);
+F.push(['lim','Data limit in GB (0 = unlimited)','number','',src.lim??0],['dev','Device limit (2 recommended, 0 = unlimited)','number','',src.dev??2],['rday','Monthly data reset day, 1-28 (0 = off)','number','',src.rday??0]);
+if(X_)F.push(['sni','SNI for TLS configs (empty = default)','text',def(ds.sni||dd),src.sni],['host','Host (empty = default)','text',def(ds.host||dd||D.addr),src.host],['rtarget','Reality target (empty = default)','text',def(ds.rsni+':443'),src.rtarget],['rsni','Reality SNI (empty = same as target)','text',def(((src.rtarget)||ds.rsni+':443').split(':')[0]),src.rsni_u]);
+F.push(['note','Note (only you see this)','area','Name, phone, payment...',src.note]);
+const RI=k=='dns'?'DNS users connect through a DNS tunnel with V2Ray inside. Real domain needed: set it in Settings → DNS. It is slow, but works where only DNS is open.':k=='hy2'?(D.hy?'UDP users connect with Hysteria2 (UDP '+D.ports.HY_PORT+(D.ports.HY_HOP?', port hopping '+D.ports.HY_HOP:'')+') in v2rayNG, NekoBox or Hiddify. They get a subscription link. They get no SSH or V2Ray access.':'Hysteria2 is not installed on this server yet. Run the installer again to add it. You can still create the user now.'):k=='ovpn'?(D.ov?'OpenVPN users get a .ovpn file (TCP '+OVP()+', with or without the HTTP proxy). They get no SSH or V2Ray access.':'OpenVPN is not installed on this server yet. Run the installer again to add it. You can still create the user now.'):X_?'Reality target is a real website with TLS 1.3, like www.microsoft.com:443. SNI must be a name that website answers for. Users with a different target get their own Reality port automatically.':'SSH users can log in with SSH, SSL, WebSocket and UDPGW. They get no V2Ray configs.';
+modal(u?'Edit '+u.name:(c?'Clone '+c.name:'Add '+KN[k]+' user'),F,d=>u?api('api/user/edit',Object.assign(d,{name:u.name})).then(()=>{toast('User updated');openU(u.name)}):api('api/user/add',Object.assign(d,{kind:k})).then(()=>{toast(KN[k]+' user created');openU(d.name)}),RI)}
+function kpick(fn){modal('Which type of user?',[['kind','User type','select','',UV.kind,[['v2ray','V2Ray (VLESS, Reality, XHTTP, Trojan)'],['ssh','SSH (SSH, SSL, WebSocket, UDPGW)'],['ovpn','OpenVPN (TCP, HTTP proxy)'],['hy2','UDP (Hysteria2)'],['dns','DNS + V2Ray (real domain needed)']]]],d=>{setTimeout(()=>fn(d.kind),60);return Promise.resolve()})}
 let DT=null,CP=[];const cp=t=>{CP.push(t);return CP.length-1};
 async function copy(t){try{await navigator.clipboard.writeText(t)}catch(e){const a=document.createElement('textarea');a.value=t;a.style.position='fixed';a.style.opacity='0';document.body.append(a);a.select();document.execCommand('copy');a.remove()}toast('Copied')}
 function payloads(h,p){return [`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]`,`GET /ws HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf]Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==[crlf]Sec-WebSocket-Version: 13[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf]User-Agent: Mozilla/5.0[crlf][crlf]`,`GET http://${h}/ HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]X-Online-Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Connection: Keep-Alive[crlf]Upgrade: websocket[crlf][crlf]`,`POST / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`PATCH / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`OPTIONS / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`CONNECT ${h}:${p.WS_PORT} HTTP/1.1[crlf]Host: ${h}[crlf][crlf]`,`HEAD / HTTP/1.1[crlf]Host: ${h}[crlf][crlf][split]GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf][crlf][split]GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`]}
@@ -2407,9 +3167,32 @@ function usageCard(h){if(!h||!h.length)return '';const mx=Math.max(1,...h.map(x=
 return `<div class="card"><div class="ct"><div class="lab">Daily usage (30 days)</div><b>${fb(tot)}</b></div><div class="um"><span class="bl">Today ${fb(td[1]+td[2])}</span><span>Peak ${fb(mx==1?0:mx)}</span></div>
 <div class="uch" role="img" aria-label="Daily data usage for the last 30 days">${h.map(x=>`<i title="${x[0]}: ↑ ${fb(x[1])} ↓ ${fb(x[2])}"><b style="height:${(x[1]/mx*100).toFixed(1)}%"></b><u style="height:${(x[2]/mx*100).toFixed(1)}%"></u></i>`).join('')}</div>
 <div class="uax"><span>${h[0][0].slice(5)}</span><span><b style="color:var(--a)">■</b> Upload <b style="color:var(--l2)">■</b> Download</span><span>Today</span></div></div>`}
-function onlineCard(u){const any=u.ssh||u.ips.length;return `<div class="card"><div class="ct"><div class="lab">${I('wifi',15)}Connected now</div>${any?`<button class="btn sm dng" data-ua="kick">${I('kick',14)}Kick</button>`:''}</div>
-${any?`<div class="kv"><span>SSH sessions</span><b>${u.ssh}</b></div>${u.ips.map(x=>`<div class="kv"><span>Xray ${X(x.ip)}</span><b>${x.ban?'<span class="bad">Blocked '+x.ban+'s</span>':'Active '+x.ago+'s ago'+(x.shared?' · shared IP':'')}</b></div>`).join('')}`:'<p class="note">Not connected right now.</p>'}</div>`}
-function drawU(){const u=DT,p=u.ports,n=X(u.name);CP=[];
+const OVP=()=>D.ports&&(D.ports.OVPN1_PORT||D.ports.OVPN2_PORT)?[D.ports.OVPN1_PORT||1194,D.ports.OVPN2_PORT||110].join(' / '):'1194 / 110';
+const DNSH=()=>`<div class="banner w" role="note">${I('net',17)}<div><b>DNS + V2Ray · Real domain needed.</b> DuckDNS does not work here. ${D.dns&&D.dns.ns?'Tunnel domain: <b>'+X(D.dns.ns)+'</b>.':'Set your tunnel domain in Settings → DNS first.'} It is slow (good for chat and browsing) and works where only DNS is open.</div></div>`;
+function dnsCard(u,cbox){const o=u.dns;if(!o.on)return `<div class="card"><div class="lab">${I('net',15)}DNS tunnel</div><p class="note bad">The DNS tunnel is not installed on this server yet. Run the installer again to add it.</p></div>`;
+const all=`DNS tunnel (DNSTT)\nNameserver: ${o.ns||'-'}\nPublic key: ${o.pub}\nDNS resolver: 8.8.8.8 (faster with DoH: https://dns.google/dns-query)\nHTTP Custom: SlowDNS, Type Auto\nV2Ray: ${(u.links[0]||{}).url||''}`;
+return `${o.ns?'':DNSH()}<div class="card"><div class="ct"><div class="lab">${I('net',15)}DNS tunnel + V2Ray</div><button class="btn sm" data-cp="${cp(all)}">Copy all</button></div>
+<p class="note">In a DNS tunnel app (DNSTT / SlowDNS with V2Ray) enter the nameserver and public key, pick a DNS resolver, then add the V2Ray config. <b>HTTP Custom:</b> Method SlowDNS, Type <b>Auto</b>. <b>Faster:</b> use the DoH resolver <code>https://dns.google/dns-query</code> when you have normal internet; use 8.8.8.8 or your SIM's DNS when only DNS is open.</p>
+${[['Nameserver (NS)',o.ns||'Not set'],['DNS resolver','8.8.8.8 · DoH: https://dns.google/dns-query'],['HTTP Custom','SlowDNS · Type Auto']].map(r=>`<div class="kv"><span>${r[0]}</span><b>${X(r[1])}</b></div>`).join('')}${cbox('Public key',o.pub,false)}${u.links.map(l=>cbox(l.name,l.url)).join('')}
+<div class="ua" style="margin-top:10px"><button class="btn sm" data-ua="newuuid">${I('refresh',14)}New UUID</button></div></div>`}
+function hyCard(u,cbox){const o=u.hy2;return `${o.on?'':`<div class="banner w" role="status">${I('bolt',17)}<div><b>Hysteria2 is not installed yet.</b> Run the installer again to add it.</div></div>`}
+<div class="card"><div class="ct"><div class="lab">Subscription link</div><button class="btn sm" data-ua="newsub">${I('refresh',14)}New link</button></div><p class="note">Import into v2rayNG, NekoBox or Hiddify. It has the Hysteria2 configs and shows usage and expiry.</p>${cbox('Subscription',u.sub)}<a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>
+<div class="card"><div class="lab">${I('bolt',15)}Hysteria2 (UDP)</div><p class="note">Tap a config to copy it. Port hopping changes the UDP port all the time, which helps when the network slows down one port. To change the password use Edit; the user then needs the new config.</p>${u.links.map(l=>cbox(l.name,l.url)).join('')}
+<div style="margin-top:10px">${[['Server',u.addr],['UDP port',o.port],['Port hopping',o.hop||'Off'],['Password',u.pw||'-'],['Devices online',o.online]].map(r=>`<div class="kv"><span>${r[0]}</span><b>${X(r[1])}</b></div>`).join('')}</div></div>`}
+function ovCard(u){const o=u.ovpn;if(!o.on)return `<div class="card"><div class="lab">${I('vpn',15)}OpenVPN</div><p class="note bad">OpenVPN is not installed on this server yet. Run the installer again to add it.</p></div>`;
+return `<div class="card" id="ovc"><div class="ct"><div class="lab">${I('vpn',15)}OpenVPN file</div><button class="btn sm" data-ua="newcert">${I('refresh',14)}New certificate</button></div>
+<p class="note">Make a .ovpn file and import it in OpenVPN Connect, HTTP Custom or HTTP Injector. With the HTTP proxy on, the app connects through port ${o.proxy} and sends your Host header.</p>
+<div class="ovf"><label>Port<select id="ovp">${o.ports.map(p=>`<option value="${p}">TCP ${p}</option>`).join('')}</select></label>
+<label>Host header (bug host)<input id="ovh" type="text" value="${X(o.host)}" placeholder="example: m.facebook.com" autocomplete="off" spellcheck="false"></label>
+<label class="ck"><input id="ovx" type="checkbox" checked> Use the HTTP proxy (port ${o.proxy})</label></div>
+<div class="ua" style="margin-top:12px"><button class="btn pri" data-ua="ovdl">${I('save',15)}Download .ovpn</button></div>
+${o.sess.length?o.sess.map(c=>`<div class="kv"><span>OpenVPN ${X(c.ip=='127.0.0.1'?'via proxy':c.ip)}</span><b>TCP ${c.port} · ${ago(c.since)}</b></div>`).join(''):''}</div>`}
+const ago=t=>{const s=Math.max(0,Date.now()/1000-t|0);return s<60?s+'s':s<3600?(s/60|0)+' min':s<86400?(s/3600|0)+' h':(s/86400|0)+' d'};
+async function ovdl(url,fn){try{const r=await fetch(url,{credentials:'same-origin'});if(!r.ok)throw new Error(r.status==401?'Please log in again':(await r.text()).slice(0,200)||'Download failed');
+const b=await r.blob(),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=fn;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1500);toast('File downloaded')}catch(x){toast(x.message,1)}}
+function onlineCard(u){const any=u.ssh||u.ips.length||(u.ovpn&&u.ovpn.sess.length)||(u.hy2&&u.hy2.online);return `<div class="card"><div class="ct"><div class="lab">${I('wifi',15)}Connected now</div>${any?`<button class="btn sm dng" data-ua="kick">${I('kick',14)}Kick</button>`:''}</div>
+${any?`${HS(u.kind)?`<div class="kv"><span>SSH sessions</span><b>${u.ssh}</b></div>`:''}${u.ovpn?`<div class="kv"><span>OpenVPN sessions</span><b>${u.ovpn.sess.length}</b></div>`:''}${u.hy2?`<div class="kv"><span>Hysteria2 devices</span><b>${u.hy2.online}</b></div>`:''}${u.dns&&u.ips.length?`<div class="kv"><span>DNS tunnel</span><b>Connected</b></div>`:''}${u.ips.map(x=>`<div class="kv"><span>Xray ${X(x.ip)}</span><b>${x.ban?'<span class="bad">Blocked '+x.ban+'s</span>':'Active '+x.ago+'s ago'+(x.shared?' · shared IP':'')}</b></div>`).join('')}`:'<p class="note">Not connected right now.</p>'}</div>`}
+function drawU(){const u=DT,p=u.ports,n=X(u.name),hx=HX(u.kind),hs=HS(u.kind);CP=[];
 const row=(k,v)=>`<div class="kv"><span>${k}</span><b>${X(v)}</b></div>`;
 const cbox=(label,v,qr)=>{const i=cp(v);return `<div class="cb"><div class="cbh"><small>${X(label)}</small><span style="display:flex;gap:6px">${qr===false?'':`<button class="btn sm" data-qr="${i}" data-ql="${X(label)}">QR</button>`}<button class="btn sm" data-cp="${i}">Copy</button></span></div><button class="code" data-cp="${i}" aria-label="Copy ${X(label)}">${X(v)}</button></div>`};
 const sshAll=`Host: ${u.addr}\nUsername: ${u.name}\nPassword: ${u.pw||'-'}\nSSH: ${p.SSH_PORT}\nSSH SSL/TLS: ${p.SSL_PORT}\nSSH WS: ${p.WS_PORT}\nSSH WS TLS: ${p.WSTLS_PORT}\nUDPGW: 127.0.0.1:${p.UDPGW_PORT}\nExpires: ${u.exp=='never'?'No expiry':u.exp}`;
@@ -2421,12 +3204,16 @@ ${u.st=='disabled'?`<div class="banner w" role="status">${I('lock',17)}<div><b>D
 ${u.note?`<div class="card"><div class="lab">Note</div><div class="note2">${X(u.note)}</div></div>`:''}
 ${usageCard(u.hist)}
 ${onlineCard(u)}
-<div class="card"><div class="ct"><div class="lab">Subscription link</div><button class="btn sm" data-ua="newsub">${I('refresh',14)}New link</button></div><p class="note">Import into v2rayNG, NekoBox or Hiddify. It contains all Xray configs (XHTTP TLS, TCP TLS, Trojan, Reality, XHTTP) and shows usage and expiry.</p>${cbox('Subscription',u.sub)}<a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>
+${hx||u.kind=='hy2'?'':`<div class="card"><div class="lab">User page</div><p class="note">Send this link to the user. ${u.kind=='dns'?'It shows their usage, expiry and the DNS tunnel details.':u.kind=='ovpn'?'It shows their usage, expiry and the OpenVPN file download.':'It shows their usage, expiry, SSH details and payloads.'}</p>${cbox('User page',u.sub,false)}<a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>`}
+${hx?`<div class="card"><div class="ct"><div class="lab">Subscription link</div><button class="btn sm" data-ua="newsub">${I('refresh',14)}New link</button></div><p class="note">Import into v2rayNG, NekoBox or Hiddify. It contains all Xray configs (XHTTP TLS, TCP TLS, Trojan, Reality, XHTTP) and shows usage and expiry.</p>${cbox('Subscription',u.sub)}<a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>
 <div class="card"><div class="ct"><div class="lab">Xray configs</div><button class="btn sm" data-ua="newuuid">${I('refresh',14)}New UUID</button></div><p class="note">Tap a config to copy it. XHTTP needs a recent app (v2rayNG 1.9.30+, Hiddify, NekoBox with Xray core).</p>${u.links.map(l=>cbox(l.name,l.url)+(l.name=='VLESS XHTTP (no TLS)'&&!u.plaindomain?'<p class="note bad" style="margin-top:6px">New Xray apps refuse VLESS without TLS on an IP address. Set a domain (Settings → Server address, or a domain certificate) to use this config.</p>':'')).join('')}</div>
-<div class="card"><div class="ct"><div class="lab">SSH account</div><button class="btn sm" data-cp="${cp(sshAll)}">Copy all</button></div>
+`:''}
+${hs?`<div class="card"><div class="ct"><div class="lab">SSH account</div><button class="btn sm" data-cp="${cp(sshAll)}">Copy all</button></div>
 ${row('Host',u.addr)}${row('Username',u.name)}${row('Password',u.pw||'Unknown (set a new one with Edit)')}${row('SSH',p.SSH_PORT)}${row('SSH SSL / TLS',p.SSL_PORT)}${row('SSH WS',p.WS_PORT)}${row('SSH WS TLS',p.WSTLS_PORT)}${row('UDPGW','127.0.0.1:'+p.UDPGW_PORT)}</div>
-<div class="card"><div class="lab">Xray details</div>${row('VLESS XHTTP TLS port',p.VWSTLS_PORT)}${row('VLESS TCP TLS port',p.VTCP_PORT)}${row('Trojan TLS port',p.TROJAN_PORT)}${row('VLESS Reality port',u.rport||p.REALITY_PORT)}${row('VLESS XHTTP port',p.VWS_PORT)}${row('XHTTP path',u.path)}${row('SNI (TLS configs)',u.sni||'Default')}${row('Host',u.whost)}${row('Reality target',u.rt+(u.rtarget?'':' (default)'))}${row('Reality SNI',u.rsni_u||(u.rt||'').split(':')[0])}${row('UUID / Trojan password',u.uuid)}</div>
-<div class="card"><div class="lab">SSH WebSocket payloads</div><p class="note">Host ${X(u.whost)}. Use port ${p.WS_PORT} for SSH WS, or ${p.WSTLS_PORT} with TLS on for SSH WS TLS. Try them one by one.</p>${payloads(u.whost,p).map((x,i)=>cbox('Payload '+(i+1),x,false)).join('')}</div>`}
+`:''}
+${hx?`<div class="card"><div class="lab">Xray details</div>${row('VLESS XHTTP TLS port',p.VWSTLS_PORT)}${row('VLESS TCP TLS port',p.VTCP_PORT)}${row('Trojan TLS port',p.TROJAN_PORT)}${row('VLESS Reality port',u.rport||p.REALITY_PORT)}${row('VLESS XHTTP port',p.VWS_PORT)}${row('XHTTP path',u.path)}${row('SNI (TLS configs)',u.sni||'Default')}${row('Host',u.whost)}${row('Reality target',u.rt+(u.rtarget?'':' (default)'))}${row('Reality SNI',u.rsni_u||(u.rt||'').split(':')[0])}${row('UUID / Trojan password',u.uuid)}</div>`:''}
+${hs?`<div class="card"><div class="lab">SSH WebSocket payloads</div><p class="note">Host ${X(u.whost)}. Use port ${p.WS_PORT} for SSH WS, or ${p.WSTLS_PORT} with TLS on for SSH WS TLS. Try them one by one.</p>${payloads(u.whost,p).map((x,i)=>cbox('Payload '+(i+1),x,false)).join('')}</div>`:''}
+${u.ovpn?ovCard(u):''}${u.hy2?hyCard(u,cbox):''}${u.dns?dnsCard(u,cbox):''}`}
 $('#dt').onclick=async e=>{if(e.target.id=='dt'||e.target.closest('#dx'))return $('#dt').hidden=true;
 const q=e.target.closest('[data-qr]');if(q)return showQR(q.dataset.ql,CP[+q.dataset.qr]);
 const c=e.target.closest('[data-cp]');if(c)return copy(CP[+c.dataset.cp]);
@@ -2434,18 +3221,21 @@ const b=e.target.closest('[data-ua]');if(!b)return;const a=b.dataset.ua,n=DT.nam
 if(a=='edit')return umodal(DT);
 if(a=='clone')return umodal(null,DT);
 if(a=='share')return shareCard(DT);
+if(a=='ovdl'){const p=$('#ovp').value,h=$('#ovh').value.trim(),x=$('#ovx').checked;return ovdl('api/ovpn?name='+encodeURIComponent(n)+'&port='+p+'&host='+encodeURIComponent(h)+'&proxy='+(x?1:0),n+'-'+p+(x?'-proxy':'')+'.ovpn')}
+if(a=='newcert'){if(!confirm('Make a new OpenVPN certificate for '+n+'?\n\nAll old .ovpn files of this user stop working and they are disconnected. Send them a new file.'))return;return api('api/user/newcert',{name:n}).then(()=>{toast('New certificate made');openU(n)}).catch(x=>toast(x.message,1))}
 if(a=='newsub'||a=='newuuid'){if(!confirm(a=='newsub'?'Make a new subscription link for '+n+'?\n\nThe old link stops working. Send the new link to the user.':'Make a new UUID for '+n+'?\n\nAll old Xray configs of this user stop working. The user must refresh the subscription or add the new configs.'))return;
 return api('api/user/'+a,{name:n}).then(()=>{toast(a=='newsub'?'New link made':'New UUID made');openU(n)}).catch(x=>toast(x.message,1))}
 if(a=='toggle'&&DT.st!='disabled')return modal('Disable '+n,[['reason','Reason (optional, shown on the user\'s page)','text','Payment pending']],d=>api('api/user/toggle',{name:n,reason:d.reason}).then(()=>{toast(n+' disabled');openU(n)}),'The user is disconnected and cannot connect until you enable them again.');
 if(a=='kick'&&!confirm('Disconnect '+n+' from all devices now? They can reconnect after about a minute.'))return;
-if(a=='del'&&!confirm('Delete '+n+'? Both SSH and Xray access will be removed.'))return;if(a=='reset'&&!confirm('Reset data usage of '+n+' to 0?'))return;
+if(a=='del'&&!confirm('Delete '+n+'? All of their access will be removed.'))return;if(a=='reset'&&!confirm('Reset data usage of '+n+' to 0?'))return;
 try{await api('api/user/'+a,{name:n});toast(a=='del'?n+' deleted':a=='kick'?n+' disconnected':'Done');if(a=='del')$('#dt').hidden=true;else openU(n);load()}catch(x){toast(x.message,1)}};
-async function trial(){if(!confirm('Create a trial user? 1 day, 2 GB, 1 device. It is deleted automatically when it ends.'))return;try{const r=await api('api/trial');toast('Trial user '+r.name+' created');await load();openU(r.name)}catch(x){toast(x.message,1)}}
+async function trial(kd){const k=kd||UV.kind;if(!confirm('Create a '+KN[k]+' trial user? 1 day, 2 GB, 1 device. It is deleted automatically when it ends.'))return;try{const r=await api('api/trial',{kind:k});toast('Trial user '+r.name+' created');await load();openU(r.name)}catch(x){toast(x.message,1)}}
 function csvUI(){$('#cxe').onclick=()=>{location.href='api/users.csv'};$('#cxi').onclick=()=>$('#cxf').click();
 $('#cxf').onchange=async e=>{const f=e.target.files[0];e.target.value='';if(!f)return;const t=await f.text();if(!confirm('Import users from '+f.name+'? Users that already exist are skipped.'))return;
 try{const r=await api('api/csv-import',{csv:t});toast('Added '+r.added+' user(s)');$('#me').innerHTML=r.errors.length?'Skipped:<br>'+r.errors.map(X).join('<br>'):'';load()}catch(x){$('#me').textContent=x.message}}}
 let SH=null;
-function shareText(u){const p=u.ports;return `${BR.brand||'ReXUI'} account\nUsername: ${u.name}\nPassword: ${u.pw||'-'}\nExpires: ${u.fdays?'starts on first connection ('+u.fdays+' days)':u.exp=='never'?'No expiry':u.exp}\nData: ${u.lim?u.lim+' GB':'Unlimited'}\nDevices: ${u.dev||'Unlimited'}\n\nSubscription link (v2rayNG / NekoBox / Hiddify):\n${u.sub}\n\nSSH\nHost: ${u.addr}\nSSH: ${p.SSH_PORT}  SSL: ${p.SSL_PORT}\nWS: ${p.WS_PORT}  WS TLS: ${p.WSTLS_PORT}\nUDPGW: 127.0.0.1:${p.UDPGW_PORT}`}
+function shareText(u){const p=u.ports,h=`${BR.brand||'ReXUI'} account\nUsername: ${u.name}\n`+(HS(u.kind)?`Password: ${u.pw||'-'}\n`:'')+`Expires: ${u.fdays?'starts on first connection ('+u.fdays+' days)':u.exp=='never'?'No expiry':u.exp}\nData: ${u.lim?u.lim+' GB':'Unlimited'}\nDevices: ${u.dev||'Unlimited'}\n`;
+return h+(!SUBK(u.kind)?`\nYour account page${u.kind=='ovpn'?' (download your .ovpn file here)':''}:\n${u.sub}\n`:`\nSubscription link (v2rayNG / NekoBox / Hiddify):\n${u.sub}\n`)+(u.kind=='dns'&&u.dns?`\nDNS tunnel + V2Ray\nNameserver: ${u.dns.ns}\nPublic key: ${u.dns.pub}\nResolver: 1.1.1.1 / 8.8.8.8`:'')+(u.kind=='hy2'&&u.hy2?`\nHysteria2 (UDP)\nServer: ${u.addr}\nUDP port: ${u.hy2.port}${u.hy2.hop?'\nPort hopping: '+u.hy2.hop:''}\nPassword: ${u.pw}`:'')+(u.kind=='ovpn'&&u.ovpn?`\nOpenVPN\nServer: ${u.addr}\nTCP ports: ${u.ovpn.ports.join(', ')}\nHTTP proxy: ${u.addr}:${u.ovpn.proxy}`:'')+(!HS(u.kind)?'':`\nSSH\nHost: ${u.addr}\nSSH: ${p.SSH_PORT}  SSL: ${p.SSL_PORT}\nWS: ${p.WS_PORT}  WS TLS: ${p.WSTLS_PORT}\nUDPGW: 127.0.0.1:${p.UDPGW_PORT}`)}
 function shareCard(u){const W=1080,P=64,cv=document.createElement('canvas');cv.width=W;cv.height=3000;const g=cv.getContext('2d'),ac=(AC[BR.accent]||AC.blue)[1],F='system-ui,-apple-system,"Segoe UI",Roboto,sans-serif',p=u.ports;
 const rr=(x,y,w,h,r,f)=>{g.beginPath();g.moveTo(x+r,y);g.arcTo(x+w,y,x+w,y+h,r);g.arcTo(x+w,y+h,x,y+h,r);g.arcTo(x,y+h,x,y,r);g.arcTo(x,y,x+w,y,r);g.closePath();g.fillStyle=f;g.fill()};
 const fit=(t,max,size,w)=>{let z=size;g.font=`${w} ${z}px ${F}`;while(g.measureText(t).width>max&&z>20){z-=2;g.font=`${w} ${z}px ${F}`}if(g.measureText(t).width>max){while(t.length>3&&g.measureText(t+'…').width>max)t=t.slice(0,-1);t+='…'}return t};
@@ -2454,11 +3244,14 @@ let y=P+70;const bn=BR.brand||'ReXUI';g.font=`800 76px ${F}`;const lg=g.createLi
 if(BR.tagline){y+=50;g.fillStyle='#8b94a5';g.fillText(fit(BR.tagline,W-2*P,32,'500'),P,y)}y+=56;
 const sec=(title,rows)=>{const h=40+rows.length*68+24;rr(P,y,W-2*P,h+40,28,'#171d2b');g.fillStyle='#8b94a5';g.font=`700 26px ${F}`;g.fillText(title.toUpperCase(),P+36,y+58);let yy=y+58+24;
 rows.forEach((r,i)=>{yy+=68;if(i)rr(P+36,yy-68+6,W-2*P-72,2,1,'#262d3b');g.fillStyle='#8b94a5';g.font=`500 32px ${F}`;g.fillText(r[0],P+36,yy-12);const lw=g.measureText(r[0]).width;g.fillStyle=r[2]||'#e8ecf3';const v=fit(String(r[1]),W-2*P-108-lw,34,'700');g.textAlign='right';g.fillText(v,W-P-36,yy-12);g.textAlign='left'});y+=h+40+28};
-sec('Account',[['Username',u.name],['Password',u.pw||'-'],['Expires',u.fdays?'First use + '+u.fdays+' days':u.exp=='never'?'No expiry':u.exp+(dleft(u)?' ('+dleft(u)+')':'')],['Data',u.lim?u.lim+' GB':'Unlimited'],['Devices',u.dev||'Unlimited']]);
+sec('Account',[['Username',u.name],...(HS(u.kind)?[['Password',u.pw||'-']]:[]),['Expires',u.fdays?'First use + '+u.fdays+' days':u.exp=='never'?'No expiry':u.exp+(dleft(u)?' ('+dleft(u)+')':'')],['Data',u.lim?u.lim+' GB':'Unlimited'],['Devices',u.dev||'Unlimited']]);
 const M=RXQR.make(u.sub),n=M.length,qs=600,m=Math.floor(qs/(n+8)),qw=m*(n+8),qx=(W-qw)/2;rr(P,y,W-2*P,qw+150,28,'#171d2b');rr(qx,y+36,qw,qw,20,'#fff');g.fillStyle='#000';
 for(let r=0;r<n;r++)for(let c=0;c<n;c++)if(M[r][c])g.fillRect(qx+(c+4)*m,y+36+(r+4)*m,m,m);
-g.fillStyle='#e8ecf3';g.font=`700 32px ${F}`;g.textAlign='center';g.fillText('Scan the subscription QR',W/2,y+qw+86);g.fillStyle='#8b94a5';g.font=`500 26px ${F}`;g.fillText('v2rayNG · NekoBox · Hiddify → Add subscription',W/2,y+qw+124);g.textAlign='left';y+=qw+150+28;
-sec('SSH',[['Host',u.addr],['SSH',p.SSH_PORT],['SSL / TLS',p.SSL_PORT],['WebSocket',p.WS_PORT],['WebSocket TLS',p.WSTLS_PORT],['UDPGW','127.0.0.1:'+p.UDPGW_PORT]]);
+g.fillStyle='#e8ecf3';g.font=`700 32px ${F}`;g.textAlign='center';g.fillText(!SUBK(u.kind)?'Scan to open your account page':'Scan the subscription QR',W/2,y+qw+86);g.fillStyle='#8b94a5';g.font=`500 26px ${F}`;g.fillText(u.kind=='dns'?'Usage, expiry and DNS tunnel details':u.kind=='ovpn'?'Usage, expiry and your .ovpn file':u.kind=='ssh'?'Usage, expiry, SSH details and payloads':'v2rayNG · NekoBox · Hiddify → Add subscription',W/2,y+qw+124);g.textAlign='left';y+=qw+150+28;
+if(u.kind=='dns'&&u.dns)sec('DNS tunnel',[['Nameserver',u.dns.ns||'-'],['Resolver','1.1.1.1 / 8.8.8.8']]);
+if(u.kind=='hy2'&&u.hy2)sec('Hysteria2 (UDP)',[['Server',u.addr],['UDP port',u.hy2.port],...(u.hy2.hop?[['Port hopping',u.hy2.hop]]:[]),['Password',u.pw]]);
+if(u.kind=='ovpn'&&u.ovpn)sec('OpenVPN',[['Server',u.addr],['TCP ports',u.ovpn.ports.join(', ')],['HTTP proxy',u.ovpn.proxy]]);
+if(HS(u.kind))sec('SSH',[['Host',u.addr],['SSH',p.SSH_PORT],['SSL / TLS',p.SSL_PORT],['WebSocket',p.WS_PORT],['WebSocket TLS',p.WSTLS_PORT],['UDPGW','127.0.0.1:'+p.UDPGW_PORT]]);
 g.font=`500 22px ui-monospace,Menlo,Consolas,monospace`;g.fillStyle='#8b94a5';let line='',lines=[];for(const ch of u.sub){if(g.measureText(line+ch).width>W-2*P){lines.push(line);line=''}line+=ch}lines.push(line);lines.forEach(l=>{g.fillText(l,P,y+10);y+=32});y+=P-10;
 const out=document.createElement('canvas');out.width=W;out.height=y;out.getContext('2d').drawImage(cv,0,0);SH={u,c:out,url:out.toDataURL('image/png')};$('#shi').src=SH.url;
 const can=!!(navigator.canShare&&window.File);$('#shs').hidden=!can;$('#shm').hidden=false}
@@ -2493,7 +3286,7 @@ $('#pcr').innerHTML=pc.run?'<p class="note">Checking... this takes about 20 seco
 function stb(){tools();const b=$('#bkl');if(!b)return;const L=D.backups||[];b.innerHTML=L.length?`<p class="note" style="margin:12px 0 0">Automatic daily backups on the server (last 7): ${L.map(X).join(', ')}. Restore one with <b style="color:var(--t)">menu</b> → Backup / Restore.</p>`:''}
 function st(){const d=D,c=d.cert,s=d.set,p=d.ports,url=`https://${c.domain||location.hostname}:${d.port}/${d.path}/`;
 const kv=(k,v)=>`<div class="kv"><span>${k}</span><b>${X(v)}</b></div>`;
-const ST=[['general','General'],['xray','Xray'],['telegram','Telegram'],['sub','Sub page'],['tools','Tools'],['backup','Backup'],['logs','Logs']];
+const ST=[['general','General'],['xray','Xray'],['ovpn','OpenVPN'],['hy2','UDP'],['dns','DNS'],['telegram','Telegram'],['sub','Sub page'],['tools','Tools'],['backup','Backup'],['logs','Logs']];
 $('#pg').innerHTML=`<div class="stabs" role="tablist" aria-label="Settings sections">${ST.map(t=>`<button type="button" role="tab" data-stab="${t[0]}">${t[1]}</button>`).join('')}</div><div class="sg">
 <form class="card" id="cf"><div class="lab">${I('cert',15)}SSL certificate (panel + Xray)</div>${kv('Current',c.src)}${kv('Name',c.name||'-')}${kv('Expires',c.exp||'-')}
 <p class="note" style="margin-top:12px">Paste the certificate (fullchain) and private key for your domain. The domain's A record must point to this server (on Cloudflare use DNS only). The panel restarts with the new certificate after saving.</p>
@@ -2508,6 +3301,23 @@ $('#pg').innerHTML=`<div class="stabs" role="tablist" aria-label="Settings secti
 <label for="xr">Default Reality target (a real website with TLS 1.3; each user can have their own in Add / Edit user)</label><input id="xr" value="${X(s.rsni)}" placeholder="www.microsoft.com" autocapitalize="none">
 <div class="kv" style="margin-top:8px"><span>Reality public key</span><b>${X(s.rpub||'Created when Xray starts')}</b></div><div class="kv"><span>Reality short ID</span><b>${X(s.rsid||'-')}</b></div>
 <div class="err" id="xe"></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn pri">Save</button><button type="button" class="btn" id="rk">${I('refresh',15)}New Reality keys</button></div></form>
+<form class="card" id="hysc"><div class="lab">${I('bolt',15)}UDP (Hysteria2)</div>${d.hy?`<p class="note" style="margin-top:8px">Hysteria2 runs on UDP ${X(d.ports.HY_PORT)}${d.ports.HY_HOP?' with port hopping on '+X(d.ports.HY_HOP):''}. It uses the same certificate as Xray. Each UDP user logs in with their own username and password.</p>
+${D.svc.filter(x=>x.unit=='rexui-hy2').map(x=>kv(x.name+' · '+x.port,x.st=='RUNNING'?'Running':x.st=='FAILED'?'Failed':'Idle')).join('')}
+<label for="hybw">Max speed per UDP user (Mbps, 0 = no limit)</label><input id="hybw" type="number" min="0" max="10000" inputmode="numeric" value="${X(s.hy_bw||0)}">
+<p class="note">Hysteria2 sends very fast. A limit stops one UDP user from taking the whole server line. Example: 30 on a 1 Gbps server with many users.</p>
+<div class="err" id="hyse"></div><button class="btn pri">Save</button>
+<p class="note">Change the UDP port or the port hopping range from menu → Port change on the server. Open them in your provider firewall as UDP.</p>`:`<p class="note bad" style="margin-top:8px">Hysteria2 is not installed on this server yet. Run the installer again (it keeps all users and settings) to add it.</p>`}</form>
+<form class="card" id="dnsf"><div class="lab">${I('net',15)}DNS tunnel + V2Ray · Real domain needed</div>${d.dns&&d.dns.on?`<p class="note" style="margin-top:8px">DuckDNS cannot do this. Buy a cheap domain (for example a .xyz) and add these records in its DNS panel:</p>
+<div class="kv"><span>A record</span><b>${X(d.dns.nsh||'ns.yourdomain.com')} → ${X(d.dns.ip)}</b></div><div class="kv"><span>NS record</span><b>${X(d.dns.ns||'t.yourdomain.com')} → ${X(d.dns.nsh||'ns.yourdomain.com')}</b></div>
+<label for="dnsn">Tunnel domain (the NS record name)</label><input id="dnsn" value="${X(d.dns.ns)}" placeholder="t.yourdomain.com" autocapitalize="none" spellcheck="false">
+<div class="kv" style="margin-top:8px"><span>Public key</span><b style="word-break:break-all;white-space:normal;text-align:right">${X(d.dns.pub||'-')}</b></div>
+${D.svc.filter(x=>x.unit=='rexui-dns').map(x=>kv('DNS tunnel · UDP 53',x.st=='RUNNING'?'Running':x.st=='FAILED'?'Failed':d.dns.ns?'Idle':'Off (no domain yet)')).join('')}
+<p class="note">Allow UDP 53 in your provider firewall. If the NS record was just added, wait up to an hour before testing.</p><div class="err" id="dnse"></div><button class="btn pri">Save</button>`:`<p class="note bad" style="margin-top:8px">The DNS tunnel is not installed on this server yet. Run the installer again (it keeps all users and settings) to add it.</p>`}</form>
+<form class="card" id="ovsf"><div class="lab">${I('vpn',15)}OpenVPN</div>${d.ov?`<p class="note" style="margin-top:8px">OpenVPN runs on TCP ${X(OVP())}. The HTTP proxy (Squid) on port ${X(d.ports.SQUID_PORT||3128)} only lets apps reach these OpenVPN ports on this server. Each user has their own certificate inside their .ovpn file.</p>
+${D.svc.filter(x=>x.unit.startsWith('rexui-ovpn')||x.unit=='squid').map(x=>kv(x.name+(x.port?' · '+x.port:''),x.st=='RUNNING'?'Running':x.st=='NOT INSTALLED'?'Not installed':x.st=='FAILED'?'Failed':'Idle')).join('')}
+<label for="ovdh">Default Host header (bug host) for new .ovpn files</label><input id="ovdh" value="${X(s.ovhost)}" placeholder="example: m.facebook.com" autocapitalize="none" spellcheck="false">
+<p class="note">Users can still type another Host when they download the file. Leave empty for none.</p>
+<div class="err" id="ovse"></div><button class="btn pri">Save</button>`:`<p class="note bad" style="margin-top:8px">OpenVPN is not installed on this server yet. Run the installer again (it keeps all users and settings) to add OpenVPN and the HTTP proxy.</p>`}</form>
 <form class="card" id="pf"><div class="lab">${I('key',15)}Panel login</div><p class="note" style="margin-top:8px">Current username: <b style="color:var(--t)">${X(d.me)}</b></p>
 <label for="po">Old password</label><input id="po" type="password" autocomplete="current-password">
 <label for="pu">New username</label><input id="pu" value="${X(d.me)}" autocomplete="username" autocapitalize="none">
@@ -2595,7 +3405,7 @@ ${kv('Current path','/'+location.pathname.split('/')[1]+'/')}<label for="pap">Ne
 <div class="card" id="ppc"><div class="lab">${I('shield',15)}Panel and ports</div>${kv('URL',url)}${kv('Secret path','/'+d.path+'/')}
 ${[['Panel','PANEL_PORT'],['SSH','SSH_PORT'],['SSH SSL','SSL_PORT'],['SSH WS','WS_PORT'],['SSH WS TLS','WSTLS_PORT'],['UDPGW','UDPGW_PORT'],['VLESS XHTTP TLS','VWSTLS_PORT'],['VLESS TCP TLS','VTCP_PORT'],['Trojan TLS','TROJAN_PORT'],['VLESS Reality','REALITY_PORT'],['VLESS XHTTP','VWS_PORT']].map(x=>kv(x[0],p[x[1]]||'-')).join('')}
 <p class="note" style="margin-top:12px">To change a port, run <b style="color:var(--t)">menu</b> on the server and open Port change.</p></div></div>`;
-const TM={cf:'xray',xf:'xray',rf:'xray',fsc:'xray',rfc:'xray',pf:'general',apf:'general',pwc:'general',ppc:'general',pac:'general',af:'telegram',spf:'sub',tf:'tools',xuc:'tools',ddc:'tools',mtc:'tools',bkc:'backup',lgc:'logs'};
+const TM={cf:'xray',xf:'xray',rf:'xray',fsc:'xray',rfc:'xray',pf:'general',ovsf:'ovpn',hysc:'hy2',dnsf:'dns',apf:'general',pwc:'general',ppc:'general',pac:'general',af:'telegram',spf:'sub',tf:'tools',xuc:'tools',ddc:'tools',mtc:'tools',bkc:'backup',lgc:'logs'};
 const stab=t=>{if(!ST.some(x=>x[0]==t))t='general';ls('rx-stab',t);document.querySelectorAll('[data-stab]').forEach(b=>{const on=b.dataset.stab==t;b.classList.toggle('on',on);b.setAttribute('aria-selected',on)});
 Object.entries(TM).forEach(([id,tb])=>{const el=$('#'+id);if(el)el.classList.toggle('tabx',tb!=t)});if(t=='tools')mload();if(t=='logs')lview()};window.STAB=stab;
 $('#fss').value=s.fsite;$('#fsc').onsubmit=async e=>{e.preventDefault();try{await api('api/fsite',{fsite:$('#fss').value,ftitle:$('#fst').value});$('#fse').textContent='';toast('Saved')}catch(x){$('#fse').textContent=x.message}};
@@ -2624,6 +3434,9 @@ try{const r=await api('api/restore',o);toast('Restored '+r.users+' users'+(r.cer
 $('#cf').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('.pri'),t=b.querySelector('span');b.disabled=true;t.textContent='Checking...';
 try{const r=await api('api/cert',{crt:$('#cc').value,key:$('#ck').value});const dm=r.cert.domain;toast('Certificate saved. Panel is restarting...');
 setTimeout(()=>location.href=`https://${dm||location.hostname}:${location.port}${location.pathname}`,6000)}catch(x){$('#ce').textContent=x.message}b.disabled=false;t.textContent='Save certificate'};
+if($('#hybw'))$('#hysc').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('.pri');b.disabled=true;try{await api('api/hy-set',{hy_bw:$('#hybw').value});$('#hyse').textContent='';toast('Saved');await load()}catch(x){$('#hyse').textContent=x.message}b.disabled=false};
+if($('#dnsn'))$('#dnsf').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('.pri');b.disabled=true;try{await api('api/dns-set',{dns_ns:$('#dnsn').value});$('#dnse').textContent='';toast('Saved');await load();st()}catch(x){$('#dnse').textContent=x.message}b.disabled=false};
+if($('#ovdh'))$('#ovsf').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('.pri');b.disabled=true;try{await api('api/ovpn-set',{ovhost:$('#ovdh').value});$('#ovse').textContent='';toast('Saved');await load()}catch(x){$('#ovse').textContent=x.message}b.disabled=false};
 $('#xf').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('.pri');b.disabled=true;try{await api('api/settings',{addr:$('#xa').value,sni:$('#xs2').value,host:$('#xh').value,path:$('#xp').value,rsni:$('#xr').value});$('#xe').textContent='';toast('Saved. Users need to refresh their subscription.');await load();st()}catch(x){$('#xe').textContent=x.message}b.disabled=false};
 $('#rw').value=s.warp;let APA=s.accent;
 $('#apf').querySelector('.sw').onclick=e=>{const b=e.target.closest('[data-ac]');if(!b)return;APA=b.dataset.ac;accent(APA);$('#apf').querySelectorAll('[data-ac]').forEach(x=>{const on=x.dataset.ac==APA;x.setAttribute('aria-checked',on);x.innerHTML=on?I('check',16):''})};
@@ -2656,7 +3469,7 @@ if(r.ok){$('#lp').value='';$('#lc').value='';$('#lcw').hidden=true;$('#capw').hi
 if(j.captcha)capShow(j.captcha);if(j.needcap&&!j.need2fa){$('#le').textContent=j.e;$('#lcap').focus();return}
 if(j.need2fa){const first=$('#lcw').hidden;$('#lcw').hidden=false;$('#lc').focus();$('#le').textContent=first?'':j.e;return}$('#le').textContent=j.e||'Error '+r.status};
 load();setInterval(()=>{if(!document.hidden&&!$('#app').hidden)load()},3000);
-const SXS=[['Overview','page','ov','dashboard graphs cpu ram speed traffic top users protocol'],['Users','page','us','users list'],['Online','page','on','online connected kick ip'],['Security','page','sc','sessions devices login history activity log'],['Settings','page','st','settings'],
+const SXS=[['Overview','page','ov','dashboard graphs cpu ram speed traffic top users protocol'],['V2Ray users','page','us:v2ray','users list vless reality'],['SSH users','page','us:ssh','users list ssh'],['OpenVPN users','page','us:ovpn','users list openvpn ovpn vpn certificate'],['UDP users','page','us:hy2','users list udp hysteria hysteria2 hy2'],['DNS users','page','us:dns','users list dns dnstt slowdns tunnel domain'],['Online','page','on','online connected kick ip'],['Security','page','sc','sessions devices login history activity log'],['Settings','page','st','settings'],
 ['SSL certificate','set','xray cf','cert certificate domain lets encrypt tls'],['Xray defaults (SNI, host, path, Reality)','set','xray xf','sni host path reality xhttp keys'],['Routing (torrent, ads, WARP, port 25)','set','xray rf','routing block torrent ads warp smtp port 25'],
 ['Fake website','set','xray fsc','fake website decoy camouflage port 80'],['Reality target finder','set','xray rfc','reality target sni finder best'],['Panel login and 2FA','set','general pf','password username login 2fa two factor'],
 ['Appearance (brand, colour, theme)','set','general apf','brand logo colour color accent theme dark black amoled tagline'],['Phone app','set','general pwc','pwa install app home screen'],['Panel and ports','set','general ppc','ports url'],
@@ -2672,8 +3485,8 @@ const it=SXS.filter(x=>q?m((x[0]+' '+x[3]).toLowerCase()):x[1]!='set').map(x=>({
 SXL=[...us,...it];SXA=0;const grp=(h,a)=>a.length?`<div class="sxh">${h}</div>`+a.map(o=>{const i=SXL.indexOf(o);return `<button type="button" class="sxi${i==0?' on':''}" data-sx="${i}" role="option">${o.k=='user'?av(o.n):I(o.k=='set'?'gear':o.k=='act'?'plus':'panel',16)}<span>${X(o.l)}</span><small>${X(o.sub)}</small></button>`}).join(''):'';
 $('#sxr').innerHTML=SXL.length?grp('Users',us)+grp(q?'Settings and pages':'Go to',it):'<p class="note" style="padding:10px">Nothing found</p>'}
 function sxGo(i){const o=SXL[i];if(!o)return;$('#sxo').hidden=true;
-if(o.k=='user'){go('us');return openU(o.n)}if(o.k=='page')return go(o.t);
-if(o.k=='act'){go('us');return o.t=='add'?umodal():o.t=='trial'?trial():bulkm()}
+if(o.k=='user'){const uu=D.users.find(x=>x.name==o.n);if(uu&&uu.kind!='both')UV.kind=uu.kind;go('us');return openU(o.n)}if(o.k=='page')return go(o.t);
+if(o.k=='act'){if(o.t=='bulk'){go('us');return bulkm()}return kpick(k=>{UV.kind=k;go('us');o.t=='add'?umodal(null,null,k):trial(k)})}
 const [tb,id]=o.t.split(' ');go('st');if(window.STAB)STAB(tb);const el=$('#'+id);if(el){el.scrollIntoView({block:'start',behavior:'smooth'});el.style.boxShadow='0 0 0 2px var(--a)';setTimeout(()=>el.style.boxShadow='',1800)}}
 $('#sxi').oninput=sxRun;$('#sxr').onclick=e=>{const b=e.target.closest('[data-sx]');if(b)sxGo(+b.dataset.sx)};$('#sxx').onclick=()=>$('#sxo').hidden=true;$('#sxo').onclick=e=>{if(e.target.id=='sxo')$('#sxo').hidden=true};
 $('#sxi').onkeydown=e=>{const n=SXL.length;if(!n)return;if(e.key=='ArrowDown'||e.key=='ArrowUp'){e.preventDefault();SXA=(SXA+(e.key=='ArrowDown'?1:n-1))%n;document.querySelectorAll('.sxi').forEach(b=>b.classList.toggle('on',+b.dataset.sx==SXA));document.querySelector('.sxi.on').scrollIntoView({block:'nearest'})}else if(e.key=='Enter'){e.preventDefault();sxGo(SXA)}};
@@ -2720,7 +3533,7 @@ details summary{cursor:pointer;font-weight:600;padding:4px 0}details[open] summa
 .ann{border:1px solid var(--a);background:color-mix(in srgb,var(--a) 9%,var(--c));border-radius:14px;padding:14px 16px;margin-bottom:12px;font-size:14px;white-space:pre-wrap;word-break:break-word}.ann b{display:block;color:var(--a);font-size:12px;letter-spacing:.8px;text-transform:uppercase;margin-bottom:4px}
 .apps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.apps a{display:flex;flex-direction:column;align-items:center;gap:4px;text-decoration:none;color:var(--t);background:var(--c2);border:1px solid var(--l);border-radius:10px;padding:12px 6px;font-size:13px;font-weight:600;text-align:center}.apps a:hover{border-color:var(--a)}.apps small{color:var(--m);font-weight:500;font-size:11.5px}
 .wide{color:var(--a);display:block;text-align:center;margin-top:10px;text-decoration:none;font-weight:600}
-.pwf{margin-top:8px}.pwf label{display:block;font-size:13px;color:var(--m);font-weight:600;margin:10px 0 5px}.pwf input[type=password],.pwf input[type=text]{width:100%;font:inherit;color:var(--t);background:var(--c2);border:1px solid var(--l);border-radius:8px;padding:9px 11px}
+.pwf{margin-top:8px}.pwf label{display:block;font-size:13px;color:var(--m);font-weight:600;margin:10px 0 5px}.pwf input[type=password],.pwf input[type=text],.pwf select{width:100%;font:inherit;color:var(--t);background:var(--c2);border:1px solid var(--l);border-radius:8px;padding:9px 11px}
 .pwf input:focus-visible{outline:2px solid var(--a);outline-offset:1px}.pwf .shw{display:flex;align-items:center;gap:8px;font-weight:500}.pwf .pri{margin-top:6px;background:var(--a);color:#fff;border-color:var(--a)}
 .tg{font-size:13.5px;color:var(--m);margin:-8px 0 14px}
 </style><style id="acs"></style></head><body>
@@ -2748,18 +3561,28 @@ document.getElementById('app').innerHTML=`<div class="top"><b>My account</b><b c
 <div class="big">${fb(U.used)} <span>of ${U.lim?U.lim+' GB':'unlimited'}</span></div>${U.lim?`<div class="bar"><i style="width:${pct}%;background:${pct>90?'var(--r)':pct>75?'var(--y)':'var(--a)'}"></i></div>`:''}
 ${row('Upload',fb(U.up))}${row('Download',fb(U.down))}${row('Expires',left)}${row('Devices allowed',U.dev||'Unlimited')}</div>
 ${H.length?`<div class="card"><div class="lab">Daily usage (30 days)</div><div class="uch" role="img" aria-label="Daily data usage">${H.map(x=>`<i title="${x[0]}: ${fb(x[1]+x[2])}"><b style="height:${(x[1]/HM*100).toFixed(1)}%"></b><u style="height:${(x[2]/HM*100).toFixed(1)}%"></u></i>`).join('')}</div><div class="uax"><span>${H[0][0].slice(5)}</span><span>Today ${fb(H[H.length-1][1]+H[H.length-1][2])}</span></div></div>`:''}
-<div class="card"><div class="lab">Subscription</div><p class="note">Add this link in v2rayNG, NekoBox or Hiddify (Subscription → Add). The app updates your configs automatically.</p>${cbox('Subscription link',U.sub,false)}<div class="qr">${RXQR.svg(U.sub,260)}</div></div>
+${U.kind=="v2ray"||U.kind=="both"||U.kind=="hy2"?`<div class="card"><div class="lab">Subscription</div><p class="note">Add this link in v2rayNG, NekoBox or Hiddify (Subscription → Add). The app updates your configs automatically.${U.kind=="hy2"?" Your account uses Hysteria2 (UDP). If it does not connect, your network may block UDP.":""}</p>${cbox('Subscription link',U.sub,false)}<div class="qr">${RXQR.svg(U.sub,260)}</div></div>
 <div class="card"><div class="lab">Get the app</div><p class="note">Install one of these apps, then add the subscription link above.</p><div class="apps">
 <a href="https://github.com/2dust/v2rayNG/releases/latest" target="_blank" rel="noopener">v2rayNG<small>Android</small></a><a href="https://github.com/MatsuriDayo/NekoBoxForAndroid/releases/latest" target="_blank" rel="noopener">NekoBox<small>Android</small></a><a href="https://github.com/hiddify/hiddify-app/releases/latest" target="_blank" rel="noopener">Hiddify<small>Android · iPhone · PC</small></a></div>
 <a class="wide" href="hiddify://import/${encodeURI(U.sub)}#${encodeURIComponent(U.brand||'ReXUI')}">Already have Hiddify? Tap to add your subscription</a></div>
-<div class="card"><div class="lab">Configs</div><p class="note">Or add one config at a time. Tap to copy, or show the QR.</p>${U.links.map(l=>cbox(l.name,l.url)+(l.name=='VLESS XHTTP (no TLS)'&&!U.plaindomain?'<p class="note bad">This one may not work in new apps without a domain.</p>':'')).join('')}</div>
-<div class="card"><div class="lab">SSH account</div>${row('Host',U.addr)}${row('Username',U.name)}${row('Password',U.pw||'Ask your provider')}${row('SSH',p.SSH_PORT)}${row('SSH SSL / TLS',p.SSL_PORT)}${row('SSH WebSocket',p.WS_PORT)}${row('SSH WebSocket TLS',p.WSTLS_PORT)}${row('UDPGW','127.0.0.1:'+p.UDPGW_PORT)}
+<div class="card"><div class="lab">Configs</div><p class="note">Or add one config at a time. Tap to copy, or show the QR.</p>${U.links.map(l=>cbox(l.name,l.url)+(l.name=='VLESS XHTTP (no TLS)'&&!U.plaindomain?'<p class="note bad">This one may not work in new apps without a domain.</p>':'')).join('')}</div>`:""}
+${U.kind=="dns"&&U.dns?`<div class="card"><div class="lab">DNS tunnel + V2Ray</div><p class="note">Use a DNS tunnel app (DNSTT / SlowDNS with V2Ray). Enter the nameserver and public key, pick a DNS resolver, then add the V2Ray config. It is slow, but works where only DNS is open.</p>
+${row('Nameserver (NS)',U.dns.ns||'Ask your provider')}${row('DNS resolver','8.8.8.8')}${row('Faster (DoH)','https://dns.google/dns-query')}${row('HTTP Custom','SlowDNS · Type Auto')}${cbox('Public key',U.dns.pub,false)}${U.links.map(l=>cbox(l.name,l.url)).join("")}</div>`:""}
+${U.kind=="ovpn"&&U.ovpn?`<div class="card"><div class="lab">OpenVPN</div><p class="note">Download your .ovpn file and import it in OpenVPN Connect, HTTP Custom or HTTP Injector. With the HTTP proxy on, the app connects through port ${U.ovpn.proxy} and sends the Host you type here.</p>
+<form id="ovf" class="pwf"><label for="ovp">Port</label><select id="ovp">${U.ovpn.ports.map(x=>`<option value="${x}">TCP ${x}</option>`).join("")}</select>
+<label for="ovh">Host (bug host, optional)</label><input id="ovh" type="text" value="${X(U.ovpn.host)}" placeholder="example: m.facebook.com" autocapitalize="none" spellcheck="false">
+<label class="shw"><input type="checkbox" id="ovx" checked> Use the HTTP proxy (port ${U.ovpn.proxy})</label><p class="note bad" id="ove" role="alert"></p><button class="btn pri">Download .ovpn file</button></form>
+${row('Server',U.addr)}${row('TCP ports',U.ovpn.ports.join(', '))}${row('HTTP proxy',U.addr+':'+U.ovpn.proxy)}</div>
+<div class="card"><div class="lab">Get the app</div><div class="apps"><a href="https://openvpn.net/client/" target="_blank" rel="noopener">OpenVPN Connect<small>Android · iPhone · PC</small></a><a href="https://play.google.com/store/apps/details?id=xyz.easypro.httpcustom" target="_blank" rel="noopener">HTTP Custom<small>Android</small></a></div></div>`:""}
+${U.kind=="ssh"||U.kind=="both"?`<div class="card"><div class="lab">SSH account</div>${row('Host',U.addr)}${row('Username',U.name)}${row('Password',U.pw||'Ask your provider')}${row('SSH',p.SSH_PORT)}${row('SSH SSL / TLS',p.SSL_PORT)}${row('SSH WebSocket',p.WS_PORT)}${row('SSH WebSocket TLS',p.WSTLS_PORT)}${row('UDPGW','127.0.0.1:'+p.UDPGW_PORT)}
 <details style="margin-top:12px"><summary>WebSocket payloads</summary>${pl.map((x,i)=>cbox('Payload '+(i+1),x,false)).join('')}</details>
 ${U.pw?`<details style="margin-top:6px"><summary>Change password</summary><form id="pwf" class="pwf"><p class="note">This changes your SSH password. Your V2Ray configs and subscription link stay the same. If you forgot your current password, ask your provider.</p>
 <label for="po">Current password</label><input id="po" type="password" autocomplete="current-password" required>
 <label for="pn">New password</label><input id="pn" type="password" autocomplete="new-password" required>
 <label for="pc">New password again</label><input id="pc" type="password" autocomplete="new-password" required>
-<label class="shw"><input type="checkbox" id="ps"> Show passwords</label><p class="note bad" id="pe" role="alert"></p><button class="btn pri">Change password</button></form></details>`:''}</div>`;
+<label class="shw"><input type="checkbox" id="ps"> Show passwords</label><p class="note bad" id="pe" role="alert"></p><button class="btn pri">Change password</button></form></details>`:''}</div>`:""}`;
+const of=document.getElementById('ovf');if(of)of.onsubmit=async e=>{e.preventDefault();const b=of.querySelector('.pri'),oe=document.getElementById('ove'),pt=document.getElementById('ovp').value,x=document.getElementById('ovx').checked;oe.textContent='';b.disabled=true;
+try{const r=await fetch(location.pathname.replace(/\/$/,'')+'/ovpn?port='+pt+'&host='+encodeURIComponent(document.getElementById('ovh').value.trim())+'&proxy='+(x?1:0));if(!r.ok){oe.textContent=(await r.text()).slice(0,200)||'Error '+r.status}else{const bl=await r.blob(),a=document.createElement('a');a.href=URL.createObjectURL(bl);a.download=U.name+'-'+pt+(x?'-proxy':'')+'.ovpn';document.body.append(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1500)}}catch(z){oe.textContent='Network error, try again'}b.disabled=false};
 const pf=document.getElementById('pwf');if(pf){document.getElementById('ps').onchange=e=>['po','pn','pc'].forEach(i=>document.getElementById(i).type=e.target.checked?'text':'password');
 pf.onsubmit=async e=>{e.preventDefault();const g=i=>document.getElementById(i).value,pe=document.getElementById('pe'),b=pf.querySelector('.pri');pe.textContent='';
 if(g('pn')!==g('pc'))return pe.textContent='The new passwords do not match';b.disabled=true;
@@ -2839,6 +3662,50 @@ After=network.target
 ExecStart=/usr/bin/python3 /opt/tunnel-panel/panel.py run
 Restart=always
 RestartSec=2
+LimitNOFILE=65535
+[Install]
+WantedBy=multi-user.target
+S
+mkdir -p /etc/systemd/system/squid.service.d
+printf '[Service]\nLimitNOFILE=65535\n' > /etc/systemd/system/squid.service.d/rexui.conf
+cat > /etc/systemd/system/rexui-dns.service <<'S'
+[Unit]
+Description=ReXUI DNS tunnel (dnstt)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=/bin/sh /etc/tunnel/dns/run.sh
+Restart=on-failure
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+S
+cat > /etc/systemd/system/rexui-hy2.service <<'S'
+[Unit]
+Description=ReXUI Hysteria2 (UDP)
+After=network-online.target tunnel-panel.service
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/hysteria server -c /etc/tunnel/hy2/config.yaml --disable-update-check
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+[Install]
+WantedBy=multi-user.target
+S
+cat > /etc/systemd/system/rexui-ovpn@.service <<'S'
+[Unit]
+Description=ReXUI OpenVPN %i
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=/usr/sbin/openvpn --suppress-timestamps --config /etc/tunnel/ovpn/%i.conf
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
 [Install]
 WantedBy=multi-user.target
 S
@@ -2938,15 +3805,18 @@ myip(){ curl -4 -s --max-time 5 ifconfig.me || hostname -I | awk '{print $1}'; }
 url(){ local H; H=$(myip); if [ -f /etc/tunnel/cert/info ]; then NAME=; . /etc/tunnel/cert/info; [[ $NAME =~ [a-z] && $NAME != \** ]] && H=$NAME; fi; echo "https://$H:$PANEL_PORT/$WEB_PATH/"; }
 on(){ systemctl is-active --quiet "$1" && echo -e "${G}ON${N}" || echo -e "${Y}OFF${N}"; }
 fw(){ if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then ufw allow "$1"/tcp >/dev/null; fi; }
+fwu(){ if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then ufw allow "$1"/udp >/dev/null; fi; }
 info(){
   . $CF; echo
   echo -e "Panel URL  : ${C}$(url)${N}"
   echo    "Panel user : $(python3 $PY user)  (password is stored as a hash, use option 3 to set a new one)"
-  echo -e "Services   : Panel $(on tunnel-panel) | Xray $(on xray) | stunnel $(on stunnel4) | WS $(on ws-ssh) | UDPGW $(on badudp)"
+  echo -e "Services   : Panel $(on tunnel-panel)$([ -x /usr/local/bin/hysteria ] && echo " | Hysteria2 $(on rexui-hy2)")$([ -x /usr/local/bin/dnstt-server ] && echo " | DNS $(on rexui-dns)") | Xray $(on xray) | stunnel $(on stunnel4) | WS $(on ws-ssh) | UDPGW $(on badudp)$([ -f /etc/systemd/system/rexui-ovpn@.service ] && echo " | OpenVPN $(on rexui-ovpn@rx1194) | Squid $(on squid)")"
   R=$(timeout 4 bash -c "exec 3<>/dev/tcp/127.0.0.1/$WS_PORT; printf 'GET / HTTP/1.1\\r\\nHost: x\\r\\nUpgrade: websocket\\r\\n\\r\\n' >&3; head -c 12 <&3" 2>/dev/null)
   if [ "$R" = "HTTP/1.1 101" ]; then echo -e "SSH WS test : ${G}OK on this server${N} (if phones still cannot connect to $WS_PORT, open it in your provider firewall)"; else echo -e "SSH WS test : ${Y}FAILED${N} (try: systemctl restart ws-ssh)"; fi
   printf "%-14s: %s\n" "SSH" $SSH_PORT "SSL" $SSL_PORT "SSH WS" $WS_PORT "SSH WS TLS" $WSTLS_PORT "UDPGW" "127.0.0.1:$UDPGW_PORT" \
     "VLESS XHTTP TLS" $VWSTLS_PORT "VLESS TCP TLS" $VTCP_PORT "Trojan TLS" ${TROJAN_PORT:-2096} "VLESS Reality" ${REALITY_PORT:-8444} "VLESS XHTTP" $VWS_PORT "Panel" $PANEL_PORT
+  [ -f /etc/systemd/system/rexui-ovpn@.service ] && printf "%-14s: %s\n" "OpenVPN TCP" "${OVPN1_PORT:-1194}, ${OVPN2_PORT:-110}" "HTTP proxy" "${SQUID_PORT:-3128}"
+  [ -x /usr/local/bin/hysteria ] && printf "%-14s: %s\n" "Hysteria2 UDP" "${HY_PORT:-443} (hopping ${HY_HOP:-20000-30000})"
 }
 apply(){
   . $CF
@@ -2967,6 +3837,17 @@ S
   systemctl daemon-reload
   systemctl restart stunnel4 ws-ssh tunnel-panel
 }
+hop(){
+  read -rp "New hopping range like 20000-30000 (0 = off) [${HY_HOP:-20000-30000}]: " r
+  [ -z "$r" ] && { echo "No change"; return; }
+  if [ "$r" != 0 ]; then
+    [[ $r =~ ^([0-9]+)-([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -ge 1 ] && [ "${BASH_REMATCH[2]}" -le 65535 ] && [ "${BASH_REMATCH[1]}" -lt "${BASH_REMATCH[2]}" ] || { echo "Invalid range"; return; }
+    if [ "${HY_PORT:-443}" -ge "${BASH_REMATCH[1]}" ] && [ "${HY_PORT:-443}" -le "${BASH_REMATCH[2]}" ]; then echo "The range cannot include the Hysteria2 port ${HY_PORT:-443}"; return; fi
+    fwu "${r/-/:}"
+  fi
+  if grep -q "^HY_HOP=" $CF; then sed -i "s/^HY_HOP=.*/HY_HOP=$r/" $CF; else echo "HY_HOP=$r" >> $CF; fi; apply
+  echo -e "${G}Done:${N} port hopping = $r. UDP users need to refresh their subscription."
+}
 ports(){
   while true; do
     . $CF
@@ -2982,35 +3863,45 @@ ports(){
 7) VLESS XHTTP     : $VWS_PORT
 8) VLESS Reality   : $REALITY_PORT
 9) Trojan TLS      : $TROJAN_PORT
+10) OpenVPN TCP 1   : ${OVPN1_PORT:-1194}
+11) OpenVPN TCP 2   : ${OVPN2_PORT:-110}
+12) HTTP proxy      : ${SQUID_PORT:-3128}
+13) Hysteria2 UDP   : ${HY_PORT:-443}
+14) UDP hopping     : ${HY_HOP:-20000-30000}  (range, 0 = off)
 0) Back
 T
     read -rp "Option: " o
-    case $o in 1) K=PANEL_PORT;; 2) K=SSL_PORT;; 3) K=WS_PORT;; 4) K=WSTLS_PORT;; 5) K=VWSTLS_PORT;; 6) K=VTCP_PORT;; 7) K=VWS_PORT;; 8) K=REALITY_PORT;; 9) K=TROJAN_PORT;; *) return;; esac
-    cur=${!K}; read -rp "New port [$cur]: " np
+    case $o in 1) K=PANEL_PORT;; 2) K=SSL_PORT;; 3) K=WS_PORT;; 4) K=WSTLS_PORT;; 5) K=VWSTLS_PORT;; 6) K=VTCP_PORT;; 7) K=VWS_PORT;; 8) K=REALITY_PORT;; 9) K=TROJAN_PORT;; 10) K=OVPN1_PORT;; 11) K=OVPN2_PORT;; 12) K=SQUID_PORT;; 13) K=HY_PORT;; 14) hop; continue;; *) return;; esac
+    case $K in OVPN1_PORT) dflt=1194;; OVPN2_PORT) dflt=110;; SQUID_PORT) dflt=3128;; HY_PORT) dflt=443;; *) dflt=;; esac; cur=${!K}; cur=${cur:-$dflt}; read -rp "New port [$cur]: " np
     [ -z "$np" ] || [ "$np" = "$cur" ] && { echo "No change"; continue; }
     if ! [[ $np =~ ^[0-9]+$ ]] || [ "$np" -lt 1 ] || [ "$np" -gt 65535 ]; then echo "Invalid port"; continue; fi
-    if grep -E "^[A-Z_]*PORT=$np$" $CF | grep -qv "^$K="; then echo "Port $np is already used by another protocol"; continue; fi
+    if [ "$K" != HY_PORT ] && grep -E "^[A-Z_]*PORT=$np$" $CF | grep -v "^HY_PORT=" | grep -qv "^$K="; then echo "Port $np is already used by another protocol"; continue; fi
     [ "$np" = 22 ] || [ "$np" = 10085 ] && { echo "Port $np is reserved"; continue; }
-    if ss -tlnH "sport = :$np" | grep -q .; then echo "Port $np is in use:"; ss -tlnp "sport = :$np"; continue; fi
-    if grep -q "^$K=" $CF; then sed -i "s/^$K=.*/$K=$np/" $CF; else echo "$K=$np" >> $CF; fi; fw "$np"; apply
+    if [ "$K" = HY_PORT ]; then
+      if ss -ulnH "sport = :$np" | grep -v hysteria | grep -q .; then echo "UDP port $np is in use:"; ss -ulnp "sport = :$np"; continue; fi
+    elif ss -tlnH "sport = :$np" | grep -q .; then echo "Port $np is in use:"; ss -tlnp "sport = :$np"; continue; fi
+    if grep -q "^$K=" $CF; then sed -i "s/^$K=.*/$K=$np/" $CF; else echo "$K=$np" >> $CF; fi
+    if [ "$K" = HY_PORT ]; then fwu "$np"; else fw "$np"; fi; apply
     echo -e "${G}Done:${N} $K = $np. Allow port $np in your provider firewall."
     [ "$K" = PANEL_PORT ] && echo "New panel URL: $(url)"
     [[ $K == V* || $K == REALITY_PORT || $K == TROJAN_PORT ]] && echo "Xray links changed: users need to refresh their subscription."
+    [[ $K == OVPN* || $K == SQUID_PORT ]] && echo "OpenVPN changed: users need to download a new .ovpn file."
+    [ "$K" = HY_PORT ] && echo "Hysteria2 changed: UDP users need to refresh their subscription. Allow UDP $np in your provider firewall."
   done
 }
 srv(){
   cat <<T
 
 ===== SERVICE RESTART =====
-1) Sab   2) SSH   3) stunnel4 (SSL + WS TLS)   4) SSH WS
-5) UDPGW   6) Xray   7) Panel   8) Fail2ban   0) Back
+1) All   2) SSH   3) stunnel4 (SSL + WS TLS)   4) SSH WS
+5) UDPGW   6) Xray   7) Panel   8) Fail2ban   9) OpenVPN + HTTP proxy   10) Hysteria2   11) DNS tunnel   0) Back
 T
   read -rp "Option: " o
   case $o in
-    1) systemctl restart ssh 2>/dev/null || systemctl restart sshd; systemctl restart stunnel4 ws-ssh badudp xray tunnel-panel fail2ban;;
+    1) systemctl restart ssh 2>/dev/null || systemctl restart sshd; systemctl restart stunnel4 ws-ssh badudp xray tunnel-panel fail2ban; systemctl restart 'rexui-ovpn@*' squid rexui-hy2 2>/dev/null; systemctl is-enabled --quiet rexui-dns 2>/dev/null && systemctl restart rexui-dns;;
     2) systemctl restart ssh 2>/dev/null || systemctl restart sshd;;
     3) systemctl restart stunnel4;; 4) systemctl restart ws-ssh;; 5) systemctl restart badudp;;
-    6) systemctl restart xray;; 7) systemctl restart tunnel-panel;; 8) systemctl restart fail2ban;;
+    6) systemctl restart xray;; 7) systemctl restart tunnel-panel;; 8) systemctl restart fail2ban;; 9) systemctl restart 'rexui-ovpn@*' squid;; 10) systemctl restart rexui-hy2;; 11) systemctl restart rexui-dns;;
     *) return;;
   esac
   echo -e "${G}Restarted${N}"
@@ -3107,12 +3998,16 @@ upd(){
   bash "$f"; exit 0
 }
 uninst(){
-  echo -e "${Y}This removes the panel, Xray, the SSH WS/SSL tunnels and all panel users.${N}"
+  echo -e "${Y}This removes the panel, Xray, OpenVPN, Hysteria2, the DNS tunnel, the SSH WS/SSL tunnels and all panel users.${N}"
   read -rp "Type yes to confirm: " y; [ "$y" = yes ] || { echo "Cancelled"; return; }
   f=/root/rexui-backup-before-uninstall-$(date +%F-%H%M).json
   python3 $PY backup "$f" >/dev/null 2>&1 && chmod 600 "$f" && echo "A final backup was saved to $f"
   systemctl disable --now tunnel-panel xray ws-ssh badudp stunnel4 >/dev/null 2>&1
+  for u in $(systemctl list-units --all --plain --no-legend 'rexui-ovpn@*' 2>/dev/null | awk '{print $1}') rexui-ovpn@rx1194 rexui-ovpn@rx110; do systemctl disable --now "$u" >/dev/null 2>&1; done
+  systemctl disable --now rexui-hy2 rexui-dns >/dev/null 2>&1
   python3 $PY purge 2>/dev/null
+  if [ -f /etc/squid/squid.conf.orig ]; then mv -f /etc/squid/squid.conf.orig /etc/squid/squid.conf; systemctl disable --now squid >/dev/null 2>&1; fi
+  rm -f /etc/systemd/system/rexui-ovpn@.service /etc/systemd/system/rexui-hy2.service /usr/local/bin/hysteria /etc/systemd/system/rexui-dns.service /usr/local/bin/dnstt-server /etc/sysctl.d/99-rexui-ovpn.conf
   rm -f /etc/systemd/system/{tunnel-panel,xray,ws-ssh,badudp}.service /etc/stunnel/stunnel.conf /etc/cron.d/tunnel-expire
   rm -f /etc/cron.d/rexui-reboot; rm -rf /opt/tunnel-panel /usr/local/etc/xray /usr/local/bin/xray /usr/local/bin/ws-ssh.py /usr/local/bin/badvpn-udpgw /usr/local/bin/geoip.dat /usr/local/bin/geosite.dat /etc/tunnel /etc/tunnel-users /var/log/xray $LIB
   systemctl daemon-reload
@@ -3158,24 +4053,36 @@ rm -f $LIB/ssh.sh $LIB/v2ray.sh $LIB/payloads.sh $LIB/panel.sh /etc/cron.d/tunne
 step 11 "Services start + firewall"
 systemctl daemon-reload
 systemctl enable badudp ws-ssh xray tunnel-panel >/dev/null 2>&1
+python3 /opt/tunnel-panel/panel.py ovpn-setup || true
+systemctl enable rexui-ovpn@rx1194 rexui-ovpn@rx110 squid >/dev/null 2>&1 || true
+systemctl restart rexui-ovpn@rx1194 rexui-ovpn@rx110 squid || echo "WARNING: OpenVPN or Squid did not start, see: journalctl -u rexui-ovpn@rx1194 -u squid"
+if [ -x /usr/local/bin/hysteria ]; then
+  python3 /opt/tunnel-panel/panel.py hy-setup || true
+  systemctl enable rexui-hy2 >/dev/null 2>&1 || true
+  systemctl restart rexui-hy2 || echo "WARNING: Hysteria2 did not start, see: journalctl -u rexui-hy2"
+fi
+[ -x /usr/local/bin/dnstt-server ] && { python3 /opt/tunnel-panel/panel.py dns-setup || true; }
 systemctl restart badudp ws-ssh stunnel4 tunnel-panel
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-  for p in $SSH_PORT $SSL_PORT $WS_PORT $WSTLS_PORT $PANEL_PORT $VWSTLS_PORT $VTCP_PORT $VWS_PORT $REALITY_PORT $TROJAN_PORT 80; do ufw allow $p/tcp >/dev/null; done
+  for p in $SSH_PORT $SSL_PORT $WS_PORT $WSTLS_PORT $PANEL_PORT $VWSTLS_PORT $VTCP_PORT $VWS_PORT $REALITY_PORT $TROJAN_PORT $OVPN1_PORT $OVPN2_PORT $SQUID_PORT 80; do ufw allow $p/tcp >/dev/null; done
+  ufw allow $HY_PORT/udp >/dev/null; ufw allow 53/udp >/dev/null; if [[ $HY_HOP =~ ^[0-9]+-[0-9]+$ ]]; then ufw allow ${HY_HOP/-/:}/udp >/dev/null; fi
 fi
 sleep 6
 R=$(timeout 4 bash -c "exec 3<>/dev/tcp/127.0.0.1/$WS_PORT; printf 'GET / HTTP/1.1\r\nHost: x\r\n\r\n' >&3; head -c 12 <&3" 2>/dev/null || true)
 PH=$(curl -4 -s --max-time 5 ifconfig.me || hostname -I | awk '{print $1}')
 if [ -f /etc/tunnel/cert/info ]; then NAME=; . /etc/tunnel/cert/info; [[ $NAME =~ [a-z] && $NAME != \** ]] && PH=$NAME; fi
 echo -e "\n\033[1;32m==============================\033[0m"
-for s in ssh stunnel4 ws-ssh badudp xray fail2ban tunnel-panel; do
-  x=$(systemctl is-active $s 2>/dev/null || true); [ $s = ssh ] && [ "$x" != active ] && x=$(systemctl is-active sshd 2>/dev/null || true); printf "%-12s: %s\n" $s "$x"
+for s in ssh stunnel4 ws-ssh badudp xray fail2ban tunnel-panel rexui-ovpn@rx1194 rexui-ovpn@rx110 squid rexui-hy2 rexui-dns; do
+  x=$(systemctl is-active $s 2>/dev/null || true); [ $s = ssh ] && [ "$x" != active ] && x=$(systemctl is-active sshd 2>/dev/null || true); printf "%-18s: %s\n" $s "$x"
 done
 echo "SSH $SSH_PORT | SSL $SSL_PORT | WS $WS_PORT | WS TLS $WSTLS_PORT | UDPGW 127.0.0.1:$UDPGW_PORT"
 echo "VLESS XHTTP TLS $VWSTLS_PORT | VLESS TCP TLS $VTCP_PORT | Trojan $TROJAN_PORT | Reality $REALITY_PORT | VLESS XHTTP $VWS_PORT"
+echo "OpenVPN TCP $OVPN1_PORT, $OVPN2_PORT | HTTP proxy $SQUID_PORT | Hysteria2 UDP $HY_PORT (hopping $HY_HOP)"
 echo "WS test   : ${R:-fail}"
 echo "Panel     : https://$PH:$PANEL_PORT/$WEB_PATH/"
 if [ -n "$NEWPASS" ]; then echo "Login     : admin / $NEWPASS  (save this now)"; else echo "Login     : unchanged (change it with menu -> 3)"; fi
 echo "Menu      : menu"
 echo "Project   : https://github.com/chaliraza777/ReXUI"
-echo "Allow these ports in your provider firewall: $SSL_PORT $WS_PORT $WSTLS_PORT $VWSTLS_PORT $VTCP_PORT $VWS_PORT $REALITY_PORT $TROJAN_PORT $PANEL_PORT 80"
+echo "Allow these TCP ports in your provider firewall: $SSL_PORT $WS_PORT $WSTLS_PORT $VWSTLS_PORT $VTCP_PORT $VWS_PORT $REALITY_PORT $TROJAN_PORT $OVPN1_PORT $OVPN2_PORT $SQUID_PORT $PANEL_PORT 80"
+echo "Also allow UDP: $HY_PORT and $HY_HOP (Hysteria2), 53 (DNS tunnel)"
 echo -e "\033[1;32m==============================\033[0m"

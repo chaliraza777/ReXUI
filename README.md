@@ -128,8 +128,6 @@ Running the installer again **updates ReXUI** and keeps all users and settings.
 
 ## Default ports
 
-| Service | Port |
-|---|---|
 | Service | 443 mode | Own port (also works) |
 |---|---|---|
 | SSH | | 22 |

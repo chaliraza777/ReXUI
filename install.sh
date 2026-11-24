@@ -1,5 +1,5 @@
 #!/bin/bash
-# ReXUI v1.0 installer
+# ReXUI v1.5 installer
 # Self-hosted SSH + Xray panel: SSH, SSL, SSH WebSocket (+TLS), UDPGW, Xray (VLESS XHTTP TLS / TCP TLS / Reality / XHTTP, Trojan), OpenVPN (TCP + HTTP proxy), Hysteria2 (UDP), DNS tunnel (dnstt) + V2Ray,
 # web panel with users, subscriptions, data and device limits, Telegram alerts, backups, 2FA, and a terminal menu.
 # Run as root on Ubuntu or Debian:  bash install.sh   (running it again updates ReXUI and keeps users and settings)
@@ -11,7 +11,7 @@ SSH_PORT_DEF=22
 SSL_PORT=443; WS_PORT=8880; WSTLS_PORT=2083; UDPGW_PORT=7300; VWSTLS_PORT=8443; VTCP_PORT=2053; VWS_PORT=8080; REALITY_PORT=8444; TROJAN_PORT=2096; OVPN1_PORT=1194; OVPN2_PORT=110; SQUID_PORT=3128; HY_PORT=443; HY_HOP=20000-30000; HYV=2.13.0; DNSTTV=v1.20240513.0
 LIB=/usr/local/lib/tunnel
 step(){ echo -e "\n\033[1;36m[$1/11]\033[0m $2"; }
-busy(){ if ss -tlnp | grep ":$1 " | grep -qv -e stunnel -e python3 -e xray -e squid -e openvpn; then echo "Port $1 is already in use:"; ss -tlnp | grep ":$1 "; exit 1; fi; }
+busy(){ if ss -tlnp | grep ":$1 " | grep -qv -e stunnel -e python3 -e xray -e squid -e openvpn -e haproxy; then echo "Port $1 is already in use:"; ss -tlnp | grep ":$1 "; exit 1; fi; }
 [ -f /etc/tunnel/config ] && . /etc/tunnel/config
 if [ -z "$PANEL_PORT" ]; then
   PANEL_PORT=$(shuf -i 20000-59999 -n1)
@@ -25,6 +25,7 @@ mkdir -p /etc/tunnel/cert $LIB
 step 1 "Packages"
 apt-get update -qq
 apt-get install -y -qq openssh-server stunnel4 fail2ban cmake build-essential git openssl curl cron python3 socat unzip iptables openvpn squid >/dev/null
+apt-get install -y -qq haproxy >/dev/null 2>&1 || echo -e "\033[1;33mHAProxy could not be installed, 443 mode stays off (everything else works).\033[0m"
 [ -c /dev/net/tun ] || echo -e "\033[1;33mWARNING: /dev/net/tun is missing. OpenVPN needs TUN: enable it in your VPS control panel (OpenVZ / LXC) or ask your provider.\033[0m"
 
 step 2 "SSH tuning"
@@ -74,7 +75,7 @@ sslVersionMin = TLSv1.2
 socket = l:TCP_NODELAY=1
 socket = r:TCP_NODELAY=1
 [ssh-ssl]
-accept = $SSL_PORT
+accept = $( [ -f /etc/tunnel/h443.on ] && [ "$SSL_PORT" = 443 ] && echo 127.0.0.1:10443 || echo $SSL_PORT )
 connect = 127.0.0.1:$SSH_PORT
 [ssh-ws-tls]
 accept = $WSTLS_PORT
@@ -380,7 +381,7 @@ def sload():
     s={'addr':'','sni':'','host':'','path':'/vless','rsni':'www.microsoft.com','rpriv':'','rpub':'','rsid':'',
        'btorrent':True,'bads':False,'warp':'off','wsites':'geosite:google,geosite:openai,geosite:netflix',
        'b25':True,'autodel':0,'tgtoken':'','tgchat':'','brand':'','tagline':'','accent':'blue',
-       'health':True,'report':False,'rhour':9,'tgbackup':False,'reboot':'off','rbday':0,'rbtime':'04:00','announce':'','cname':'{user}-{proto}','flag':'','autoclean':True,'rports':{},'fsite':'off','ftitle':'','xauto':False,'ddns_dom':'','ddns_tok':'','ovhost':'','dns_ns':'','hy_bw':0}
+       'health':True,'report':False,'rhour':9,'tgbackup':False,'reboot':'off','rbday':0,'rbtime':'04:00','announce':'','cname':'{user}-{proto}','flag':'','autoclean':True,'rports':{},'fsite':'off','ftitle':'','xauto':False,'ddns_dom':'','ddns_tok':'','ovhost':'','dns_ns':'','hy_bw':0,'cdn_dom':'','cdn_addr':'','perf':'balanced','h443':True}
     try: s.update({k:v for k,v in json.loads(rd(SETF)).items() if k in s})
     except Exception: pass
     return s
@@ -808,7 +809,10 @@ def uapi(a,d):
             dev=ival(d,'dev',0,100,2); rday=ival(d,'rday',0,28,0); first=bool(d.get('first')) and days>0
             sni=hostok(d.get('sni'),'SNI'); host=hostok(d.get('host'),'Host'); note=noteval(d); rt=rtarget_val(d.get('rtarget')); rs=rsni_val(d.get('rsni'))
             e='never' if days==0 or first else (datetime.date.today()+datetime.timedelta(days=days)).isoformat()
-            mkuser(us,n,p,e,lim,sni,host,dev,rday,note,fdays=days if first else 0,rtarget=rt,rsni=rs,kind=k); usave(us)
+            ca=hostok(d.get('cdn'),'CDN address')
+            mkuser(us,n,p,e,lim,sni,host,dev,rday,note,fdays=days if first else 0,rtarget=rt,rsni=rs,kind=k)
+            if ca: us[-1]['cdn']=ca
+            usave(us)
         elif not u: raise Err('User not found')
         elif a=='edit':
             p=str(d.get('pw','')); days=ival(d,'days',0,3650,0); lim=fval(d,'lim',0,100000)
@@ -817,7 +821,15 @@ def uapi(a,d):
             sni=hostok(d.get('sni'),'SNI'); host=hostok(d.get('host'),'Host')
             if 'rtarget' in d: u['rtarget']=rtarget_val(d.get('rtarget'),u.get('rtarget',''))
             if 'rsni' in d: u['rsni']=rsni_val(d.get('rsni'))
-            if days: add_days(u,days)
+            if 'cdn' in d: u['cdn']=hostok(d.get('cdn'),'CDN address')
+            em=str(d.get('expmode','add'))
+            if em not in ('add','never','set'): raise Err('bad request')
+            if em=='never':
+                u['exp']='never'; u['fdays']=0; u.pop('expts',None); setexp(n,'never')
+            elif em=='set':
+                if days<1: raise Err('Type how many days, from today')
+                u['fdays']=0; u.pop('expts',None); u['exp']=(datetime.date.today()+datetime.timedelta(days=days)).isoformat(); setexp(n,u['exp'])
+            elif days: add_days(u,days)
             if p: run('chpasswd',inp='%s:%s\n'%(n,p)); u['pw']=p
             if p and hashy(u): hy_kick(n)
             if rday!=u.get('rday',0): u['lreset']=today()[:7]
@@ -868,15 +880,16 @@ def _links(u):
     base='vless://%s@%s:%%d?encryption=none&'%(u['uuid'],A)
     xh='&type=xhttp&host=%s&path=%s&mode=auto'%(quote(host),pth)
     pa=s['addr'] if s['addr'] and re.search('[a-z]',s['addr']) else ci['domain'] or a; PA='['+pa+']' if ':' in pa else pa
-    N=lambda c,t:cfgname(u,c,t,s)
-    out=[('VLESS XHTTP TLS',(base%P('VWSTLS_PORT',8443))+tls+'&alpn=h2%2Chttp%2F1.1'+xh+'#'+N('xhttp-tls','VLESS XHTTP TLS')),
-         ('VLESS TCP TLS',(base%P('VTCP_PORT',2053))+tls+'&type=tcp#'+N('tcp-tls','VLESS TCP TLS')),
-         ('Trojan TLS','trojan://%s@%s:%d?'%(u['uuid'],A,P('TROJAN_PORT',2096))+tls+'&type=tcp#'+N('trojan','Trojan TLS'))]
+    N=lambda c,t:cfgname(u,c,t,s); HP,HA=h_uports(u,s)
+    out=[('VLESS XHTTP TLS',(base%HP['VWSTLS_PORT'])+tls+('&alpn=http%2F1.1' if h_on() else '&alpn=h2%2Chttp%2F1.1')+xh+'#'+N('xhttp-tls','VLESS XHTTP TLS'),HA.get('VWSTLS_PORT')),
+         ('VLESS TCP TLS',(base%HP['VTCP_PORT'])+tls+'&type=tcp#'+N('tcp-tls','VLESS TCP TLS'),HA.get('VTCP_PORT')),
+         ('Trojan TLS','trojan://%s@%s:%d?'%(u['uuid'],A,HP['TROJAN_PORT'])+tls+'&type=tcp#'+N('trojan','Trojan TLS'),HA.get('TROJAN_PORT'))]
     if s['rpub']:
         rt,rs=ureal(u,s)
         out.append(('VLESS Reality','vless://%s@%s:%d?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s'%(
             u['uuid'],A,rport(rt,s),quote(rs),s['rpub'],s['rsid'],N('reality','VLESS Reality'))))
-    out.append(('VLESS XHTTP (no TLS)','vless://%s@%s:%d?encryption=none&security=none'%(u['uuid'],PA,P('VWS_PORT',8080))+xh+'#'+N('xhttp','VLESS XHTTP')))
+    out.append(('VLESS XHTTP (no TLS)','vless://%s@%s:%d?encryption=none&security=none'%(u['uuid'],PA,HP['VWS_PORT'])+xh+'#'+N('xhttp','VLESS XHTTP'),HA.get('VWS_PORT')))
+    out+=cdn_links(u,s)
     return out
 def sub_url(u): return 'https://%s:%s/sub/%s'%(certinfo()['domain'] or pub_addr(),E.get('PANEL_PORT',''),u['sub'])
 def detail(n):
@@ -884,13 +897,13 @@ def detail(n):
     if not u: raise Err('User not found')
     s=sload(); ci=certinfo(); a=pub_addr(s)
     return {'name':u['name'],'pw':u['pw'],'uuid':u['uuid'],'exp':u['exp'],'lim':u['lim'],'used':u['up']+u['down'],'up':u['up'],'down':u['down'],
-            'sni':u['sni'],'host':u['host'],'rtarget':u.get('rtarget',''),'rsni_u':u.get('rsni',''),'rt':ureal(u,s)[0],'rport':rport(ureal(u,s)[0],s),'st':ustate(u),'created':u.get('created',''),'dev':u.get('dev',0),'rday':u.get('rday',0),
+            'sni':u['sni'],'host':u['host'],'rtarget':u.get('rtarget',''),'rsni_u':u.get('rsni',''),'cdn':u.get('cdn',''),'rt':ureal(u,s)[0],'rport':rport(ureal(u,s)[0],s),'st':ustate(u),'created':u.get('created',''),'dev':u.get('dev',0),'rday':u.get('rday',0),
             'note':u.get('note',''),'hist':hist30(u),'fdays':u.get('fdays',0),'trial':u.get('trial',False),'expts':u.get('expts',0),'reason':u.get('reason',''),'kind':kind(u),
-            'ssh':sessions().get(u['name'],0),'ips':xips_on(u['name']),'ovpn':ov_info(u),'hy2':hy_info(u),'dns':dns_info(u),'sub':sub_url(u),'links':[{'name':k,'url':v} for k,v in links(u)],
+            'ssh':sessions().get(u['name'],0),'ips':xips_on(u['name']),'ovpn':ov_info(u),'hy2':hy_info(u),'dns':dns_info(u),'pays':[{'name':p['name'],'mode':p['mode'],'note':p.get('note',''),'text':pay_render(p)} for p in pay_load() if p.get('show') and hassh(u)],'sub':sub_url(u),'links':[dict({'name':l[0],'url':l[1]},**({'alt':l[2]} if len(l)>2 and l[2] else {})) for l in links(u)],
             'addr':a,'whost':u['host'] or s['host'] or ci['domain'] or a,'path':s['path'],'rsni':s['rsni'],
             'plaindomain':bool((s['addr'] and re.search('[a-z]',s['addr'])) or ci['domain']),
-            'ports':{k:str(P(k,d)) for k,d in (('SSH_PORT',22),('SSL_PORT',443),('WS_PORT',8880),('WSTLS_PORT',2083),('UDPGW_PORT',7300),
-                     ('VWSTLS_PORT',8443),('VTCP_PORT',2053),('VWS_PORT',8080),('REALITY_PORT',8444),('TROJAN_PORT',2096))}}
+            'ports':dict({k:str(P(k,d)) for k,d in (('SSH_PORT',22),('UDPGW_PORT',7300))},**{k:str(v) for k,v in h_uports(u)[0].items()}),
+            'alt':{k:str(v) for k,v in h_uports(u)[1].items()}}
 
 # ---------- SSH traffic (iptables owner/connmark) ----------
 FAM=['iptables']+(['ip6tables'] if shutil.which('ip6tables') else []); CH=('REXUI_OUT','REXUI_IN'); RUIDS=[None]
@@ -1034,6 +1047,7 @@ def xray_apply(force=False):
                             'settings':{'clients':[{'id':u['uuid'],'email':u['name'],'level':0,'flow':'xtls-rprx-vision'} for u,_ in L],'decryption':'none'},
                             'streamSettings':{'network':'tcp','security':'reality','realitySettings':{'target':t,'serverNames':names,'privateKey':s['rpriv'],'shortIds':[s['rsid']]}},
                             'sniffing':sn})
+        ibs+=h_xinbounds(s,cl,[{'password':u['uuid'],'email':u['name'],'level':0} for u in act])
         obs=[{'protocol':'freedom','tag':'direct','streamSettings':{'sockopt':{'domainStrategy':'UseIPv4v6'}}},{'protocol':'blackhole','tag':'block'}]; rules=[]
         if s['btorrent']: rules.append({'type':'field','protocol':['bittorrent'],'outboundTag':'block'})
         if s['bads'] and geo_ok(): rules.append({'type':'field','domain':['geosite:category-ads-all'],'outboundTag':'block'})
@@ -1170,12 +1184,12 @@ def xon(n): return time.time()-XACT.get(n,0)<XONW
 def xips_on(n): return xips(n) if xon(n) else []
 def xips(n):
     now=time.time(); return [{'ip':ip,'ago':int(now-v[1]),'ban':int(max(0,BANS.get(ip,0)-now)),'shared':shared(ip,n)} for ip,v in sorted(IPSEEN.get(n,{}).items(),key=lambda x:x[1][0])]
-def bans_apply():
+def bans_apply(force=False):
     now=time.time()
     for ip in [ip for ip,t in BANS.items() if t<=now or ip.startswith('127.') or ip=='::1']: BANS.pop(ip)
     cur=tuple(sorted(BANS))
-    if cur==BANSET[0] or not shutil.which('iptables'): return
-    ports=','.join(str(P(k,d)) for k,d in (('VWSTLS_PORT',8443),('VTCP_PORT',2053),('VWS_PORT',8080),('REALITY_PORT',8444),('TROJAN_PORT',2096)))
+    if (cur==BANSET[0] and not force) or not shutil.which('iptables'): return
+    ports=','.join([str(P(k,d)) for k,d in (('VWSTLS_PORT',8443),('VTCP_PORT',2053),('VWS_PORT',8080),('REALITY_PORT',8444),('TROJAN_PORT',2096))]+(['443','80'] if h_on() else []))
     for f in FAM:
         run(f,'-w','-N','REXUI_BAN'); run(f,'-w','-F','REXUI_BAN')
         if run(f,'-w','-C','INPUT','-j','REXUI_BAN').returncode: run(f,'-w','-I','INPUT','1','-j','REXUI_BAN')
@@ -1228,6 +1242,7 @@ def ovports():
     for _,_,_,pp in ovi():
         if pp not in r: r.append(pp)
     return r
+def ovports_u(): return ([443] if os.path.exists(T+'/h443.on') else [])+ovports()
 def ov_on(): return os.path.exists(OVBIN) or bool(shutil.which('openvpn'))
 def hasov(u): return kind(u)=='ovpn'
 OVCNF='''[req]
@@ -1311,7 +1326,7 @@ def ov_server_conf(name,port,net,idx=0):
     return '\n'.join(L)+'\n'
 def ov_squid_conf():
     return '\n'.join(['# ReXUI: HTTP proxy only for OpenVPN (CONNECT to this server, OpenVPN ports). Made by the panel.',
-        'http_port %d'%P('SQUID_PORT',3128),'acl rx_dst dst 127.0.0.1','acl rx_ports port '+' '.join(map(str,ovports())),'acl CONNECT method CONNECT',
+        'http_port %d'%P('SQUID_PORT',3128),'acl rx_dst dst 127.0.0.1','acl rx_ports port '+' '.join(map(str,sorted(set(ovports()+[443])))),'acl CONNECT method CONNECT',
         'http_access allow CONNECT rx_dst rx_ports','http_access deny all','via off','forwarded_for delete','cache deny all',
         'access_log none','cache_log /dev/null','max_filedescriptors 65535','client_idle_pconn_timeout 1 minute','coredump_dir /var/spool/squid','visible_hostname rexui','shutdown_lifetime 1 seconds'])+'\n'
 def wtext(path,txt,mode=0o600):
@@ -1465,7 +1480,7 @@ def ov_devices(us):
             for c in sorted(cl,key=lambda x:(x['since'],str(x['cid'])),reverse=True)[lim:]: ov_kill(u['name'],c['cid'],c['inst']); log('device limit: openvpn',u['name'],c['ip'])
 def ov_file(u,port,host,proxy):
     s=sload(); a=pub_addr(s)
-    if port not in ovports(): raise Err('Unknown OpenVPN port')
+    if port not in ovports_u(): raise Err('Unknown OpenVPN port')
     host=hostok(host,'Host'); crt,key=ov_cert(u['name'])
     L=['# %s OpenVPN · %s · TCP %d%s'%(s['brand'] or 'ReXUI',u['name'],port,' via HTTP proxy' if proxy else ''),'client','dev tun','proto tcp']
     if proxy:
@@ -1479,7 +1494,7 @@ def ov_file(u,port,host,proxy):
 def ov_args(q):
     from urllib.parse import parse_qs
     q=parse_qs(q); g=lambda k,d='':(q.get(k) or [d])[0]
-    try: port=int(g('port',str(ovports()[0])))
+    try: port=int(g('port',str(ovports_u()[0])))
     except ValueError: raise Err('Unknown OpenVPN port')
     return port,g('host',sload()['ovhost']),g('proxy','1')!='0'
 def ov_set(d):
@@ -1509,7 +1524,7 @@ def ov_restore(o,names):
         ov_setup(); run('systemctl','restart','rexui-ovpn@rx1194','rexui-ovpn@rx110')
 def ov_info(u):
     if not hasov(u): return None
-    return {'on':ov_on(),'ports':ovports(),'proxy':P('SQUID_PORT',3128),'host':sload()['ovhost'],
+    return {'on':ov_on(),'ports':ovports_u(),'proxy':P('SQUID_PORT',3128),'host':sload()['ovhost'],
             'sess':[{'ip':c['ip'],'since':c['since'],'port':dict((n,pp) for n,_,_,pp in ovi()).get(c['inst'],0)} for c in OVON.get(u['name'],[])]}
 
 # ---------- Hysteria2 (UDP) ----------
@@ -1695,6 +1710,552 @@ def dns_info(u=None):
     return {'on':dns_on(),'ns':ns,'pub':rd(DNSD+'/server.pub').strip() if dns_on() else '','ip':IPS['v4'] or local_ip(),
             'nsh':'ns.'+ns.split('.',1)[1] if ns.count('.')>=2 else ''}
 
+# ---------- CDN mode (Cloudflare) ----------
+CF_HTTPS=(443,2053,2083,2087,2096,8443); CF_HTTP=(80,8080,8880,2052,2082,2086,2095)
+CF_NETS=('173.245.48.0/20','103.21.244.0/22','103.22.200.0/22','103.31.4.0/22','141.101.64.0/18','108.162.192.0/18','190.93.240.0/20','188.114.96.0/20',
+         '197.234.240.0/22','198.41.128.0/17','162.158.0.0/15','104.16.0.0/13','104.24.0.0/14','172.64.0.0/13','131.0.72.0/22')
+def is_cf(ip):
+    import ipaddress
+    try: a=ipaddress.ip_address(ip)
+    except ValueError: return False
+    return any(a in ipaddress.ip_network(n) for n in CF_NETS)
+def cdn_set(d):
+    dom=hostok(d.get('cdn_dom'),'CDN domain'); addr=hostok(d.get('cdn_addr'),'Address')
+    if dom and ('.' not in dom or re.fullmatch(r'[\d.]+',dom)): raise Err('Use a domain like cdn.example.com')
+    if dom.endswith('duckdns.org'): raise Err('DuckDNS cannot use Cloudflare. Use your own domain on Cloudflare.')
+    s=sload(); s['cdn_dom'],s['cdn_addr']=dom,addr; wjson(SETF,s,0o600); return {'ok':1}
+def cdn_links(u,s):
+    dom=s.get('cdn_dom')
+    if not dom: return []
+    A=u.get('cdn') or s.get('cdn_addr') or dom; A='['+A+']' if ':' in A else A; pth=quote(s['path'],safe=''); out=[]
+    xh='&type=xhttp&host=%s&path=%s&mode=packet-up'%(quote(dom),pth)
+    HP,HA=h_ports(); pt,px=HP['VWSTLS_PORT'],HP['VWS_PORT']
+    if pt in CF_HTTPS:
+        out.append(('VLESS XHTTP TLS · CDN','vless://%s@%s:%d?encryption=none&security=tls&sni=%s&fp=chrome&alpn=h2%%2Chttp%%2F1.1'%(u['uuid'],A,pt,quote(dom))+xh+'#'+cfgname(u,'cdn-tls','CDN XHTTP TLS',s),HA.get('VWSTLS_PORT') if HA.get('VWSTLS_PORT') in CF_HTTPS else None))
+    if px in CF_HTTP:
+        out.append(('VLESS XHTTP · CDN (no TLS)','vless://%s@%s:%d?encryption=none&security=none'%(u['uuid'],A,px)+xh+'#'+cfgname(u,'cdn','CDN XHTTP',s),HA.get('VWS_PORT') if HA.get('VWS_PORT') in CF_HTTP else None))
+    return out
+def cdn_info():
+    s=sload(); d=s.get('cdn_dom','')
+    HP=h_ports()[0]
+    return {'dom':d,'addr':s.get('cdn_addr',''),'tls':HP['VWSTLS_PORT'] in CF_HTTPS,'http':HP['VWS_PORT'] in CF_HTTP,
+            'ports':{'xtls':HP['VWSTLS_PORT'],'x':HP['VWS_PORT'],'ws':HP['WS_PORT'],'wss':HP['WSTLS_PORT']},
+            'wsok':HP['WS_PORT'] in CF_HTTP,'wssok':HP['WSTLS_PORT'] in CF_HTTPS}
+
+# ---------- Performance modes ----------
+PERFF='/etc/sysctl.d/99-zz-rexui-perf.conf'
+PERF={'latency':{'net.ipv4.tcp_notsent_lowat':'16384','net.ipv4.tcp_slow_start_after_idle':'0','net.ipv4.tcp_fastopen':'3',
+                 'net.ipv4.tcp_rmem':'4096 87380 8388608','net.ipv4.tcp_wmem':'4096 65536 8388608','net.core.netdev_budget':'300'},
+      'balanced':{'net.ipv4.tcp_notsent_lowat':'131072','net.ipv4.tcp_slow_start_after_idle':'0','net.ipv4.tcp_fastopen':'3',
+                  'net.ipv4.tcp_rmem':'4096 87380 33554432','net.ipv4.tcp_wmem':'4096 65536 33554432','net.core.netdev_budget':'300'},
+      'throughput':{'net.ipv4.tcp_notsent_lowat':'4294967295','net.ipv4.tcp_slow_start_after_idle':'0','net.ipv4.tcp_fastopen':'3',
+                    'net.ipv4.tcp_rmem':'4096 131072 67108864','net.ipv4.tcp_wmem':'4096 131072 67108864','net.core.netdev_budget':'600'}}
+def perf_apply(mode=None):
+    mode=mode or sload().get('perf','balanced')
+    if mode not in PERF: mode='balanced'
+    txt='# ReXUI performance mode: %s (change it in the panel: Settings -> General)\n'%mode+''.join('%s=%s\n'%kv for kv in PERF[mode].items())
+    try:
+        if wtext(PERFF,txt,0o644): run('sysctl','-q','-p',PERFF)
+    except OSError as e: log('performance mode:',e)
+    return mode
+def perf_set(d):
+    m=str(d.get('perf',''))
+    if m not in PERF: raise Err('Unknown mode')
+    s=sload(); s['perf']=m; wjson(SETF,s,0o600); perf_apply(m); return {'ok':1}
+
+# ---------- Payload Builder ----------
+PAYF=T+'/payloads.json'; PAYMODES=('ws','wstls','ssl','proxy')
+def pay_load():
+    try: L=json.load(open(PAYF))
+    except Exception: L=[]
+    return [x for x in L if isinstance(x,dict) and x.get('id')]
+def pay_vals(bug='',s=None):
+    s=s or sload(); ci=certinfo(); a=pub_addr(s); h=s.get('host') or ci['domain'] or a
+    HP=h_ports()[0]
+    return {'{server}':h,'{ip}':IPS['v4'] or a,'{bug}':bug or h,'{ws_port}':str(HP['WS_PORT']),'{wss_port}':str(HP['WSTLS_PORT']),
+            '{ssl_port}':str(HP['SSL_PORT']),'{path}':s['path'],'{cdn}':s.get('cdn_dom') or h}
+def pay_render(p,s=None):
+    t=p.get('text',''); v=pay_vals(p.get('bug',''),s)
+    for k,x in v.items(): t=t.replace(k,x)
+    return t
+def pay_clean(d):
+    n=str(d.get('name','')).strip()[:60]; t=str(d.get('text','')).replace('\r','')
+    if not n: raise Err('Give the payload a name')
+    if not t.strip(): raise Err('The payload is empty')
+    if len(t)>4000: raise Err('The payload is too long (4000 characters max)')
+    m=str(d.get('mode','ws'))
+    if m not in PAYMODES: raise Err('Unknown connection type')
+    return {'name':n,'text':t,'mode':m,'bug':hostok(d.get('bug'),'Bug host'),'show':bool(d.get('show',True)),'note':str(d.get('note','')).strip()[:200]}
+def pay_save(d):
+    p=pay_clean(d); L=pay_load(); i=str(d.get('id') or '')
+    if i:
+        for x in L:
+            if x['id']==i: x.update(p); break
+        else: raise Err('Payload not found')
+    else:
+        if len(L)>=200: raise Err('You can keep up to 200 payloads')
+        p['id']=secrets.token_hex(4); L.append(p); i=p['id']
+    wjson(PAYF,L,0o600); return {'ok':1,'id':i}
+def pay_del(d):
+    L=pay_load(); n=len(L); L=[x for x in L if x['id']!=str(d.get('id'))]
+    if len(L)==n: raise Err('Payload not found')
+    wjson(PAYF,L,0o600); return {'ok':1}
+def pay_import(d):
+    items=d.get('items')
+    if not isinstance(items,list) or not items: raise Err('Nothing to import')
+    L=pay_load(); have={(x['name'],x['text']) for x in L}; add=0
+    for it in items[:200]:
+        try: p=pay_clean(it if isinstance(it,dict) else {})
+        except Err: continue
+        if (p['name'],p['text']) in have or len(L)>=200: continue
+        p['id']=secrets.token_hex(4); L.append(p); have.add((p['name'],p['text'])); add+=1
+    wjson(PAYF,L,0o600); return {'ok':1,'added':add}
+def pay_bytes(text,host,port):
+    """Turn app variables into bytes the way tunnel apps do. Returns a list of parts ([split] = send in pieces)."""
+    t=text
+    rot=re.search(r'\[rotate=([^\]]*)\]',t)
+    while rot:
+        t=t.replace(rot[0],(rot[1].split(';')[0] or '').strip()); rot=re.search(r'\[rotate=([^\]]*)\]',t)
+    rep={'[crlf]':'\r\n','[lf]':'\n','[cr]':'\r','[lfcr]':'\n\r','[host_port]':'%s:%d'%(host,port),'[host]':host,'[port]':str(port),
+         '[protocol]':'HTTP/1.1','[method]':'CONNECT','[ua]':'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36',
+         '[raw]':'CONNECT %s:%d HTTP/1.1'%(host,port),'[real_raw]':'CONNECT %s:%d HTTP/1.1'%(host,port),'[netData]':'CONNECT %s:%d HTTP/1.1'%(host,port)}
+    for k in sorted(rep,key=len,reverse=True): t=t.replace(k,rep[k])
+    return [x.encode('utf-8','replace') for x in re.split(r'\[(?:split|delay_split|instant_split|delay)\]',t)]
+def pay_test(d):
+    p=pay_clean(dict(d,name=d.get('name') or 'test'))
+    if p['mode']=='proxy': return {'ok':0,'msg':'Proxy payloads go through a remote proxy, so this server cannot test them by itself.'}
+    if p['mode']=='ssl':
+        port=P('SSL_PORT',443)
+    else: port=P('WS_PORT',8880) if p['mode']=='ws' else P('WSTLS_PORT',2083)
+    text=pay_render(p); v=pay_vals(p['bug']); host=v['{bug}']
+    parts=pay_bytes(text,host,port); t0=time.time(); got=b''
+    try:
+        raw=socket.create_connection(('127.0.0.1',port),timeout=6)
+        if p['mode'] in ('wstls','ssl'):
+            cx=ssl.create_default_context(); cx.check_hostname=False; cx.verify_mode=ssl.CERT_NONE
+            raw=cx.wrap_socket(raw,server_hostname=host if re.search('[a-z]',host) else None)
+        raw.settimeout(4)
+        if p['mode']!='ssl' or text.strip():
+            for i,b in enumerate(parts):
+                if b: raw.sendall(b)
+                if i<len(parts)-1: time.sleep(0.2)
+        end=time.time()+4
+        while time.time()<end and b'SSH-' not in got and len(got)<16384:
+            try: c=raw.recv(4096)
+            except socket.timeout: break
+            if not c: break
+            got+=c
+        raw.close()
+    except (OSError,ssl.SSLError) as e:
+        return {'ok':0,'msg':'Could not connect to port %d on this server: %s'%(port,str(e)[:80])}
+    ms=int((time.time()-t0)*1000); first=got.split(b'\r\n',1)[0].decode('latin-1')[:80]
+    if b'SSH-' in got:
+        return {'ok':1,'msg':'Works on this server: %s, then the SSH server answered (%d ms).'%(('it replied "%s"'%first) if first and not first.startswith('SSH-') else 'connected',ms),'resp':first}
+    if first: return {'ok':0,'msg':'The server replied "%s" but SSH did not start. Check the payload lines and the empty line at the end ([crlf][crlf]).'%first,'resp':first}
+    return {'ok':0,'msg':'No answer from the server. The payload may be incomplete (it must end with [crlf][crlf]).'}
+
+# ---------- Port Manager ----------
+def port_list():
+    s=sload(); L=[('Panel','PANEL_PORT',0,'tcp'),('SSH','SSH_PORT',22,'tcp'),('SSH SSL','SSL_PORT',443,'tcp'),('SSH WebSocket','WS_PORT',8880,'tcp'),
+       ('SSH WebSocket TLS','WSTLS_PORT',2083,'tcp'),('VLESS XHTTP TLS','VWSTLS_PORT',8443,'tcp'),('VLESS TCP TLS','VTCP_PORT',2053,'tcp'),
+       ('Trojan TLS','TROJAN_PORT',2096,'tcp'),('VLESS XHTTP','VWS_PORT',8080,'tcp'),('VLESS Reality','REALITY_PORT',8444,'tcp'),('Fake website','',80,'tcp')]
+    if ov_on(): L+=[('OpenVPN','OVPN1_PORT',1194,'tcp'),('OpenVPN','OVPN2_PORT',110,'tcp'),('HTTP proxy (OpenVPN)','SQUID_PORT',3128,'tcp')]
+    if hy_on(): L+=[('Hysteria2','HY_PORT',443,'udp')]
+    if dns_on() and s.get('dns_ns'): L+=[('DNS tunnel','',53,'udp')]
+    if h_on(): L=[(('443 mode: SSL and all TLS' if n=='SSH SSL' else '80 mode: WS, XHTTP, website' if n=='Fake website' else n),k,d,pr) for n,k,d,pr in L]
+    return [(n,(P(k,d) if k else d),pr) for n,k,d,pr in L]
+def ss_listeners():
+    """{(proto,port): 'program'} for everything listening on the server (not only on 127.0.0.1)."""
+    out={}
+    if not shutil.which('ss'):
+        for pr in ('tcp','udp'):
+            for p_ in listening(pr=='udp'): out[(pr,p_)]='?'
+        return out
+    for pr,flag in (('tcp','-tlnpH'),('udp','-ulnpH')):
+        for l in run('ss',flag).stdout.splitlines():
+            f=l.split()
+            if len(f)<5: continue
+            loc=f[3]; m=re.search(r':(\d+)$',loc)
+            if not m or loc.startswith(('127.','[::1]')): continue
+            prog=re.search(r'users:\(\("([^"]+)"',l)
+            out[(pr,int(m[1]))]=prog[1] if prog else '?'
+    return out
+def ufw_rules():
+    r=run('ufw','status'); txt=r.stdout if r.returncode==0 else ''
+    if 'Status: active' not in txt: return None
+    al=set()
+    for l in txt.splitlines():
+        m=re.match(r'^(\d+)(?::(\d+))?(?:/(tcp|udp))?\s+(?:\(v6\)\s+)?ALLOW',l.strip())
+        if m:
+            a=int(m[1]); b=int(m[2] or m[1])
+            for pr in ([m[3]] if m[3] else ['tcp','udp']): al.add((pr,a,b))
+    return al
+def ports_view():
+    ls=ss_listeners(); fw=ufw_rules(); mine=port_list(); res=[]; seen=set()
+    for n,p,pr in mine:
+        prog=ls.get((pr,p),''); seen.add((pr,p))
+        if n=='DNS tunnel': prog=('redirect → '+ls[('udp',5300)]) if ('udp',5300) in ls else ''; seen.add(('udp',5300))
+        if fw is None: f='off'
+        else: f='open' if any(x[0]==pr and x[1]<=p<=x[2] for x in fw) else 'closed'
+        res.append({'name':n,'port':p,'proto':pr,'listen':bool(prog),'prog':prog,'fw':f})
+    hop=hyhop() if hy_on() else None
+    if hop: res.append({'name':'Hysteria2 port hopping','port':'%d-%d'%hop,'proto':'udp','listen':True,'prog':'redirect','fw':'off' if fw is None else ('open' if any(x[0]=='udp' and x[1]<=hop[0] and x[2]>=hop[1] for x in fw) else 'closed')})
+    known={'haproxy','sshd','xray','stunnel4','stunnel','python3','openvpn','squid','hysteria','dnstt-server','badvpn-udpgw','systemd-resolve','chronyd','dhclient','systemd-network'}
+    other=[{'port':p,'proto':pr,'prog':g} for (pr,p),g in sorted(ls.items(),key=lambda x:(x[0][0],x[0][1])) if (pr,p) not in seen and g not in known]
+    dup={}
+    for n,p,pr in mine: dup.setdefault((pr,p),[]).append(n)
+    clash=[{'port':p,'proto':pr,'names':sorted(set(v))} for (pr,p),v in dup.items() if len(set(v))>1]
+    return {'ports':res,'other':other,'clash':clash,'fw':fw is not None}
+def fw_open(d):
+    pr=str(d.get('proto','tcp'))
+    if pr not in ('tcp','udp'): raise Err('bad request')
+    p=str(d.get('port',''))
+    if not re.fullmatch(r'\d{1,5}(-\d{1,5})?',p): raise Err('bad port')
+    if ufw_rules() is None: return {'ok':1,'msg':'The server firewall (ufw) is off, so nothing is blocked here.'}
+    run('ufw','allow','%s/%s'%(p.replace('-',':'),pr)); return {'ok':1}
+
+# ---------- Server Check ----------
+def dnsq(name,qt='A',server='8.8.8.8',timeout=3):
+    """Tiny DNS client: returns {'an':[...], 'ns':[...]} (A / NS answers, NS in authority)."""
+    tid=os.urandom(2); q=b''.join(bytes([len(x)])+x.encode() for x in name.strip('.').split('.'))+b'\0'
+    pkt=tid+b'\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00'+q+{'A':b'\x00\x01','NS':b'\x00\x02'}[qt]+b'\x00\x01'
+    s_=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s_.settimeout(timeout)
+    try: s_.sendto(pkt,(server,53)); r,_=s_.recvfrom(4096)
+    finally: s_.close()
+    def rname(o):
+        parts=[]; jumped=False; end=o
+        while True:
+            l=r[o]
+            if l==0: o+=1; break
+            if l&0xC0==0xC0:
+                if not jumped: end=o+2
+                o=((l&0x3F)<<8)|r[o+1]; jumped=True; continue
+            parts.append(r[o+1:o+1+l].decode('latin-1')); o+=1+l
+        return '.'.join(parts),(end if jumped else o)
+    an_c,ns_c=int.from_bytes(r[6:8],'big'),int.from_bytes(r[8:10],'big'); o=12
+    _,o=rname(o); o+=4; out={'an':[],'ns':[]}
+    for i in range(an_c+ns_c):
+        _,o=rname(o); t=int.from_bytes(r[o:o+2],'big'); ln=int.from_bytes(r[o+8:o+10],'big'); o+=10
+        if t==1 and ln==4: v=socket.inet_ntoa(r[o:o+4])
+        elif t==2: v=rname(o)[0]
+        else: v=None
+        if v: out['an' if i<an_c else 'ns'].append(v)
+        o+=ln
+    return out
+def server_check():
+    R=[]; add=lambda id_,name,st,msg,fix=None:R.append({'id':id_,'name':name,'st':st,'msg':msg,'fix':fix})
+    s=sload(); ip=IPS['v4']
+    for x in services():
+        if x['st']=='RUNNING': continue
+        add('svc:'+x['unit'],x['name'],'fail' if x['st'] in ('FAILED','IDLE') else 'warn',
+            {'FAILED':'Stopped with an error.','IDLE':'Not running (or its port is not open).','NOT INSTALLED':'Not installed. Run the installer again.'}.get(x['st'],x['st']),
+            'restart:'+x['unit'] if x['st'] in ('FAILED','IDLE') else None)
+    if not [r for r in R if r['id'].startswith('svc:')]: add('svc','Services','ok','All %d services are running.'%len(services()))
+    if h_on():
+        hb=run('systemctl','is-active','--quiet','haproxy').returncode==0
+        add('h443','443 mode (HAProxy)','ok' if hb else 'fail','On: SSH SSL, WS TLS, VLESS TLS, Trojan and OpenVPN work on port 443, WebSocket and XHTTP on port 80. Reality keeps its own port.' if hb else 'HAProxy is not running.',None if hb else 'restart:haproxy')
+    elif h_want():
+        add('h443','443 mode (HAProxy)','warn',HQ['err'] or 'Off. Turn it on in Settings → Ports.','h443')
+    r=run(XBIN,'run','-test','-c',XD+'/config.json',t=30)
+    add('xray','Xray config','ok' if r.returncode==0 else 'fail','The config is valid.' if r.returncode==0 else 'Xray rejects its config: '+((r.stdout+r.stderr).strip().splitlines() or ['?'])[-1][-160:],None if r.returncode==0 else 'xray')
+    ci=certinfo()
+    if ci['src']=='self-signed': add('cert','Certificate','warn','Self-signed certificate: TLS configs need "allow insecure". Get a free Let\'s Encrypt certificate from menu → SSL.')
+    else:
+        dl=ci.get('days')
+        add('cert','Certificate','ok' if (dl is None or dl>14) else ('warn' if dl>3 else 'fail'),'%s, valid for %s more days.'%(ci['name'],dl if dl is not None else '?'))
+    dom=ci['domain'] if ci['src']!='self-signed' else ''
+    if dom and ip:
+        try:
+            a=dnsq(dom)['an']
+            if ip in a: add('dom','Panel domain','ok','%s points to this server (%s).'%(dom,ip))
+            elif any(is_cf(x) for x in a): add('dom','Panel domain','fail','%s goes through Cloudflare (orange cloud). Make it grey (DNS only) in Cloudflare.'%dom)
+            else: add('dom','Panel domain','fail','%s points to %s, not to this server (%s). Fix the A record.'%(dom,', '.join(a) or 'nothing',ip))
+        except Exception as e: add('dom','Panel domain','warn','Could not check the domain: %s'%str(e)[:60])
+    cd=s.get('cdn_dom')
+    if cd:
+        try:
+            a=dnsq(cd)['an']
+            if a and all(is_cf(x) for x in a): add('cdn','CDN domain','ok','%s goes through Cloudflare (orange cloud).'%cd)
+            elif ip in a: add('cdn','CDN domain','fail','%s points straight to this server. Turn the cloud orange (Proxied) in Cloudflare.'%cd)
+            else: add('cdn','CDN domain','fail','%s does not resolve to Cloudflare (%s). Add an A record to this server with the orange cloud.'%(cd,', '.join(a) or 'no record'))
+        except Exception as e: add('cdn','CDN domain','warn','Could not check: %s'%str(e)[:60])
+    ns=s.get('dns_ns')
+    if ns and dns_on():
+        try:
+            base=ns.split('.',1)[1]; nsh='ns.'+base
+            a=dnsq(nsh)['an']
+            if ip and ip not in a: add('dnsns','DNS tunnel','fail','%s must point to this server (%s), it points to %s.'%(nsh,ip,', '.join(a) or 'nothing'))
+            else:
+                par=dnsq(base,'NS')['an']; deleg=[]
+                if par:
+                    pip=dnsq(par[0])['an']
+                    if pip: q=dnsq(ns,'NS',pip[0]); deleg=q['an']+q['ns']
+                if any(x.rstrip('.').lower()==nsh for x in deleg): add('dnsns','DNS tunnel','ok','%s is handed to %s, which points here.'%(ns,nsh))
+                else: add('dnsns','DNS tunnel','fail','No NS record for %s → %s yet. Add it in your DNS (Cloudflare: type NS).'%(ns,nsh))
+        except Exception as e: add('dnsns','DNS tunnel','warn','Could not check: %s'%str(e)[:60])
+    if ov_on():
+        f=rd('/proc/sys/net/ipv4/ip_forward').strip()=='1'
+        nat=run('iptables','-w','-t','nat','-C','POSTROUTING','-j','REXUI_NAT').returncode==0
+        add('fwd','OpenVPN internet','ok' if f and nat else 'fail','Forwarding and NAT are on.' if f and nat else 'OpenVPN users would connect without internet (forwarding or NAT is off).',None if f and nat else 'ovnet')
+        add('tun','TUN device','ok' if os.path.exists('/dev/net/tun') else 'fail','Available.' if os.path.exists('/dev/net/tun') else 'Missing: OpenVPN cannot work. Enable TUN in your VPS control panel.')
+    fw=ufw_rules()
+    if fw is None: add('ufw','Server firewall','ok','ufw is off: only your provider\'s firewall decides which ports are open.')
+    else:
+        miss=['%s/%s'%(p,pr) for n,p,pr in port_list() if not any(x[0]==pr and x[1]<=p<=x[2] for x in fw)]
+        add('ufw','Server firewall','ok' if not miss else 'fail','All ReXUI ports are allowed.' if not miss else 'Blocked by ufw: '+', '.join(miss),None if not miss else 'ufw')
+    ls=ss_listeners(); bad=[]
+    for n,p,pr in port_list():
+        g=ls.get((pr,p))
+        if g and g!='?' and g not in ('haproxy','sshd','xray','stunnel4','stunnel','python3','openvpn','squid','hysteria','dnstt-server'): bad.append('%s %d/%s used by %s'%(n,p,pr,g))
+    if bad: add('clash','Port conflicts','fail','; '.join(bad))
+    sync=run('timedatectl','show','-p','NTPSynchronized','--value').stdout.strip()
+    if sync: add('time','Clock','ok' if sync=='yes' else 'warn','In sync.' if sync=='yes' else 'The clock is not synced. Reality and TLS can fail with a wrong clock.',None if sync=='yes' else 'ntp')
+    cc=rd('/proc/sys/net/ipv4/tcp_congestion_control').strip()
+    add('bbr','BBR','ok' if cc=='bbr' else 'warn','On.' if cc=='bbr' else 'Off (%s). Speed may be lower; run the installer again.'%(cc or '?'))
+    st=os.statvfs('/'); fr=st.f_bavail*st.f_frsize; tot=st.f_blocks*st.f_frsize
+    add('disk','Disk','ok' if fr>tot*0.1 and fr>1<<30 else ('warn' if fr>300<<20 else 'fail'),'%s free of %s.'%(fmt_b(fr),fmt_b(tot)),None if fr>tot*0.1 else 'clean')
+    mi={l.split(':')[0]:int(l.split()[1])*1024 for l in rd('/proc/meminfo').splitlines() if len(l.split())>1}
+    av,mt,sw=mi.get('MemAvailable',0),mi.get('MemTotal',1),mi.get('SwapTotal',0)
+    add('ram','Memory','ok' if av>mt*0.1 else 'warn','%s free of %s%s.'%(fmt_b(av),fmt_b(mt),'' if sw else ', no swap'))
+    if not s.get('tgtoken'): add('tg','Telegram alerts','warn','Off. Add a bot in Settings → Telegram to get alerts when something breaks.')
+    order={'fail':0,'warn':1,'ok':2}; R.sort(key=lambda x:order[x['st']])
+    return {'t':int(time.time()),'items':R,'fail':sum(1 for x in R if x['st']=='fail'),'warn':sum(1 for x in R if x['st']=='warn')}
+def fmt_b(n):
+    for u_ in ('B','KB','MB','GB','TB'):
+        if n<1024 or u_=='TB': return ('%.1f %s'%(n,u_)) if u_!='B' else '%d B'%n
+        n/=1024
+def check_fix(d):
+    f=str(d.get('fix',''))
+    if f.startswith('restart:'):
+        u=f.split(':',1)[1]
+        if u not in RESTART: raise Err('bad request')
+        run('systemctl','restart',u); return {'ok':1,'msg':'Restarted '+u}
+    if f=='xray': e=xray_apply(True); return {'ok':0 if e else 1,'msg':e or 'Xray config rebuilt'}
+    if f=='ovnet': ov_net(True); return {'ok':1,'msg':'Forwarding and NAT turned on'}
+    if f=='ufw':
+        for n,p,pr in port_list(): run('ufw','allow','%d/%s'%(p,pr))
+        h=hyhop() if hy_on() else None
+        if h: run('ufw','allow','%d:%d/udp'%h)
+        return {'ok':1,'msg':'ReXUI ports allowed in ufw'}
+    if f=='ntp': run('timedatectl','set-ntp','true'); return {'ok':1,'msg':'Clock sync turned on'}
+    if f=='h443': x=h_apply(True); return {'ok':1 if x['on'] else 0,'msg':'443 mode is on' if x['on'] else x['err']}
+    if f=='clean': r=cleanup(); return {'ok':1,'msg':'Cleanup done' if not isinstance(r,dict) else r.get('msg','Cleanup done')}
+    raise Err('bad request')
+
+# ---------- 443 mode (HAProxy on 443 + 80) ----------
+HAC='/etc/haproxy/haproxy.cfg'; HAPEM='/etc/haproxy/rexui.pem'; HON=T+'/h443.on'; HSD='/dev/shm'
+HSOCK={'xhttp':HSD+'/rexui-xhttp.sock','vless':HSD+'/rexui-vless.sock','trojan':HSD+'/rexui-trojan.sock'}
+HQ={'err':'','lock':threading.RLock(),'fail':0,'hash':''}
+def h_has(): return bool(shutil.which('haproxy'))
+def h_on(): return os.path.exists(HON)
+def h_want(): return bool(sload().get('h443',True))
+def h_uports(u,s=None): return h_ports()
+def h_ports():
+    """Ports users should use. With 443 mode on, TLS goes to 443 and plain HTTP to 80; the old ports stay as a second choice."""
+    b={k:P(k,d) for k,d in (('SSL_PORT',443),('WS_PORT',8880),('WSTLS_PORT',2083),('VWSTLS_PORT',8443),('VTCP_PORT',2053),('VWS_PORT',8080),('REALITY_PORT',8444),('TROJAN_PORT',2096))}
+    if not h_on(): return b,{}
+    main={'SSL_PORT':443,'WS_PORT':80,'WSTLS_PORT':443,'VWSTLS_PORT':443,'VTCP_PORT':443,'VWS_PORT':80,'REALITY_PORT':b['REALITY_PORT'],'TROJAN_PORT':443}
+    return main,{k:v for k,v in b.items() if v!=main[k]}
+def h_xinbounds(s,cl,tj):
+    """Extra Xray inbounds on unix sockets for traffic that HAProxy passes on (with the real client IP in a PROXY header)."""
+    if not h_on(): return []
+    so={'acceptProxyProtocol':True}
+    def lst(k): return HSOCK[k]+',0666'
+    ibs=[{'tag':'h-xhttp','listen':lst('xhttp'),'port':0,'protocol':'vless','settings':{'clients':cl,'decryption':'none'},
+          'streamSettings':{'network':'xhttp','security':'none','xhttpSettings':{'path':s['path'],'mode':'auto'},'sockopt':so},'sniffing':{'enabled':True,'destOverride':['http','tls']}},
+         {'tag':'h-vless','listen':lst('vless'),'port':0,'protocol':'vless','settings':{'clients':cl,'decryption':'none'},
+          'streamSettings':{'network':'tcp','security':'none','sockopt':so},'sniffing':{'enabled':True,'destOverride':['http','tls']}},
+         {'tag':'h-trojan','listen':lst('trojan'),'port':0,'protocol':'trojan','settings':{'clients':tj},
+          'streamSettings':{'network':'tcp','security':'none','sockopt':so},'sniffing':{'enabled':True,'destOverride':['http','tls']}}]
+    # Reality stays on its own port (not behind HAProxy), so TLS configs can use any SNI on 443
+    return ibs
+def h_pem():
+    c,k=CD+'/xray.crt',CD+'/xray.key'
+    if not (os.path.exists(c) and os.path.exists(k)): c,k=XSC,XSK
+    return rd(c).strip()+'\n'+rd(k).strip()+'\n'
+def h_cfg():
+    s=sload(); fs=s['fsite']!='off'
+    v6=os.path.exists('/proc/net/if_inet6') and rd('/proc/sys/net/ipv6/conf/all/disable_ipv6').strip()!='1'
+    def bind(p): return 'bind :::%d v4v6'%p if v6 else 'bind 0.0.0.0:%d'%p
+    xp=re.escape(s['path'].rstrip('/') or '/').replace('\\','\\\\')
+    L=['# Made by the ReXUI panel (443 mode). Changes here are overwritten.',
+       'global','    maxconn 100000','    ssl-default-bind-options ssl-min-ver TLSv1.2','    tune.ssl.default-dh-param 2048','',
+       'defaults','    mode tcp','    timeout connect 5s','    timeout client 2h','    timeout server 2h','    timeout tunnel 2h',
+       '    timeout client-fin 30s','    timeout server-fin 30s','',
+       'frontend rx443','    '+bind(443),'    tcp-request inspect-delay 3s',
+       # wait for the whole TLS hello (big hellos come in 2 packets) so the SNI is always seen; anything that is not TLS goes on at once
+       '    tcp-request content accept if { req.ssl_hello_type 1 } { req.payload_lv(3,2) -m found }',
+       '    tcp-request content accept if !{ req.payload(0,1) -m bin 16 } { req.len ge 3 }']
+    L+=['    use_backend rx_tls if { req.ssl_hello_type 1 }','    default_backend rx_plain','',
+        'frontend rx80','    '+bind(80),'    default_backend rx_plain','',
+        'backend rx_tls','    server t abns@rexui-dec send-proxy-v2','',
+        'backend rx_plain','    server p abns@rexui-plain send-proxy-v2','',
+        # traffic without TLS (port 80, and port 443 without TLS)
+        'frontend rx_plain_in','    bind abns@rexui-plain accept-proxy','    tcp-request inspect-delay 3s',
+        "    acl ssh req.payload(0,4) -m bin 5353482d",
+        "    acl ovpn req.payload(0,1) -m bin 00",
+        "    acl ovpn2 req.payload(2,1) -m bin 38",
+        "    acl h2c req.payload(0,14) -m bin 505249202a20485454502f322e30",
+        "    acl xpath req.payload(0,0) -m reg ^[A-Z]{3,7}\\\\x20%s[/?\\\\x20]"%xp,
+        "    acl acme req.payload(0,0) -m reg ^(GET|HEAD)\\\\x20/\\\\.well-known/acme-challenge/",
+        "    acl upg req.payload(0,0) -m reg -i \\\\r\\\\nupgrade:",
+        "    acl page req.payload(0,0) -m reg -i \\\\r\\\\naccept:[^\\\\r]*text/html",
+        "    acl moz req.payload(0,0) -m reg -i \\\\r\\\\nuser-agent:[^\\\\r]*mozilla",
+        '    tcp-request content accept if ssh','    tcp-request content accept if ovpn ovpn2','    tcp-request content accept if h2c',
+        '    tcp-request content accept if HTTP','    tcp-request content accept if { req.len ge 64 }',
+        '    use_backend rx_ssh if ssh','    use_backend rx_ssh if { req.len eq 0 }','    use_backend rx_ovpn if ovpn ovpn2',
+        '    use_backend rx_xhttp if h2c','    use_backend rx_xhttp if xpath','    use_backend rx_fake if acme']
+    if fs: L.append('    use_backend rx_fake if page moz !upg')
+    L+=['    default_backend rx_ws','',
+        # traffic that came with TLS on 443 (decrypted here)
+        'frontend rx_dec_in','    bind abns@rexui-dec accept-proxy ssl crt %s alpn http/1.1'%HAPEM,'    tcp-request inspect-delay 3s',
+        "    acl ssh req.payload(0,4) -m bin 5353482d",
+        "    acl vless req.payload(0,1) -m bin 00",
+        "    acl trojan req.payload(56,2) -m bin 0d0a",
+        "    acl hex req.payload(0,1) -m reg ^[0-9a-f]",
+        "    acl h2c req.payload(0,14) -m bin 505249202a20485454502f322e30",
+        "    acl xpath req.payload(0,0) -m reg ^[A-Z]{3,7}\\\\x20%s[/?\\\\x20]"%xp,
+        "    acl upg req.payload(0,0) -m reg -i \\\\r\\\\nupgrade:",
+        "    acl page req.payload(0,0) -m reg -i \\\\r\\\\naccept:[^\\\\r]*text/html",
+        "    acl moz req.payload(0,0) -m reg -i \\\\r\\\\nuser-agent:[^\\\\r]*mozilla",
+        '    tcp-request content accept if ssh','    tcp-request content accept if vless','    tcp-request content accept if trojan hex',
+        '    tcp-request content accept if h2c','    tcp-request content accept if HTTP','    tcp-request content accept if { req.len ge 64 }',
+        '    use_backend rx_ssh if ssh','    use_backend rx_ssh if { req.len eq 0 }','    use_backend rx_vless if vless',
+        '    use_backend rx_trojan if trojan hex','    use_backend rx_xhttp if h2c','    use_backend rx_xhttp if xpath']+(['    use_backend rx_fake if page moz !upg'] if fs else [])+['    default_backend rx_ws','',
+        'backend rx_ssh','    server s 127.0.0.1:%d'%P('SSH_PORT',22),'',
+        'backend rx_ws','    server s 127.0.0.1:%d'%P('WS_PORT',8880),'',
+        'backend rx_fake','    server s 127.0.0.1:%d'%FBP,'',
+        'backend rx_ovpn','    server s 127.0.0.1:%d'%P('OVPN1_PORT',1194),'',
+        'backend rx_xhttp','    server s %s send-proxy-v2'%HSOCK['xhttp'],'',
+        'backend rx_vless','    server s %s send-proxy-v2'%HSOCK['vless'],'',
+        'backend rx_trojan','    server s %s send-proxy-v2'%HSOCK['trojan'],'']
+    return '\n'.join(L)
+def h_ssl_move(on):
+    """While 443 mode is on, stunnel's SSH SSL service moves to 127.0.0.1:10443 so HAProxy can use port 443."""
+    f='/etc/stunnel/stunnel.conf'; t=rd(f)
+    if not t: return False
+    want='127.0.0.1:10443' if on and P('SSL_PORT',443)==443 else str(P('SSL_PORT',443))
+    n=re.sub(r'(\[ssh-ssl\][^\[]*?accept\s*=\s*)\S+',lambda m:m.group(1)+want,t,count=1)
+    if n==t: return False
+    wtext(f,n,0o644); run('systemctl','restart','stunnel4'); return True
+def h_busy():
+    """Programs other than ReXUI's own that sit on TCP 443 or 80."""
+    L=ss_listeners(); bad=[]
+    for p in (443,80):
+        g=L.get(('tcp',p))
+        if g and g not in ('stunnel4','stunnel','haproxy','python3','?'): bad.append('%d (%s)'%(p,g))
+    for k,d in (('VWSTLS_PORT',8443),('VTCP_PORT',2053),('VWS_PORT',8080),('REALITY_PORT',8444),('TROJAN_PORT',2096),('WS_PORT',8880),('WSTLS_PORT',2083),('PANEL_PORT',0)):
+        if P(k,d) in (443,80): bad.append('%d (used by %s in ReXUI, change it with menu → Port change)'%(P(k,d),k.replace('_PORT','')))
+    return bad
+def h_write():
+    """Write the PEM and config, check them with haproxy -c. Returns '' or the error."""
+    os.makedirs('/etc/haproxy',exist_ok=True)
+    pem=h_pem(); cfg=h_cfg()
+    wtext(HAPEM,pem,0o600)
+    tmp=HAC+'.rexui-new'; wtext(tmp,cfg,0o644)
+    r=run('haproxy','-c','-f',tmp,t=30)
+    if r.returncode:
+        os.remove(tmp); out=[x for x in (r.stdout+r.stderr).splitlines() if 'ALERT' in x or 'error' in x.lower()]
+        return 'HAProxy did not accept the config: '+((out or ['unknown error'])[-1].strip()[-200:])
+    if os.path.exists(HAC) and not os.path.exists(HAC+'.orig') and 'ReXUI' not in rd(HAC): shutil.copyfile(HAC,HAC+'.orig')
+    os.replace(tmp,HAC); HQ['hash']=hashlib.sha256((cfg+pem).encode()).hexdigest(); return ''
+def _h_talk(port,tls,data,want,t=6):
+    """Connect to 127.0.0.1:port like an app, send data, read the reply. want(reply_bytes) decides ok."""
+    try:
+        s=socket.create_connection(('127.0.0.1',port),timeout=t)
+        if tls:
+            c=ssl.create_default_context(); c.check_hostname=False; c.verify_mode=ssl.CERT_NONE
+            s=c.wrap_socket(s,server_hostname='www.example.com')
+        if data: s.sendall(data)
+        buf=b''; end=time.time()+t
+        while time.time()<end and len(buf)<4096:
+            try: x=s.recv(4096)
+            except socket.timeout: break
+            if not x: break
+            buf+=x
+            if want(buf): break
+        s.close(); return want(buf),buf[:80]
+    except Exception as e: return False,repr(e)[:80].encode()
+def h_selftest():
+    """Check the important paths through HAProxy. Returns a list of failed checks."""
+    s=sload(); bad=[]; xp=(s['path'].rstrip('/') or '/')
+    ssh=lambda b:b.startswith(b'SSH-')
+    ws=lambda b:b.startswith(b'HTTP/1.1 101') and b'SSH-' in b
+    xr=lambda b:b.startswith(b'HTTP/1.1') and not b.startswith(b'HTTP/1.1 101') and b'SSH-' not in b
+    wsreq=b'GET / HTTP/1.1\r\nHost: www.example.com\r\nUpgrade: websocket\r\n\r\n'
+    for name,port,tls,data,f in (('SSH SSL on 443',443,True,b'SSH-2.0-ReXUI_check\r\n',ssh),('SSH WebSocket TLS on 443',443,True,wsreq,ws),
+                                 ('SSH WebSocket on 80',80,False,wsreq,ws),('SSH on 443 without TLS',443,False,b'SSH-2.0-ReXUI_check\r\n',ssh),
+                                 ('VLESS XHTTP TLS on 443',443,True,('GET %s/rexui-check HTTP/1.1\r\nHost: www.example.com\r\n\r\n'%xp).encode(),xr)):
+        ok,got=_h_talk(port,tls,data,f)
+        if not ok: bad.append('%s (got: %s)'%(name,got.decode('latin-1','replace').replace('\r',' ').replace('\n',' ').strip() or 'nothing'))
+    return bad
+def h_apply(want=None,why=''):
+    """Turn 443 mode on or off so the server matches the setting. Safe: anything that fails turns it back off."""
+    with HQ['lock']:
+        s=sload(); want=h_want() if want is None else want
+        if want and not h_has():
+            HQ['err']='HAProxy is not installed. Run the installer again to add it.'; want=False
+        if want:
+            b=h_busy()
+            if b: HQ['err']='Port '+', '.join(b)+' is used by another program, so 443 mode stays off.'; want=False
+        if not want:
+            if h_on() or run('systemctl','is-active','--quiet','haproxy').returncode==0:
+                run('systemctl','disable','--now','haproxy')
+                try: os.remove(HON)
+                except OSError: pass
+                h_ssl_move(False); fsite_apply(); xray_apply(); bans_apply(True)
+                log('443 mode off',why)
+            return {'on':False,'err':HQ['err']}
+        was=h_on()
+        open(HON,'w').close()
+        if not was: fsite_apply()
+        e=xray_apply()
+        if e: HQ['err']=e; return h_apply(False,'xray failed')
+        old=rd(HAC)+rd(HAPEM); e=h_write()
+        if e: HQ['err']=e; return h_apply(False,'config failed')
+        h_ssl_move(True); act=run('systemctl','is-active','--quiet','haproxy').returncode==0
+        if was and act:
+            r=run('systemctl','reload','haproxy') if rd(HAC)+rd(HAPEM)!=old else run('true')
+        else: run('systemctl','enable','haproxy'); r=run('systemctl','restart','haproxy')
+        time.sleep(1.5)
+        if r.returncode or run('systemctl','is-active','--quiet','haproxy').returncode:
+            HQ['err']='HAProxy did not start: '+(run('journalctl','-u','haproxy','-n','3','--no-pager','-o','cat').stdout.strip().replace('\n',' ')[-200:] or 'unknown error')
+            return h_apply(False,'start failed')
+        bad=h_selftest()
+        if bad: time.sleep(5); bad=h_selftest()
+        if bad:
+            HQ['err']='443 mode turned itself off because a check failed: '+'; '.join(bad)
+            activity('server',HQ['err'][:300]); return h_apply(False,'self test failed')
+        HQ['err']=''; HQ['fail']=0; bans_apply(True)
+        if not was: log('443 mode on'); activity('server','443 mode is on (HAProxy on 443 and 80)')
+        return {'on':True,'err':''}
+def h_set(d):
+    s=sload(); s['h443']=bool(d.get('on')); wjson(SETF,s,0o600)
+    r=h_apply()
+    if s['h443'] and not r['on']: raise Err(r['err'] or '443 mode could not be turned on')
+    return r
+def h_sync():
+    """Called every minute: rewrite the config when the certificate, Reality names or ports changed, and watch HAProxy."""
+    if not h_on(): return
+    try:
+        pem=h_pem(); cfg=h_cfg()
+        if hashlib.sha256((cfg+pem).encode()).hexdigest()!=HQ['hash']:
+            e=h_write()
+            if e: log('443 mode:',e)
+            else: run('systemctl','reload','haproxy')
+        if run('systemctl','is-active','--quiet','haproxy').returncode:
+            HQ['fail']+=1
+            if HQ['fail']==2: run('systemctl','restart','haproxy'); log('watchdog: restarted haproxy')
+            elif HQ['fail']>=4:
+                HQ['fail']=0; s=sload(); s['h443']=False; wjson(SETF,s,0o600); h_apply(False,'haproxy keeps failing')
+                HQ['err']='443 mode was turned off because HAProxy kept stopping. Turn it on again from Settings → Ports.'
+                activity('server',HQ['err']); tg_send('ReXUI watchdog: '+HQ['err'])
+        else: HQ['fail']=0
+    except Exception as e: log('443 mode sync:',repr(e))
+def h_info():
+    m,alt=h_ports()
+    return {'on':h_on(),'want':h_want(),'has':h_has(),'err':HQ['err'],'ports':m,'alt':alt}
+
 # ---------- backup / restore ----------
 def backup_obj():
     o={'app':'rexui','ver':2,'date':datetime.datetime.now().isoformat(timespec='seconds'),'users':uload(),'settings':sload()}
@@ -1704,6 +2265,8 @@ def backup_obj():
     except Exception as e: log('backup openvpn:',repr(e))
     k,pb=rd(DNSD+'/server.key').strip(),rd(DNSD+'/server.pub').strip()
     if re.fullmatch(r'[0-9a-f]{64}',k) and re.fullmatch(r'[0-9a-f]{64}',pb): o['dns']={'key':k,'pub':pb}
+    pl=pay_load()
+    if pl: o['payloads']=pl
     return o
 def backup_file(path=None):
     os.makedirs(BKD,exist_ok=True); os.chmod(BKD,0o700)
@@ -1744,6 +2307,10 @@ def restore(o):
     if re.fullmatch(r'[0-9a-f]{64}',str(dk.get('key',''))) and re.fullmatch(r'[0-9a-f]{64}',str(dk.get('pub',''))):
         os.makedirs(DNSD,exist_ok=True); os.chmod(DNSD,0o700)
         if wtext(DNSD+'/server.key',dk['key']+'\n')|wtext(DNSD+'/server.pub',dk['pub']+'\n',0o644) and dns_on() and dns_ns(): run('systemctl','restart','rexui-dns')
+    if isinstance(o.get('payloads'),list) and o['payloads']:
+        try: pay_import({'items':o['payloads']})
+        except Err: pass
+    perf_apply()
     enforce(); ssh_rules(True); xray_apply(True)
     return {'ok':1,'users':len(good)}
 BKLAST=['']
@@ -1787,7 +2354,7 @@ def listening(udp=False):
             if len(p)>3 and p[3]==('07' if udp else '0A'): s.add(int(p[1].rsplit(':',1)[1],16))
     return s
 UNITS=['ssh','sshd','stunnel4','ws-ssh','badudp','fail2ban','xray','rexui-ovpn@rx1194','rexui-ovpn@rx110','squid','rexui-hy2','rexui-dns']
-RESTART={'ssh','stunnel4','ws-ssh','badudp','fail2ban','xray','rexui-ovpn@rx1194','rexui-ovpn@rx110','squid','rexui-hy2','rexui-dns'}
+RESTART={'haproxy','ssh','stunnel4','ws-ssh','badudp','fail2ban','xray','rexui-ovpn@rx1194','rexui-ovpn@rx110','squid','rexui-hy2','rexui-dns'}
 def units():
     st={}
     for blk in run('systemctl','show','-p','Id,LoadState,ActiveState',*[u+'.service' for u in UNITS]).stdout.strip().split('\n\n'):
@@ -1894,6 +2461,7 @@ def monitor():
             if i%12==6:
                 try: watchdog()
                 except Exception as e: log('watchdog:',repr(e))
+                h_sync()
             if i%120==0: hm_save(); tr_save()
             if i%360==1: threading.Thread(target=ddns_update,daemon=True).start()
             if i%2==0: collect(); enforce(); trial_cleanup(); xray_apply(); ssh_rules(); devices(); auto_backup()
@@ -1928,7 +2496,7 @@ def state(uh=''):
     return {'info':dict(INFO,uptime=float(rd('/proc/uptime','0').split()[0]),puptime=time.time()-START),
             'cpu':S['cpu'],'ram':[m['MemTotal']-m['MemAvailable'],m['MemTotal']],'swap':[m.get('SwapTotal',0)-m.get('SwapFree',0),m.get('SwapTotal',0)],
             'disk':[du.used,du.total],'rx':S['rx'],'tx':S['tx'],'rxt':S['rxt'],'txt':S['txt'],'hist':H,'tcp':tc,'udp':uc,
-            'ip':IPS,'stats':stats(),'tools':TOOLS,'fs':FS['err'],'xup':XUP,'ddns':dict(DDNS,dom=sload()['ddns_dom']),'stime':time.strftime('%H:%M %Z'),'svc':services(),'xray':xinfo(),'proc':procinfo(),'online':online(),'backups':sorted(os.listdir(BKD))[::-1] if os.path.isdir(BKD) else [],**ustate_part(uh),'cert':certinfo(),'set':dict({k:v for k,v in sload().items() if k not in ('rpriv','tgtoken','ddns_tok')},tgmask=mask(sload()['tgtoken']),ddmask=mask(sload()['ddns_tok'])),'tfa':bool(lread().get('totp')),'warp':warp_info(),'geo':geo_ok(),'addr':pub_addr(),'me':curuser(),'ov':ov_on(),'hy':hy_on(),'dns':dns_info(),
+            'ip':IPS,'stats':stats(),'tools':TOOLS,'fs':FS['err'],'xup':XUP,'ddns':dict(DDNS,dom=sload()['ddns_dom']),'stime':time.strftime('%H:%M %Z'),'svc':services(),'xray':xinfo(),'proc':procinfo(),'online':online(),'backups':sorted(os.listdir(BKD))[::-1] if os.path.isdir(BKD) else [],**ustate_part(uh),'cert':certinfo(),'set':dict({k:v for k,v in sload().items() if k not in ('rpriv','tgtoken','ddns_tok')},tgmask=mask(sload()['tgtoken']),ddmask=mask(sload()['ddns_tok'])),'tfa':bool(lread().get('totp')),'warp':warp_info(),'geo':geo_ok(),'addr':pub_addr(),'me':curuser(),'ov':ov_on(),'hy':hy_on(),'dns':dns_info(),'cdn':cdn_info(),'pays':pay_load(),'pvals':pay_vals(),'h443':h_info(),
             'port':E.get('PANEL_PORT',''),'path':E.get('WEB_PATH',''),'ports':dict({k:v for k,v in E.items() if k.endswith('_PORT')},REALITY_PORT=str(P('REALITY_PORT',8444)),TROJAN_PORT=str(P('TROJAN_PORT',2096)),OVPN1_PORT=str(P('OVPN1_PORT',1194)),OVPN2_PORT=str(P('OVPN2_PORT',110)),SQUID_PORT=str(P('SQUID_PORT',3128)),HY_PORT=str(hyport()),HY_HOP='%d-%d'%hyhop() if hyhop() else '')}
 
 # ---------- stats: server traffic, protocols, top users ----------
@@ -2019,6 +2587,15 @@ def act_desc(r,d,res):
     if r=='/api/ovpn-set': return 'Changed the OpenVPN default Host'
     if r=='/api/dns-set': return 'Changed the DNS tunnel domain'
     if r=='/api/hy-set': return 'Changed the UDP speed limit to %s Mbps'%(d.get('hy_bw') or 0)
+    if r=='/api/cdn-set': return 'Changed the CDN domain to %s'%(d.get('cdn_dom') or 'off')
+    if r=='/api/perf-set': return 'Changed the performance mode to %s'%d.get('perf')
+    if r=='/api/payload/save': return 'Saved the payload %s'%str(d.get('name',''))[:40]
+    if r=='/api/payload/del': return 'Deleted a payload'
+    if r=='/api/payload/import': return 'Imported payloads'
+    if r=='/api/check/fix': return 'Server check fix: %s'%d.get('fix')
+    if r=='/api/h443': return '443 mode turned '+('on' if d.get('on') else 'off')
+    if r=='/api/fw-open': return 'Opened %s/%s in the firewall'%(d.get('port'),d.get('proto'))
+    if r in ('/api/payload/test','/api/check','/api/ports'): return None
     if r=='/api/csv-import': return 'Imported %d user(s) from CSV'%res.get('added',0)
     if r=='/api/restore': return 'Restored a backup (%d users)'%res.get('users',0)
     if r=='/api/svc': return 'Restarted %s'%d.get('unit','')
@@ -2109,9 +2686,8 @@ def daily_jobs():
         HEALTH['rep']=today(); tg_send(report_text(),s)
 
 # ---------- server tools: speed test, port check, scheduled reboot ----------
-TOOLS={'speed':{},'ports':{}}
+TOOLS={'speed':{}}
 SPEEDURL=os.environ.get('REXUI_SPEEDURL','https://speed.cloudflare.com')
-CHAPI=os.environ.get('REXUI_CHAPI','https://check-host.net')
 def speedtest():
     if TOOLS['speed'].get('run'): raise Err('A speed test is already running')
     TOOLS['speed']={'run':1,'t':int(time.time())}
@@ -2126,7 +2702,7 @@ def speedtest():
             o['ping']=round(min(pings),1) if pings else None
             f=T+'/.speed.bin'
             with open(f,'wb') as x: x.write(os.urandom(1024*1024))
-            def phase(kind,secs=7,n=4):
+            def phase(kind,secs=7,n=1):
                 tot=[0]; err=['']; lk=threading.Lock(); ps=[]
                 def w():
                     try:
@@ -2162,38 +2738,6 @@ def speedtest():
             if not o['down'] and not o['up']: o['err']='The test server could not be reached'
         except Exception as e: o['err']=str(e)[:120]
         TOOLS['speed']=o
-    threading.Thread(target=go,daemon=True).start(); return {'ok':1}
-def portcheck():
-    import urllib.request
-    if TOOLS['ports'].get('run'): raise Err('A port check is already running')
-    ip=IPS['v4'] or pub_addr()
-    if not ip: raise Err('The server IP is not known yet')
-    pl=[('Panel','PANEL_PORT',0),('SSH','SSH_PORT',22),('SSH SSL','SSL_PORT',443),('SSH WS','WS_PORT',8880),('SSH WS TLS','WSTLS_PORT',2083),
-        ('VLESS XHTTP TLS','VWSTLS_PORT',8443),('VLESS TCP TLS','VTCP_PORT',2053),('Trojan TLS','TROJAN_PORT',2096),('VLESS XHTTP','VWS_PORT',8080)]
-    s_=sload()
-    if s_['rpriv']: pl.append(('VLESS Reality','REALITY_PORT',8444))
-    xp=[('Reality '+t,p) for t,p in (s_.get('rports') or {}).items() if any(ureal(u,s_)[0]==t for u in uload())]
-    TOOLS['ports']={'run':1,'t':int(time.time()),'res':[]}
-    def get(url):
-        rq=urllib.request.Request(url,headers={'Accept':'application/json','User-Agent':'ReXUI'})
-        with urllib.request.urlopen(rq,timeout=15) as r: return json.loads(r.read().decode())
-    def go():
-        res=[]; err=''
-        try:
-            jobs=[]
-            for name,k,dft in pl+[(n_,None,p_) for n_,p_ in xp]:
-                p=P(k,dft) if k else dft; o=get('%s/check-tcp?host=%s:%d&max_nodes=3'%(CHAPI,ip,p)); jobs.append((name,p,o['request_id']))
-            time.sleep(6)
-            for name,p,rid in jobs:
-                r={}
-                for _ in range(5):
-                    r=get('%s/check-result/%s'%(CHAPI,rid))
-                    if all(v is not None for v in r.values()): break
-                    time.sleep(2)
-                ok=sum(1 for v in r.values() if v and isinstance(v,list) and v[0] and 'error' not in v[0] and v[0].get('time') is not None)
-                res.append({'name':name,'port':p,'ok':ok,'n':len(r)})
-        except Exception as e: err='The online port checker could not be reached: '+str(e)[:80]
-        TOOLS['ports']={'t':int(time.time()),'res':res,'err':err,'ip':ip}
     threading.Thread(target=go,daemon=True).start(); return {'ok':1}
 CRONF='/etc/cron.d/rexui-reboot'
 def reboot_save(d):
@@ -2371,7 +2915,7 @@ class FakeH(http.server.BaseHTTPRequestHandler):
             if os.path.isfile(f): return self._send(200,open(f,'rb').read(),'text/plain',head)
             return self._send(404,NF404,head=head)
         s=sload()
-        if p in ('/','/index.html'): return self._send(200,_fpage(s['fsite'],s['ftitle']),head=head)
+        if p in ('/','/index.html') and s['fsite']!='off': return self._send(200,_fpage(s['fsite'],s['ftitle']),head=head)
         if p=='/favicon.ico': return self._send(404,NF404,head=head)
         return self._send(404,NF404,head=head)
     def do_HEAD(self): self.do_GET(True)
@@ -2394,7 +2938,7 @@ def _acme_webroot(on):
             if n!=t: open(f,'w').write(n)
         except OSError: pass
 def fsite_apply():
-    s=sload(); on=s['fsite']!='off'
+    s=sload(); on=s['fsite']!='off' or h_on()
     for x in FS['srv']:
         try: x.shutdown(); x.server_close()
         except Exception: pass
@@ -2404,7 +2948,7 @@ def fsite_apply():
         except OSError: pass
         _acme_webroot(False); return
     os.makedirs(os.path.join(FSD,'.well-known','acme-challenge'),exist_ok=True)
-    for cls,addr in ((FakeS,('127.0.0.1',FBP)),(FakeS6,('::',80))):
+    for cls,addr in (((FakeS,('127.0.0.1',FBP)),) if h_on() else ((FakeS,('127.0.0.1',FBP)),(FakeS6,('::',80)))):
         try: srv=cls(addr,FakeH)
         except OSError as e:
             if addr[1]==80:
@@ -2417,6 +2961,7 @@ def fsite_save(d):
     s=sload(); k=str(d.get('fsite','off'))
     if k not in ('off','blog','company','soon'): raise Err('bad request')
     s['fsite']=k; s['ftitle']=textval(d.get('ftitle'),60,'Site title'); wjson(SETF,s,0o600); fsite_apply(); xray_apply()
+    if h_on(): threading.Thread(target=h_sync,daemon=True).start()
     if FS['err']: raise Err(FS['err'])
     return {'ok':1}
 
@@ -2592,10 +3137,10 @@ class Hd(BaseHTTPRequestHandler):
             u=next((x for x in uload() if hmac.compare_digest(x['sub'],m[1])),None)
             if not u: return self.nf()
             if 'text/html' in self.headers.get('Accept','') and 'raw' not in self.path.split('?',1)[-1]:
-                d=detail(u['name']); keep=('name','pw','exp','lim','used','up','down','st','sub','links','addr','whost','ports','plaindomain','created','dev','hist','fdays','expts','reason','kind','ovpn','hy2','dns')
+                d=detail(u['name']); keep=('name','pw','exp','lim','used','up','down','st','sub','links','addr','whost','ports','alt','plaindomain','created','dev','hist','fdays','expts','reason','kind','ovpn','hy2','dns','pays')
                 data=json.dumps(dict({k:d[k] for k in keep},announce=sload()['announce'],**brand())).replace('<','\\u003c').replace('>','\\u003e').replace('&','\\u0026')
                 return self.out(200,body=rd(UHTML).replace('__DATA__',data).encode(),ct='text/html; charset=utf-8')
-            body=base64.b64encode('\n'.join(v for _,v in links(u)).encode())
+            body=base64.b64encode('\n'.join(l[1] for l in links(u)).encode())
             ex=0 if u['exp']=='never' else int(datetime.datetime.fromisoformat(u['exp']+'T23:59:59').timestamp())
             info='upload=%d; download=%d; total=%d; expire=%d'%(u['up'],u['down'],int(u['lim']*GB),ex)
             return self.out(200,body=body,ct='text/plain; charset=utf-8',hdr=(('Subscription-Userinfo',info),('Profile-Update-Interval','12'),
@@ -2702,7 +3247,9 @@ class Hd(BaseHTTPRequestHandler):
            '/api/fsite':lambda:fsite_save(d),'/api/rfind':lambda:rfind(d),'/api/rdefault':lambda:rdefault(d),'/api/xcheck':xcheck,'/api/xupdate':lambda:xup_bg(bool(d.get('force'))),
            '/api/xauto':lambda:xauto_save(d),'/api/ddns':lambda:ddns_save(d),'/api/panel-path':lambda:panel_path(d),'/api/logview':lambda:logview(d),
            '/api/maint':maint_info,'/api/cleanup':cleanup,'/api/swap':lambda:swap_set(d),'/api/autoclean':lambda:autoclean_save(d),
-           '/api/speedtest':speedtest,'/api/portcheck':portcheck,'/api/reboot':lambda:reboot_save(d),'/api/subpage':lambda:subpage_save(d),'/api/ovpn-set':lambda:ov_set(d),'/api/dns-set':lambda:dns_set(d),'/api/hy-set':lambda:hy_set(d)}.get(r)
+           '/api/speedtest':speedtest,'/api/reboot':lambda:reboot_save(d),'/api/subpage':lambda:subpage_save(d),'/api/ovpn-set':lambda:ov_set(d),'/api/dns-set':lambda:dns_set(d),'/api/hy-set':lambda:hy_set(d),'/api/cdn-set':lambda:cdn_set(d),'/api/perf-set':lambda:perf_set(d),
+           '/api/payload/save':lambda:pay_save(d),'/api/payload/del':lambda:pay_del(d),'/api/payload/import':lambda:pay_import(d),'/api/payload/test':lambda:pay_test(d),
+           '/api/check':server_check,'/api/check/fix':lambda:check_fix(d),'/api/ports':ports_view,'/api/fw-open':lambda:fw_open(d),'/api/h443':lambda:h_set(d)}.get(r)
         if not f: raise Err('not found')
         return f()
 def ctx():
@@ -2722,6 +3269,18 @@ if __name__=='__main__':
         except Err as e: print(e); sys.exit(1)
     elif a[0]=='user': print(curuser())
     elif a[0]=='purge': purge(); ov_net_purge(); hy_purge(); dns_purge()
+    elif a[0]=='check':
+        for x in server_check()['items']: print('%-5s %-18s %s'%({'ok':'OK','warn':'WARN','fail':'FAIL'}[x['st']],x['name'],x['msg']))
+    elif a[0]=='h443':
+        if len(a)>1 and a[1] in ('on','off'):
+            st=sload(); st['h443']=a[1]=='on'; wjson(SETF,st,0o600); run('systemctl','restart','tunnel-panel')
+            print('443 mode will turn %s in a few seconds. Check it with: menu → Server check'%a[1])
+        else: print('443 mode:','on' if h_on() else 'off',('(HAProxy is not installed)' if not h_has() else ''))
+    elif a[0]=='perf':
+        if len(a)>1:
+            try: perf_set({'perf':a[1]})
+            except Err as e: print(e); sys.exit(1)
+        print('Performance mode:',perf_apply())
     elif a[0]=='dns-setup':
         try: dns_setup(restart=False); print('DNS tunnel ready' if dns_on() else 'DNS tunnel is not installed')
         except Exception as e: print('DNS tunnel setup failed:',e); sys.exit(1)
@@ -2748,6 +3307,8 @@ if __name__=='__main__':
         except Exception as e: log('hysteria setup:',repr(e))
         try: dns_setup()
         except Exception as e: log('dns setup:',repr(e))
+        perf_apply()
+        threading.Thread(target=h_apply,daemon=True).start()
         def bye(*x):
             try: collect(True)
             except Exception as e: log('save on stop:',repr(e))
@@ -2905,6 +3466,9 @@ button.rk{width:100%;border:0;border-bottom:1px solid var(--l);background:none;t
 .tl3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
 .stabs{display:flex;gap:4px;overflow-x:auto;margin:0 0 14px;padding:3px;background:var(--c);border:1px solid var(--l);border-radius:12px;scrollbar-width:none}.stabs::-webkit-scrollbar{display:none}
 .stabs button{flex:1 0 auto;border:0;background:none;border-radius:9px;padding:8px 14px;font-size:13.5px;font-weight:600;color:var(--m);white-space:nowrap}.stabs button.on{background:var(--a2);color:var(--a)}
+@media(max-width:600px){.stabs button{padding:8px 9px;font-size:13px}}
+.ssub{display:flex;gap:6px;overflow-x:auto;margin:-4px 0 14px;scrollbar-width:none}.ssub::-webkit-scrollbar{display:none}.ssub[hidden]{display:none}.ssub button[hidden]{display:none}
+.ssub button{flex:none;border:1px solid var(--l);background:var(--c);border-radius:999px;padding:6px 13px;font-size:13px;font-weight:600;color:var(--m);white-space:nowrap}.ssub button.on{border-color:var(--a);background:var(--a2);color:var(--a)}
 .tabx{display:none!important}
 #sbar{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:16;display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:center;width:max-content;max-width:calc(100vw - 24px);background:var(--c);border:1px solid var(--a);border-radius:14px;padding:8px 10px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
 #sbar b{font-size:13.5px;padding:0 4px}#sbar .sbs{width:1px;height:22px;background:var(--l)}#sbar [data-sa=x] svg{transform:rotate(45deg)}
@@ -2937,15 +3501,20 @@ a.btn{text-decoration:none;color:var(--t)}a.btn.pri{color:#fff}
 .khd{margin-bottom:12px}.kts{display:inline-flex;gap:4px;padding:3px;background:var(--c);border:1px solid var(--l);border-radius:12px;max-width:100%;overflow-x:auto}
 .kts button{display:inline-flex;align-items:center;gap:7px;border:0;background:none;border-radius:9px;padding:8px 14px;font-size:14px;font-weight:600;color:var(--m);white-space:nowrap}.kts button b{font-size:12px;background:var(--c2);border-radius:10px;padding:1px 7px;color:var(--m)}
 .kts button.on{background:var(--a2);color:var(--a)}.kts button.on b{background:var(--a);color:#fff}
+.pyr{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--l)}
+.pyn{display:flex;flex-direction:column;gap:2px;min-width:0}.pyn b{overflow-wrap:anywhere}.pyb{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.pyt{grid-column:1/-1}@media(max-width:600px){.pyr{grid-template-columns:minmax(0,1fr)}.pyb{justify-content:flex-start}}.pyt:empty{display:none}
+.ckx{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--l)}.ckx .dot{flex:none;width:10px;height:10px;border-radius:50%;align-self:flex-start;margin-top:5px}.ckm{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}.ckm small{color:var(--m);font-size:12.5px;overflow-wrap:anywhere}
+.tw2{overflow-x:auto;margin-top:10px;border:1px solid var(--l);border-radius:10px}.pt{width:100%;border-collapse:collapse;font-size:13px}.pt th,.pt td{padding:8px 10px;border-bottom:1px solid var(--l);text-align:left;white-space:nowrap;background:none;position:static;display:table-cell}.pt th{font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--m);background:var(--c2)}.pt tr:last-child td{border-bottom:0}
+.pfm{display:grid;gap:8px;margin-top:10px}.pfm button{display:flex;flex-direction:column;gap:2px;text-align:left;padding:10px 12px;border:1px solid var(--l);border-radius:10px;background:var(--c);color:inherit;font:inherit;cursor:pointer}.pfm button small{color:var(--m);font-size:12.5px}.pfm button[aria-checked=true]{border-color:var(--a);background:var(--a2)}.pfm button[aria-checked=true] b{color:var(--a)}
 </style><style id="acs"></style></head><body>
 <div id="lg" hidden><div class="lbg" aria-hidden="true"><i></i><i></i><i></i></div><form class="lcard" id="lf"><div class="lhead"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><p id="ltg">Sign in to the panel</p></div>
 <label for="lu">Username</label><div class="fi"><span data-i="user"></span><input id="lu" autocomplete="username" autocapitalize="none" spellcheck="false"></div>
 <label for="lp">Password</label><div class="fi"><span data-i="lock"></span><input id="lp" type="password" autocomplete="current-password"><button type="button" class="ib" id="lpe" aria-label="Show password"></button></div>
 <div id="lcw" hidden><label for="lc">6-digit code from your authenticator app</label><div class="fi"><span data-i="shield"></span><input id="lc" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></div></div>
 <div id="capw" hidden><label for="lcap">Type the letters from the picture</label><div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><img id="capi" alt="Security check picture" width="200" height="64" style="border-radius:8px;max-width:100%"><button type="button" class="ib" id="capr" aria-label="Show a new picture"></button></div><div class="fi"><span data-i="shield"></span><input id="lcap" autocapitalize="characters" autocomplete="off" spellcheck="false" maxlength="8"></div></div>
-<div class="err" id="le" role="alert"></div><button class="btn pri lbtn">Log in</button><p class="lft">Protected panel · ReXUI v1.0</p></form></div>
-<div id="app" hidden><aside><div class="brand"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search" title="Search (/)" style="margin-left:auto"></button><button class="ib thb" id="th" aria-label="Switch theme"></button></div><nav id="nav"></nav><a class="pwr" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by <b>ReXUI</b> v1.0</a></aside>
-<main><div id="mt"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search"></button><button class="ib thb" aria-label="Switch theme"></button><button class="ib" id="lo2" aria-label="Log out"></button></div><div id="cbn"></div><div class="hdr"><span class="chip" id="xs"></span><span class="ver">ReXUI v1.0</span><small class="m" id="upd" style="margin-left:auto"></small></div><div id="pg"></div><a class="pwm" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by ReXUI v1.0</a></main><nav id="bn" aria-label="Main"></nav></div>
+<div class="err" id="le" role="alert"></div><button class="btn pri lbtn">Log in</button><p class="lft">Protected panel · ReXUI v1.5</p></form></div>
+<div id="app" hidden><aside><div class="brand"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search" title="Search (/)" style="margin-left:auto"></button><button class="ib thb" id="th" aria-label="Switch theme"></button></div><nav id="nav"></nav><a class="pwr" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by <b>ReXUI</b> v1.5</a></aside>
+<main><div id="mt"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search"></button><button class="ib thb" aria-label="Switch theme"></button><button class="ib" id="lo2" aria-label="Log out"></button></div><div id="cbn"></div><div class="hdr"><span class="chip" id="xs"></span><span class="ver">ReXUI v1.5</span><small class="m" id="upd" style="margin-left:auto"></small></div><div id="pg"></div><a class="pwm" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by ReXUI v1.5</a></main><nav id="bn" aria-label="Main"></nav></div>
 <div id="dt" hidden><div class="dts"><div class="dth"><b>User details</b><button class="btn sm" id="dx" aria-label="Close">Close</button></div><div id="dtb"></div></div></div>
 <div id="md" hidden><form class="card" id="mf"></form></div>
 <div id="sxo" hidden><div class="sxp" role="dialog" aria-label="Search"><div class="fi"><span data-i="search"></span><input id="sxi" placeholder="Search users, settings, tools..." autocomplete="off" spellcheck="false" aria-label="Search"><button type="button" class="btn sm" id="sxx">Esc</button></div><div id="sxr" role="listbox"></div></div></div>
@@ -3151,23 +3720,25 @@ const KN={v2ray:'V2Ray',ssh:'SSH',both:'V2Ray + SSH',ovpn:'OpenVPN',hy2:'UDP',dn
 function umodal(u,c,kd){const ds=D.set,dd=D.cert.domain,def=v=>'Default: '+(v||'auto'),k=u?u.kind:c?c.kind:(kd||UV.kind),src=u||c||{},X_=HX(k),S_=HS(k);
 const F=[];if(!u)F.push(['name','Username','text','Any name, no spaces']);
 if(S_||k=='hy2')F.push(['pw',u?'New password (leave empty to keep)':'Password','text','',u?'':rpw()]);
-F.push(['days',u?(u.fdays?'Add days (counting has not started yet)':'Add days (0 = no change)'):'Valid for days (0 = no expiry)','number','',u?0:c?(c.fdays||(c.exp=='never'?0:Math.max(1,dnum(c)))):30]);
+if(u)F.push(['expmode','Expiry','select','',u.exp=='never'&&!u.fdays?'never':'add',[...(u.exp=='never'&&!u.fdays?[]:[['add',u.fdays?'Add days (counting has not started yet)':'Add days to the current expiry']]),['set','Set new expiry: days from today'],['never','No expiry (unlimited)']]]);
+F.push(['days',u?'Days (0 = no change)':'Valid for days (0 = no expiry)','number','',u?0:c?(c.fdays||(c.exp=='never'?0:Math.max(1,dnum(c)))):30]);
 if(!u)F.push(['first','Start the days on first connection (not today)','check','',c?!!c.fdays:false]);
 F.push(['lim','Data limit in GB (0 = unlimited)','number','',src.lim??0],['dev','Device limit (2 recommended, 0 = unlimited)','number','',src.dev??2],['rday','Monthly data reset day, 1-28 (0 = off)','number','',src.rday??0]);
 if(X_)F.push(['sni','SNI for TLS configs (empty = default)','text',def(ds.sni||dd),src.sni],['host','Host (empty = default)','text',def(ds.host||dd||D.addr),src.host],['rtarget','Reality target (empty = default)','text',def(ds.rsni+':443'),src.rtarget],['rsni','Reality SNI (empty = same as target)','text',def(((src.rtarget)||ds.rsni+':443').split(':')[0]),src.rsni_u]);
+if(X_&&D.cdn&&D.cdn.dom)F.push(['cdn','CDN address (Cloudflare IP or host, empty = default)','text',def(D.cdn.addr||D.cdn.dom),src.cdn]);
 F.push(['note','Note (only you see this)','area','Name, phone, payment...',src.note]);
 const RI=k=='dns'?'DNS users connect through a DNS tunnel with V2Ray inside. Real domain needed: set it in Settings → DNS. It is slow, but works where only DNS is open.':k=='hy2'?(D.hy?'UDP users connect with Hysteria2 (UDP '+D.ports.HY_PORT+(D.ports.HY_HOP?', port hopping '+D.ports.HY_HOP:'')+') in v2rayNG, NekoBox or Hiddify. They get a subscription link. They get no SSH or V2Ray access.':'Hysteria2 is not installed on this server yet. Run the installer again to add it. You can still create the user now.'):k=='ovpn'?(D.ov?'OpenVPN users get a .ovpn file (TCP '+OVP()+', with or without the HTTP proxy). They get no SSH or V2Ray access.':'OpenVPN is not installed on this server yet. Run the installer again to add it. You can still create the user now.'):X_?'Reality target is a real website with TLS 1.3, like www.microsoft.com:443. SNI must be a name that website answers for. Users with a different target get their own Reality port automatically.':'SSH users can log in with SSH, SSL, WebSocket and UDPGW. They get no V2Ray configs.';
 modal(u?'Edit '+u.name:(c?'Clone '+c.name:'Add '+KN[k]+' user'),F,d=>u?api('api/user/edit',Object.assign(d,{name:u.name})).then(()=>{toast('User updated');openU(u.name)}):api('api/user/add',Object.assign(d,{kind:k})).then(()=>{toast(KN[k]+' user created');openU(d.name)}),RI)}
 function kpick(fn){modal('Which type of user?',[['kind','User type','select','',UV.kind,[['v2ray','V2Ray (VLESS, Reality, XHTTP, Trojan)'],['ssh','SSH (SSH, SSL, WebSocket, UDPGW)'],['ovpn','OpenVPN (TCP, HTTP proxy)'],['hy2','UDP (Hysteria2)'],['dns','DNS + V2Ray (real domain needed)']]]],d=>{setTimeout(()=>fn(d.kind),60);return Promise.resolve()})}
 let DT=null,CP=[];const cp=t=>{CP.push(t);return CP.length-1};
 async function copy(t){try{await navigator.clipboard.writeText(t)}catch(e){const a=document.createElement('textarea');a.value=t;a.style.position='fixed';a.style.opacity='0';document.body.append(a);a.select();document.execCommand('copy');a.remove()}toast('Copied')}
-function payloads(h,p){return [`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]`,`GET /ws HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf]Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==[crlf]Sec-WebSocket-Version: 13[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf]User-Agent: Mozilla/5.0[crlf][crlf]`,`GET http://${h}/ HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]X-Online-Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Connection: Keep-Alive[crlf]Upgrade: websocket[crlf][crlf]`,`POST / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`PATCH / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`OPTIONS / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`CONNECT ${h}:${p.WS_PORT} HTTP/1.1[crlf]Host: ${h}[crlf][crlf]`,`HEAD / HTTP/1.1[crlf]Host: ${h}[crlf][crlf][split]GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf][crlf][split]GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`]}
+function payloads(h,p){return [`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET wss://bug.com [protocol][crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]`,`GET /ws HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf]Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==[crlf]Sec-WebSocket-Version: 13[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf]User-Agent: Mozilla/5.0[crlf][crlf]`,`GET http://${h}/ HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]X-Online-Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Connection: Keep-Alive[crlf]Upgrade: websocket[crlf][crlf]`,`POST / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`PATCH / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`OPTIONS / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`CONNECT ${h}:${p.WS_PORT} HTTP/1.1[crlf]Host: ${h}[crlf][crlf]`,`HEAD / HTTP/1.1[crlf]Host: ${h}[crlf][crlf][split]GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf][crlf][split]GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`]}
 async function openU(n){try{DT=await api('api/user/detail',{name:n})}catch(x){return toast(x.message,1)}drawU();$('#dt').hidden=false;$('#dt .dts').scrollTop=0}
 function usageCard(h){if(!h||!h.length)return '';const mx=Math.max(1,...h.map(x=>x[1]+x[2])),tot=h.reduce((a,x)=>a+x[1]+x[2],0),td=h[h.length-1];
 return `<div class="card"><div class="ct"><div class="lab">Daily usage (30 days)</div><b>${fb(tot)}</b></div><div class="um"><span class="bl">Today ${fb(td[1]+td[2])}</span><span>Peak ${fb(mx==1?0:mx)}</span></div>
 <div class="uch" role="img" aria-label="Daily data usage for the last 30 days">${h.map(x=>`<i title="${x[0]}: ↑ ${fb(x[1])} ↓ ${fb(x[2])}"><b style="height:${(x[1]/mx*100).toFixed(1)}%"></b><u style="height:${(x[2]/mx*100).toFixed(1)}%"></u></i>`).join('')}</div>
 <div class="uax"><span>${h[0][0].slice(5)}</span><span><b style="color:var(--a)">■</b> Upload <b style="color:var(--l2)">■</b> Download</span><span>Today</span></div></div>`}
-const OVP=()=>D.ports&&(D.ports.OVPN1_PORT||D.ports.OVPN2_PORT)?[D.ports.OVPN1_PORT||1194,D.ports.OVPN2_PORT||110].join(' / '):'1194 / 110';
+const OVP=()=>(D.h443&&D.h443.on?'443 / ':'')+(D.ports&&(D.ports.OVPN1_PORT||D.ports.OVPN2_PORT)?[D.ports.OVPN1_PORT||1194,D.ports.OVPN2_PORT||110].join(' / '):'1194 / 110');
 const DNSH=()=>`<div class="banner w" role="note">${I('net',17)}<div><b>DNS + V2Ray · Real domain needed.</b> DuckDNS does not work here. ${D.dns&&D.dns.ns?'Tunnel domain: <b>'+X(D.dns.ns)+'</b>.':'Set your tunnel domain in Settings → DNS first.'} It is slow (good for chat and browsing) and works where only DNS is open.</div></div>`;
 function dnsCard(u,cbox){const o=u.dns;if(!o.on)return `<div class="card"><div class="lab">${I('net',15)}DNS tunnel</div><p class="note bad">The DNS tunnel is not installed on this server yet. Run the installer again to add it.</p></div>`;
 const all=`DNS tunnel (DNSTT)\nNameserver: ${o.ns||'-'}\nPublic key: ${o.pub}\nDNS resolver: 8.8.8.8 (faster with DoH: https://dns.google/dns-query)\nHTTP Custom: SlowDNS, Type Auto\nV2Ray: ${(u.links[0]||{}).url||''}`;
@@ -3195,7 +3766,7 @@ ${any?`${HS(u.kind)?`<div class="kv"><span>SSH sessions</span><b>${u.ssh}</b></d
 function drawU(){const u=DT,p=u.ports,n=X(u.name),hx=HX(u.kind),hs=HS(u.kind);CP=[];
 const row=(k,v)=>`<div class="kv"><span>${k}</span><b>${X(v)}</b></div>`;
 const cbox=(label,v,qr)=>{const i=cp(v);return `<div class="cb"><div class="cbh"><small>${X(label)}</small><span style="display:flex;gap:6px">${qr===false?'':`<button class="btn sm" data-qr="${i}" data-ql="${X(label)}">QR</button>`}<button class="btn sm" data-cp="${i}">Copy</button></span></div><button class="code" data-cp="${i}" aria-label="Copy ${X(label)}">${X(v)}</button></div>`};
-const sshAll=`Host: ${u.addr}\nUsername: ${u.name}\nPassword: ${u.pw||'-'}\nSSH: ${p.SSH_PORT}\nSSH SSL/TLS: ${p.SSL_PORT}\nSSH WS: ${p.WS_PORT}\nSSH WS TLS: ${p.WSTLS_PORT}\nUDPGW: 127.0.0.1:${p.UDPGW_PORT}\nExpires: ${u.exp=='never'?'No expiry':u.exp}`;
+const sshAll=`Host: ${u.addr}\nUsername: ${u.name}\nPassword: ${u.pw||'-'}\nSSH: ${p.SSH_PORT}\nSSH SSL/TLS: ${AP(u,'SSL_PORT')}\nSSH WS: ${AP(u,'WS_PORT')}\nSSH WS TLS: ${AP(u,'WSTLS_PORT')}\nUDPGW: 127.0.0.1:${p.UDPGW_PORT}\nExpires: ${u.exp=='never'?'No expiry':u.exp}`;
 $('#dtb').innerHTML=`<div class="uh" style="margin-bottom:14px"><div class="av" style="background:hsl(${hue(u.name)} 55% 52%)">${n[0].toUpperCase()}</div><div style="min-width:0"><b style="font-size:18px">${n}</b>${tagT(u)}<small class="m" style="display:block">Created ${X(u.created||'-')}</small></div><span class="pill" style="color:${STC[u.st]}">${STN[u.st]}</span></div>
 <div class="card"><div class="ct"><div class="lab">Data usage</div><b>${lims(u.used,u.lim)}</b></div>${ubar(u.used,u.lim)}
 <div class="um" style="margin-top:10px"><span class="bl">${I('up',14)}${fb(u.up)}</span><span>${I('down',14)}${fb(u.down)}</span><span>${I('cal',14)}${u.fdays?'Starts on first connection ('+u.fdays+' days)':u.exp=='never'?'No expiry':'Expires '+X(u.exp)+(dleft(u)?' · '+dleft(u):'')}</span><span>${I('dev',14)}Device limit ${u.dev||'Unlimited'}</span><span>${I('refresh',14)}${u.rday?'Monthly reset on day '+u.rday:'No monthly reset'}</span></div>
@@ -3206,13 +3777,14 @@ ${usageCard(u.hist)}
 ${onlineCard(u)}
 ${hx||u.kind=='hy2'?'':`<div class="card"><div class="lab">User page</div><p class="note">Send this link to the user. ${u.kind=='dns'?'It shows their usage, expiry and the DNS tunnel details.':u.kind=='ovpn'?'It shows their usage, expiry and the OpenVPN file download.':'It shows their usage, expiry, SSH details and payloads.'}</p>${cbox('User page',u.sub,false)}<a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>`}
 ${hx?`<div class="card"><div class="ct"><div class="lab">Subscription link</div><button class="btn sm" data-ua="newsub">${I('refresh',14)}New link</button></div><p class="note">Import into v2rayNG, NekoBox or Hiddify. It contains all Xray configs (XHTTP TLS, TCP TLS, Trojan, Reality, XHTTP) and shows usage and expiry.</p>${cbox('Subscription',u.sub)}<a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>
-<div class="card"><div class="ct"><div class="lab">Xray configs</div><button class="btn sm" data-ua="newuuid">${I('refresh',14)}New UUID</button></div><p class="note">Tap a config to copy it. XHTTP needs a recent app (v2rayNG 1.9.30+, Hiddify, NekoBox with Xray core).</p>${u.links.map(l=>cbox(l.name,l.url)+(l.name=='VLESS XHTTP (no TLS)'&&!u.plaindomain?'<p class="note bad" style="margin-top:6px">New Xray apps refuse VLESS without TLS on an IP address. Set a domain (Settings → Server address, or a domain certificate) to use this config.</p>':'')).join('')}</div>
+<div class="card"><div class="ct"><div class="lab">Xray configs</div><button class="btn sm" data-ua="newuuid">${I('refresh',14)}New UUID</button></div><p class="note">Tap a config to copy it. XHTTP needs a recent app (v2rayNG 1.9.30+, Hiddify, NekoBox with Xray core).</p>${u.links.map(l=>cbox(l.name+(l.alt?' · port '+(l.url.match(/:(\d+)\?/)||[])[1]+' (or '+l.alt+')':''),l.url)+(l.name=='VLESS XHTTP (no TLS)'&&!u.plaindomain?'<p class="note bad" style="margin-top:6px">New Xray apps refuse VLESS without TLS on an IP address. Set a domain (Settings → Server address, or a domain certificate) to use this config.</p>':'')).join('')}</div>
 `:''}
 ${hs?`<div class="card"><div class="ct"><div class="lab">SSH account</div><button class="btn sm" data-cp="${cp(sshAll)}">Copy all</button></div>
-${row('Host',u.addr)}${row('Username',u.name)}${row('Password',u.pw||'Unknown (set a new one with Edit)')}${row('SSH',p.SSH_PORT)}${row('SSH SSL / TLS',p.SSL_PORT)}${row('SSH WS',p.WS_PORT)}${row('SSH WS TLS',p.WSTLS_PORT)}${row('UDPGW','127.0.0.1:'+p.UDPGW_PORT)}</div>
+${row('Host',u.addr)}${row('Username',u.name)}${row('Password',u.pw||'Unknown (set a new one with Edit)')}${row('SSH',p.SSH_PORT)}${row('SSH SSL / TLS',AP(u,'SSL_PORT'))}${row('SSH WS',AP(u,'WS_PORT'))}${row('SSH WS TLS',AP(u,'WSTLS_PORT'))}${row('UDPGW','127.0.0.1:'+p.UDPGW_PORT)}</div>
 `:''}
-${hx?`<div class="card"><div class="lab">Xray details</div>${row('VLESS XHTTP TLS port',p.VWSTLS_PORT)}${row('VLESS TCP TLS port',p.VTCP_PORT)}${row('Trojan TLS port',p.TROJAN_PORT)}${row('VLESS Reality port',u.rport||p.REALITY_PORT)}${row('VLESS XHTTP port',p.VWS_PORT)}${row('XHTTP path',u.path)}${row('SNI (TLS configs)',u.sni||'Default')}${row('Host',u.whost)}${row('Reality target',u.rt+(u.rtarget?'':' (default)'))}${row('Reality SNI',u.rsni_u||(u.rt||'').split(':')[0])}${row('UUID / Trojan password',u.uuid)}</div>`:''}
-${hs?`<div class="card"><div class="lab">SSH WebSocket payloads</div><p class="note">Host ${X(u.whost)}. Use port ${p.WS_PORT} for SSH WS, or ${p.WSTLS_PORT} with TLS on for SSH WS TLS. Try them one by one.</p>${payloads(u.whost,p).map((x,i)=>cbox('Payload '+(i+1),x,false)).join('')}</div>`:''}
+${hx?`<div class="card"><div class="lab">Xray details</div>${row('VLESS XHTTP TLS port',AP(u,'VWSTLS_PORT'))}${row('VLESS TCP TLS port',AP(u,'VTCP_PORT'))}${row('Trojan TLS port',AP(u,'TROJAN_PORT'))}${row('VLESS Reality port',u.alt&&u.alt.REALITY_PORT?'443 (or '+(u.rport||u.alt.REALITY_PORT)+')':u.rport||p.REALITY_PORT)}${row('VLESS XHTTP port',AP(u,'VWS_PORT'))}${row('XHTTP path',u.path)}${row('SNI (TLS configs)',u.sni||'Default')}${row('Host',u.whost)}${row('Reality target',u.rt+(u.rtarget?'':' (default)'))}${row('Reality SNI',u.rsni_u||(u.rt||'').split(':')[0])}${row('UUID / Trojan password',u.uuid)}</div>`:''}
+${hs?`<div class="card"><div class="lab">SSH WebSocket payloads</div><p class="note">Host ${X(u.whost)}. Use port ${AP(u,'WS_PORT')} for SSH WS, or ${AP(u,'WSTLS_PORT')} with TLS on for SSH WS TLS. Try them one by one.</p>${payloads(u.whost,p).map((x,i)=>cbox('Payload '+(i+1),x,false)).join('')}</div>`:''}
+${hs&&u.pays&&u.pays.length?`<div class="card"><div class="lab">Custom payloads</div><p class="note">Made in Settings → Payloads. The user sees these on their page too.</p>${u.pays.map(x=>cbox(x.name+' · '+(PAYM[x.mode]||x.mode)+' · port '+payPort(x.mode),x.text,false)+(x.note?`<p class="note" style="margin-top:4px">${X(x.note)}</p>`:'')).join('')}</div>`:''}
 ${u.ovpn?ovCard(u):''}${u.hy2?hyCard(u,cbox):''}${u.dns?dnsCard(u,cbox):''}`}
 $('#dt').onclick=async e=>{if(e.target.id=='dt'||e.target.closest('#dx'))return $('#dt').hidden=true;
 const q=e.target.closest('[data-qr]');if(q)return showQR(q.dataset.ql,CP[+q.dataset.qr]);
@@ -3235,7 +3807,7 @@ $('#cxf').onchange=async e=>{const f=e.target.files[0];e.target.value='';if(!f)r
 try{const r=await api('api/csv-import',{csv:t});toast('Added '+r.added+' user(s)');$('#me').innerHTML=r.errors.length?'Skipped:<br>'+r.errors.map(X).join('<br>'):'';load()}catch(x){$('#me').textContent=x.message}}}
 let SH=null;
 function shareText(u){const p=u.ports,h=`${BR.brand||'ReXUI'} account\nUsername: ${u.name}\n`+(HS(u.kind)?`Password: ${u.pw||'-'}\n`:'')+`Expires: ${u.fdays?'starts on first connection ('+u.fdays+' days)':u.exp=='never'?'No expiry':u.exp}\nData: ${u.lim?u.lim+' GB':'Unlimited'}\nDevices: ${u.dev||'Unlimited'}\n`;
-return h+(!SUBK(u.kind)?`\nYour account page${u.kind=='ovpn'?' (download your .ovpn file here)':''}:\n${u.sub}\n`:`\nSubscription link (v2rayNG / NekoBox / Hiddify):\n${u.sub}\n`)+(u.kind=='dns'&&u.dns?`\nDNS tunnel + V2Ray\nNameserver: ${u.dns.ns}\nPublic key: ${u.dns.pub}\nResolver: 1.1.1.1 / 8.8.8.8`:'')+(u.kind=='hy2'&&u.hy2?`\nHysteria2 (UDP)\nServer: ${u.addr}\nUDP port: ${u.hy2.port}${u.hy2.hop?'\nPort hopping: '+u.hy2.hop:''}\nPassword: ${u.pw}`:'')+(u.kind=='ovpn'&&u.ovpn?`\nOpenVPN\nServer: ${u.addr}\nTCP ports: ${u.ovpn.ports.join(', ')}\nHTTP proxy: ${u.addr}:${u.ovpn.proxy}`:'')+(!HS(u.kind)?'':`\nSSH\nHost: ${u.addr}\nSSH: ${p.SSH_PORT}  SSL: ${p.SSL_PORT}\nWS: ${p.WS_PORT}  WS TLS: ${p.WSTLS_PORT}\nUDPGW: 127.0.0.1:${p.UDPGW_PORT}`)}
+return h+(!SUBK(u.kind)?`\nYour account page${u.kind=='ovpn'?' (download your .ovpn file here)':''}:\n${u.sub}\n`:`\nSubscription link (v2rayNG / NekoBox / Hiddify):\n${u.sub}\n`)+(u.kind=='dns'&&u.dns?`\nDNS tunnel + V2Ray\nNameserver: ${u.dns.ns}\nPublic key: ${u.dns.pub}\nResolver: 1.1.1.1 / 8.8.8.8`:'')+(u.kind=='hy2'&&u.hy2?`\nHysteria2 (UDP)\nServer: ${u.addr}\nUDP port: ${u.hy2.port}${u.hy2.hop?'\nPort hopping: '+u.hy2.hop:''}\nPassword: ${u.pw}`:'')+(u.kind=='ovpn'&&u.ovpn?`\nOpenVPN\nServer: ${u.addr}\nTCP ports: ${u.ovpn.ports.join(', ')}\nHTTP proxy: ${u.addr}:${u.ovpn.proxy}`:'')+(!HS(u.kind)?'':`\nSSH\nHost: ${u.addr}\nSSH: ${p.SSH_PORT}  SSL: ${AP(u,'SSL_PORT')}\nWS: ${AP(u,'WS_PORT')}  WS TLS: ${AP(u,'WSTLS_PORT')}\nUDPGW: 127.0.0.1:${p.UDPGW_PORT}`)}
 function shareCard(u){const W=1080,P=64,cv=document.createElement('canvas');cv.width=W;cv.height=3000;const g=cv.getContext('2d'),ac=(AC[BR.accent]||AC.blue)[1],F='system-ui,-apple-system,"Segoe UI",Roboto,sans-serif',p=u.ports;
 const rr=(x,y,w,h,r,f)=>{g.beginPath();g.moveTo(x+r,y);g.arcTo(x+w,y,x+w,y+h,r);g.arcTo(x+w,y+h,x,y+h,r);g.arcTo(x,y+h,x,y,r);g.arcTo(x,y,x+w,y,r);g.closePath();g.fillStyle=f;g.fill()};
 const fit=(t,max,size,w)=>{let z=size;g.font=`${w} ${z}px ${F}`;while(g.measureText(t).width>max&&z>20){z-=2;g.font=`${w} ${z}px ${F}`}if(g.measureText(t).width>max){while(t.length>3&&g.measureText(t+'…').width>max)t=t.slice(0,-1);t+='…'}return t};
@@ -3279,15 +3851,14 @@ $('#xui').innerHTML=kv('Installed','v'+(D.xray.ver||'?'))+(xu.latest?kv('Latest 
 $('#ddi').innerHTML=dd.dom?(dd.t?`<p class="note" style="color:${dd.ok?'var(--g)':'var(--r)'}">${dd.ok?'Updated '+tago(dd.t)+(dd.ip?' · '+X(dd.ip):''):X(dd.msg)}</p>`:'<p class="note">Waiting for the first update...</p>'):'';
 if(rf){$('#rfb').disabled=!!rf.run;const ok=(rf.res||[]).filter(r=>r.ok),bad=(rf.res||[]).filter(r=>!r.ok);
 $('#rfr').innerHTML=rf.run?'<p class="note">Checking... about 15 seconds.</p>':ok.map(r=>`<div class="rk"><span class="nm"><b>${X(r.d)}</b><small class="m">${r.ms} ms${r.h2?' · HTTP/2':' · no HTTP/2'}</small></span>${r.d==s.rsni?'<span class="tag">Default</span>':`<button type="button" class="btn sm" data-rd="${X(r.d)}">Use</button>`}</div>`).join('')+(bad.length?`<p class="note" style="margin-top:8px">Not usable here: ${bad.map(r=>X(r.d)).join(', ')}</p>`:'')+(rf.t&&!rf.run?`<p class="note">Checked ${tago(rf.t)}</p>`:'')}}
-function tools(){tools2();const t=D.tools,sp=t.speed,pc=t.ports;if(!$('#spr'))return;$('#stm').textContent=D.stime;
-$('#spr').innerHTML=sp.run?'<p class="note">Testing... this takes about 20 seconds.</p>':sp.t?(sp.err?`<p class="err">${X(sp.err)}</p>`:`<div class="tl3"><div class="tile"><b>${mbps(sp.down)}</b><small>DOWNLOAD</small></div><div class="tile"><b>${mbps(sp.up)}</b><small>UPLOAD</small></div><div class="tile"><b>${sp.ping??'-'}</b><small>PING ms</small></div></div><p class="note" style="margin-top:6px">Tested ${tago(sp.t)}</p>`):'';
-$('#spb').disabled=!!sp.run;$('#pcb').disabled=!!pc.run;
-$('#pcr').innerHTML=pc.run?'<p class="note">Checking... this takes about 20 seconds.</p>':pc.t?(pc.err?`<p class="err">${X(pc.err)}</p>`:'')+(pc.res||[]).map(r=>`<div class="kv"><span>${X(r.name)} · ${r.port}</span><b style="color:${r.ok==r.n&&r.n?'var(--g)':r.ok?'var(--y)':'var(--r)'}">${r.ok==r.n&&r.n?'Open':r.ok?'Partly open':'Closed'} (${r.ok}/${r.n})</b></div>`).join('')+(pc.res&&pc.res.length?`<p class="note" style="margin-top:6px">Checked ${tago(pc.t)} for ${X(pc.ip)}</p>`:''):''}
-function stb(){tools();const b=$('#bkl');if(!b)return;const L=D.backups||[];b.innerHTML=L.length?`<p class="note" style="margin:12px 0 0">Automatic daily backups on the server (last 7): ${L.map(X).join(', ')}. Restore one with <b style="color:var(--t)">menu</b> → Backup / Restore.</p>`:''}
+function tools(){tools2();const t=D.tools,sp=t.speed;if(!$('#spr'))return;$('#stm').textContent=D.stime;
+$('#spr').innerHTML=sp.run?'<p class="note">Testing... this takes about 20 seconds.</p>':sp.t?(sp.err?`<p class="err">${X(sp.err)}</p>`:`<div class="tl3"><div class="tile"><b>${mbps(sp.down)}</b><small>DOWNLOAD</small></div><div class="tile"><b>${mbps(sp.up)}</b><small>UPLOAD</small></div><div class="tile"><b>${sp.ping??'-'}</b><small>PING ms</small></div></div>${sp.srv?`<div class="kv" style="margin-top:8px"><span>Test server</span><b>${X(sp.srv)}</b></div>`:''}${sp.isp?`<div class="kv"><span>Provider</span><b>${X(sp.isp)}</b></div>`:''}${sp.jit!=null?`<div class="kv"><span>Jitter · packet loss</span><b>${sp.jit} ms · ${sp.loss!=null?(+sp.loss).toFixed(1)+' %':'-'}</b></div>`:''}${sp.note?`<p class="note" style="margin-top:6px">${X(sp.note)}</p>`:''}<p class="note" style="margin-top:6px">Tested ${tago(sp.t)}</p>`):'';
+$('#spb').disabled=!!sp.run}
+function stb(){tools();featTick();const b=$('#bkl');if(!b)return;const L=D.backups||[];b.innerHTML=L.length?`<p class="note" style="margin:12px 0 0">Automatic daily backups on the server (last 7): ${L.map(X).join(', ')}. Restore one with <b style="color:var(--t)">menu</b> → Backup / Restore.</p>`:''}
 function st(){const d=D,c=d.cert,s=d.set,p=d.ports,url=`https://${c.domain||location.hostname}:${d.port}/${d.path}/`;
 const kv=(k,v)=>`<div class="kv"><span>${k}</span><b>${X(v)}</b></div>`;
-const ST=[['general','General'],['xray','Xray'],['ovpn','OpenVPN'],['hy2','UDP'],['dns','DNS'],['telegram','Telegram'],['sub','Sub page'],['tools','Tools'],['backup','Backup'],['logs','Logs']];
-$('#pg').innerHTML=`<div class="stabs" role="tablist" aria-label="Settings sections">${ST.map(t=>`<button type="button" role="tab" data-stab="${t[0]}">${t[1]}</button>`).join('')}</div><div class="sg">
+const SG=[['general','General',[['general','General']]],['proto','Protocols',[['xray','Xray'],['cdn','CDN'],['ovpn','OpenVPN'],['hy2','UDP'],['dns','DNS']]],['users','Users',[['sub','Sub page'],['pay','Payloads']]],['net','Network',[['ports','Ports and 443 mode']]],['alerts','Alerts',[['telegram','Telegram']]],['server','Server',[['check','Server check'],['tools','Tools'],['backup','Backup'],['logs','Logs']]]],ST=SG.flatMap(g=>g[2].map(t=>[t[0],t[1],g[0]]));
+$('#pg').innerHTML=`<div class="stabs" role="tablist" aria-label="Settings sections">${SG.map(g=>`<button type="button" role="tab" data-sg="${g[0]}">${g[1]}</button>`).join('')}</div><div class="ssub" role="tablist" aria-label="Section parts">${ST.map(t=>`<button type="button" role="tab" data-stab="${t[0]}" data-g="${t[2]}">${t[1]}</button>`).join('')}</div><div class="sg">
 <form class="card" id="cf"><div class="lab">${I('cert',15)}SSL certificate (panel + Xray)</div>${kv('Current',c.src)}${kv('Name',c.name||'-')}${kv('Expires',c.exp||'-')}
 <p class="note" style="margin-top:12px">Paste the certificate (fullchain) and private key for your domain. The domain's A record must point to this server (on Cloudflare use DNS only). The panel restarts with the new certificate after saving.</p>
 <label for="cc">Certificate (fullchain)</label><textarea id="cc" placeholder="-----BEGIN CERTIFICATE-----" spellcheck="false"></textarea>
@@ -3361,8 +3932,8 @@ ${D.svc.filter(x=>x.unit.startsWith('rexui-ovpn')||x.unit=='squid').map(x=>kv(x.
 <p class="note">Users see the new names after they refresh their subscription.</p>
 <div class="err" id="spe"></div><button class="btn pri">Save</button></form>
 <form class="card" id="tf"><div class="lab">${I('cpu',15)}Server tools</div>
-<div class="ct" style="margin-top:12px"><b>Speed test</b><button type="button" class="btn sm" id="spb">${I('refresh',14)}Run test</button></div><p class="note">Download and upload speed of this server (Cloudflare, 4 connections, 7 seconds each). On a fast server one test can use 1-2 GB of traffic.</p><div id="spr"></div>
-<div class="ct" style="margin-top:18px;border-top:1px solid var(--l);padding-top:14px"><b>Port check</b><button type="button" class="btn sm" id="pcb">${I('net',14)}Check ports</button></div><p class="note">Asks 3 servers on the internet (check-host.net) if each port can be reached from outside. A closed port is usually blocked by your provider's firewall.</p><div id="pcr"></div>
+<div class="ct" style="margin-top:12px"><b>Speed test</b><button type="button" class="btn sm" id="spb">${I('refresh',14)}Run test</button></div><p class="note">Download and upload speed of this server (Cloudflare, 1 connection, 7 seconds each). One test can use a few hundred MB of traffic on a fast server.</p><div id="spr"></div>
+
 <div style="margin-top:18px;border-top:1px solid var(--l);padding-top:14px"><b>Scheduled reboot</b></div>
 <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:8px"><select id="rbm" aria-label="Reboot schedule"><option value="off">Off</option><option value="daily">Every day</option><option value="weekly">Every week</option></select>
 <select id="rbd" aria-label="Day">${['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'].map((x,i)=>`<option value="${i}"${i==s.rbday?' selected':''}>${x}</option>`).join('')}</select><input id="rbt" value="${X(s.rbtime)}" aria-label="Time" placeholder="04:00"></div>
@@ -3402,12 +3973,54 @@ ${kv('Current path','/'+location.pathname.split('/')[1]+'/')}<label for="pap">Ne
 <div class="card" id="pwc"><div class="lab">${I('dev',15)}Phone app</div><p class="note" style="margin-top:8px">Install the panel on your phone's home screen. It opens full screen like an app.</p>
 <button type="button" class="btn pri" id="pwab" hidden style="margin-top:6px">${I('plus',15)}Install app</button>
 <p class="note" id="pwan" style="margin-top:8px"></p></div>
+<form class="card" id="cdnf"><div class="lab">${I('globe',15)}CDN mode (Cloudflare) · Real domain needed</div><p class="note" style="margin-top:8px">Users connect to Cloudflare, Cloudflare passes the traffic to this server. Your server IP stays hidden and many "free" or zero-rated Cloudflare hosts work as the address. Adds 2 configs to every V2Ray user.</p>
+${d.cdn.dom?`<div class="kv"><span>Status</span><b class="ok">On · ${X(d.cdn.dom)}</b></div>`:`<div class="kv"><span>Status</span><b>Off</b></div>`}
+<label for="cdnd">CDN domain (orange cloud on Cloudflare, empty = off)</label><input id="cdnd" value="${X(d.cdn.dom)}" placeholder="cdn.yourdomain.com" autocapitalize="none" spellcheck="false">
+<label for="cdna">Address in the configs (optional)</label><input id="cdna" value="${X(d.cdn.addr)}" placeholder="Empty = the CDN domain. Or a Cloudflare IP / clean host" autocapitalize="none" spellcheck="false">
+<details style="margin-top:12px"><summary><b>Cloudflare steps</b></summary><ol class="note" style="padding-left:18px;margin-top:6px;line-height:1.7">
+<li>DNS → Add record: type <b style="color:var(--t)">A</b>, name <b style="color:var(--t)">cdn</b>, value your server IP, cloud <b style="color:var(--t)">orange (Proxied)</b>.</li>
+<li>SSL/TLS → Overview → mode <b style="color:var(--t)">Full</b>.</li>
+<li>Network → <b style="color:var(--t)">WebSockets</b> on (it is on by default).</li>
+<li>Keep your panel record (vpn) and the DNS tunnel records grey.</li>
+<li>Type cdn.yourdomain.com above and Save. Users refresh their subscription.</li></ol></details>
+<div class="kv" style="margin-top:8px"><span>VLESS XHTTP TLS · port ${X(d.cdn.ports.xtls)}</span><b class="${d.cdn.tls?'ok':'bad'}">${d.cdn.tls?'Works with Cloudflare':'Port not allowed by Cloudflare'}</b></div>
+<div class="kv"><span>VLESS XHTTP · port ${X(d.cdn.ports.x)}</span><b class="${d.cdn.http?'ok':'bad'}">${d.cdn.http?'Works with Cloudflare':'Port not allowed by Cloudflare'}</b></div>
+<div class="kv"><span>SSH WebSocket · port ${X(d.cdn.ports.ws)}</span><b class="${d.cdn.wsok?'ok':'bad'}">${d.cdn.wsok?'Works with Cloudflare':'Port not allowed by Cloudflare'}</b></div>
+<div class="kv"><span>SSH WebSocket TLS · port ${X(d.cdn.ports.wss)}</span><b class="${d.cdn.wssok?'ok':'bad'}">${d.cdn.wssok?'Works with Cloudflare':'Port not allowed by Cloudflare'}</b></div>
+<p class="note">SSH users can use the CDN too: in the app set the SSH host to the CDN domain and use the WebSocket ports above (payload preset "Through Cloudflare CDN"). Cloudflare ports: HTTPS 443, 2053, 2083, 2087, 2096, 8443 · HTTP 80, 8080, 8880, 2052, 2082, 2086, 2095.</p>
+<div class="err" id="cdne"></div><button class="btn pri">Save</button></form>
+<div class="card" id="payc"><div class="ct"><div class="lab">${I('file',15)}Payloads</div><span class="mr" style="margin:0"><button type="button" class="btn sm" id="pyim">${I('upl',14)}Import</button><button type="button" class="btn sm" id="pyex">${I('save',14)}Export</button><input type="file" id="pyif" accept=".json,application/json" hidden></span></div>
+<p class="note">Your own payloads for SSH users. The ones marked "shown" appear in every SSH user's details and on their page, with your server and ports already filled in.</p><div id="payl"></div></div>
+<form class="card" id="payf"><div class="lab" id="pyh">New payload</div>
+<select id="pyps" aria-label="Preset" style="margin-top:10px"></select>
+<label for="pyn">Name</label><input id="pyn" maxlength="60" placeholder="Example: Jazz WhatsApp WS">
+<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px"><div><label for="pym">Connection</label><select id="pym">${Object.entries(PAYM).map(m=>`<option value="${m[0]}">${m[1]}</option>`).join('')}</select></div>
+<div><label for="pyg">Bug host (for {bug})</label><input id="pyg" placeholder="m.facebook.com" autocapitalize="none" spellcheck="false"></div></div>
+<label for="pyx">Payload</label><div class="chips" id="pyc" style="margin:0 0 6px"></div><textarea id="pyx" spellcheck="false" maxlength="4000" style="min-height:96px" placeholder="GET / HTTP/1.1[crlf]Host: {bug}[crlf]Upgrade: websocket[crlf][crlf]"></textarea>
+<p class="note" style="margin-top:4px">{...} are filled by the panel. [...] are kept for the app (HTTP Custom, HTTP Injector, NPV Tunnel).</p>
+<span class="slab">Preview (what the user copies)</span><pre class="lvo" id="pyp" style="min-height:0;max-height:160px;margin-top:4px"></pre><p class="note" id="pyi" style="margin-top:4px"></p>
+<label for="pyo">Note for users (optional)</label><input id="pyo" maxlength="200" placeholder="Example: Works on Jazz with the WhatsApp package">
+<label class="ck"><input type="checkbox" id="pys" checked> Show to SSH users</label>
+<div class="err" id="pye"></div><div class="mr" style="justify-content:flex-start"><button class="btn pri">Save</button><button type="button" class="btn" id="pytb">${I('bolt',15)}Test on this server</button><button type="button" class="btn" id="pyclr">Clear</button></div><div id="pyres"></div>
+<p class="note">Test connects to this server like an app does and checks that SSH answers. It cannot test your mobile network or the bug host itself.</p></form>
+<div class="card" id="h4c"><div class="ct"><div class="lab">${I('net',15)}443 mode (HAProxy)</div><button type="button" class="btn sm${d.h443.on?'':' pri'}" id="h4b"${d.h443.has||d.h443.on?'':' disabled'}>${d.h443.on?'Turn off':'Turn on'}</button></div>
+<div class="kv"><span>Status</span><b class="${d.h443.on?'ok':d.h443.want?'bad':''}">${d.h443.on?'On':d.h443.has?'Off':'Off · HAProxy not installed'}</b></div>
+${d.h443.err&&!d.h443.on?`<p class="note bad" style="margin-top:8px">${X(d.h443.err)}</p>`:''}
+<p class="note" style="margin-top:8px">One port for everything, for networks that only allow 443 and 80. <b style="color:var(--t)">443</b>: SSH SSL, SSH WS TLS, VLESS XHTTP TLS, VLESS TCP TLS, Trojan, OpenVPN, with any SNI. <b style="color:var(--t)">80</b>: SSH WS, VLESS XHTTP, website. The old ports keep working, users see them as a second choice. Reality keeps its own port. Hysteria2 (UDP) and the DNS tunnel do not change.</p>
+<p class="note">Turning it on checks itself (SSL, WebSocket and XHTTP through HAProxy) and goes back to the old setup if anything fails. Xray restarts once, so V2Ray users reconnect.</p></div>
+<div class="card" id="prc"><div class="ct"><div class="lab">${I('net',15)}Ports</div><button type="button" class="btn sm" id="prr">${I('refresh',14)}Refresh</button></div><div id="prt"><p class="note">Loading...</p></div>
+<p class="note">To change a port, run <b style="color:var(--t)">menu</b> on the server and open Port change.</p>
+<p class="note"><b style="color:var(--t)">Works on the server but not from outside?</b> Check your VPS provider's firewall or Anti-DDoS rules. A rule that expects SSH on a web port (80, 8080, 8880) lets only SSH through and silently drops WebSocket and XHTTP. Set the rule's application to HTTP, or delete the rule.</p></div>
+<div class="card" id="ckc"><div class="ct"><div class="lab">${I('shield',15)}Server check</div><button type="button" class="btn sm pri" id="ckb">${I('refresh',14)}Run check</button></div>
+<p class="note">Checks services, Xray config, certificate, domains and DNS records, OpenVPN network, firewall, ports, time, disk and memory. Problems that the panel can fix get a Fix button.</p><div id="ckr"></div></div>
+<div class="card" id="pfc"><div class="lab">${I('bolt',15)}Performance mode</div><p class="note" style="margin-top:8px">Network tuning for the whole server. Changes apply right away, nobody is disconnected.</p>
+<div class="pfm" id="pfm" role="radiogroup" aria-label="Performance mode">${[['latency','Low ping','Gaming, calls, browsing. Small buffers, fast replies.'],['balanced','Balanced','Best for most servers with many users.'],['throughput','Max speed','Downloads and streaming on a fast server. Uses more memory.']].map(m=>`<button type="button" role="radio" data-pm="${m[0]}" aria-checked="${(s.perf||'balanced')==m[0]}"><b>${m[1]}</b><small>${m[2]}</small></button>`).join('')}</div></div>
 <div class="card" id="ppc"><div class="lab">${I('shield',15)}Panel and ports</div>${kv('URL',url)}${kv('Secret path','/'+d.path+'/')}
 ${[['Panel','PANEL_PORT'],['SSH','SSH_PORT'],['SSH SSL','SSL_PORT'],['SSH WS','WS_PORT'],['SSH WS TLS','WSTLS_PORT'],['UDPGW','UDPGW_PORT'],['VLESS XHTTP TLS','VWSTLS_PORT'],['VLESS TCP TLS','VTCP_PORT'],['Trojan TLS','TROJAN_PORT'],['VLESS Reality','REALITY_PORT'],['VLESS XHTTP','VWS_PORT']].map(x=>kv(x[0],p[x[1]]||'-')).join('')}
 <p class="note" style="margin-top:12px">To change a port, run <b style="color:var(--t)">menu</b> on the server and open Port change.</p></div></div>`;
-const TM={cf:'xray',xf:'xray',rf:'xray',fsc:'xray',rfc:'xray',pf:'general',ovsf:'ovpn',hysc:'hy2',dnsf:'dns',apf:'general',pwc:'general',ppc:'general',pac:'general',af:'telegram',spf:'sub',tf:'tools',xuc:'tools',ddc:'tools',mtc:'tools',bkc:'backup',lgc:'logs'};
-const stab=t=>{if(!ST.some(x=>x[0]==t))t='general';ls('rx-stab',t);document.querySelectorAll('[data-stab]').forEach(b=>{const on=b.dataset.stab==t;b.classList.toggle('on',on);b.setAttribute('aria-selected',on)});
-Object.entries(TM).forEach(([id,tb])=>{const el=$('#'+id);if(el)el.classList.toggle('tabx',tb!=t)});if(t=='tools')mload();if(t=='logs')lview()};window.STAB=stab;
+const TM={cf:'xray',xf:'xray',rf:'xray',fsc:'xray',rfc:'xray',pf:'general',ovsf:'ovpn',hysc:'hy2',dnsf:'dns',apf:'general',pwc:'general',ppc:'general',pac:'general',af:'telegram',spf:'sub',tf:'tools',xuc:'tools',ddc:'tools',mtc:'tools',bkc:'backup',lgc:'logs',cdnf:'cdn',payc:'pay',payf:'pay',prc:'ports',h4c:'ports',ckc:'check',pfc:'general'};
+const stab=t=>{const x=ST.find(x=>x[0]==t)||ST[0];t=x[0];const g=x[2],one=SG.find(y=>y[0]==g)[2].length<2;LSG[g]=t;ls('rx-stab',t);document.querySelectorAll('[data-sg]').forEach(b=>{const on=b.dataset.sg==g;b.classList.toggle('on',on);b.setAttribute('aria-selected',on)});$('.ssub').hidden=one;document.querySelectorAll('[data-stab]').forEach(b=>{const on=b.dataset.stab==t;b.hidden=b.dataset.g!=g;b.classList.toggle('on',on);b.setAttribute('aria-selected',on)});
+Object.entries(TM).forEach(([id,tb])=>{const el=$('#'+id);if(el)el.classList.toggle('tabx',tb!=t)});if(t=='tools')mload();if(t=='logs')lview();if(t=='ports')portsLoad();if(t=='check'&&!$('#ckr').innerHTML)checkRun()};window.STAB=stab;
 $('#fss').value=s.fsite;$('#fsc').onsubmit=async e=>{e.preventDefault();try{await api('api/fsite',{fsite:$('#fss').value,ftitle:$('#fst').value});$('#fse').textContent='';toast('Saved')}catch(x){$('#fse').textContent=x.message}};
 $('#rfb').onclick=()=>api('api/rfind',{extra:$('#rfx').value}).then(()=>{toast('Checking sites...');load()}).catch(x=>toast(x.message,1));
 $('#rfr').onclick=async e=>{const b=e.target.closest('[data-rd]');if(!b)return;if(!confirm('Use '+b.dataset.rd+' as the default Reality target?\n\nUsers without their own target get it. They must refresh their subscription.'))return;try{await api('api/rdefault',{domain:b.dataset.rd});toast('Default target changed');load()}catch(x){toast(x.message,1)}};
@@ -3418,7 +4031,7 @@ $('#ddc').onsubmit=async e=>{e.preventDefault();const b=$('#ddc .pri');b.disable
 $('#pab').onclick=async()=>{if(!confirm('Change the panel address now? You will log in again at the new address.'))return;try{const r=await api('api/panel-path',{path:$('#pap').value}),u=location.origin+'/'+r.path+'/';
 $('#pae').innerHTML=`<span style="color:var(--t)">New address (save it):<br><b style="word-break:break-all">${X(u)}</b><br>Opening it in a few seconds...</span>`;copy(u);setTimeout(()=>location.href=u,5000)}catch(x){$('#pae').textContent=x.message}};
 $('#lvs').onchange=$('#lvn').onchange=$('#lvr').onclick=()=>lview();let lvq;$('#lvq').oninput=()=>{clearTimeout(lvq);lvq=setTimeout(lview,400)};
-document.querySelector('.stabs').onclick=e=>{const b=e.target.closest('[data-stab]');if(b){stab(b.dataset.stab);b.scrollIntoView({block:'nearest',inline:'nearest'})}};
+document.querySelector('.stabs').onclick=e=>{const b=e.target.closest('[data-sg]');if(b){const g=SG.find(y=>y[0]==b.dataset.sg);stab(LSG[g[0]]||g[2][0][0]);b.scrollIntoView({block:'nearest',inline:'nearest'})}};document.querySelector('.ssub').onclick=e=>{const b=e.target.closest('[data-stab]');if(b){stab(b.dataset.stab);b.scrollIntoView({block:'nearest',inline:'nearest'})}};
 $('#apth').value=ls('rx-theme')||'auto';$('#apth').onchange=()=>{const v=$('#apth').value;theme(v);if(v=='auto')try{localStorage.removeItem('rx-theme')}catch(e){}else{ls('rx-theme',v);if(v!='light')ls('rx-dark',v)}};
 $('#pwab').hidden=!IP;$('#pwan').innerHTML=isApp()?'You are using the app now.':location.protocol!='https:'?'':`If there is no Install button: in Chrome open the ⋮ menu and tap <b style="color:var(--t)">Add to Home screen</b>. On iPhone, open the panel in Safari, tap Share and <b style="color:var(--t)">Add to Home Screen</b>.${D.cert.src=='self-signed'?' The app works best with your own domain certificate.':''}`;
 $('#pwab').onclick=async()=>{if(!IP)return;IP.prompt();await IP.userChoice.catch(()=>{});IP=null;$('#pwab').hidden=true};
@@ -3426,7 +4039,7 @@ $('#clb').onclick=async()=>{const b=$('#clb');b.disabled=true;try{const r=await 
 $('#clx').onchange=()=>api('api/autoclean',{autoclean:$('#clx').checked}).then(()=>toast('Saved')).catch(x=>toast(x.message,1));
 $('#swb').onclick=async()=>{const g=$('#swg').value;if(!confirm('Create a '+g+' GB swap file? This takes up to a minute.'))return;const b=$('#swb');b.disabled=true;b.textContent='Working...';try{await api('api/swap',{gb:+g});toast('Swap is on');$('#mte').textContent=''}catch(x){$('#mte').textContent=x.message}b.disabled=false;b.textContent='Create swap';mload()};
 $('#swr').onclick=async()=>{if(!confirm('Remove the swap file?'))return;try{await api('api/swap',{gb:0});toast('Swap removed');$('#mte').textContent=''}catch(x){$('#mte').textContent=x.message}mload()};
-stab(ls('rx-stab')||'general');
+featBind();stab(ls('rx-stab')||'general');
 stb();$('#rsf').onchange=async e=>{const f=e.target.files[0];e.target.value='';if(!f)return;$('#rse').textContent='';let o;
 try{o=JSON.parse(await f.text())}catch(x){return $('#rse').textContent='This file is not valid JSON'}
 if(!confirm('Restore '+(o.users||[]).length+' users from '+f.name+'?'))return;
@@ -3452,7 +4065,6 @@ $('#spf').onsubmit=async e=>{e.preventDefault();try{await api('api/subpage',{ann
 $('#rbm').value=s.reboot;const rbv=()=>{$('#rbd').hidden=$('#rbm').value!='weekly';$('#rbt').disabled=$('#rbm').value=='off'};$('#rbm').onchange=rbv;rbv();
 $('#tf').onsubmit=async e=>{e.preventDefault();try{await api('api/reboot',{reboot:$('#rbm').value,rbday:$('#rbd').value,rbtime:$('#rbt').value});$('#tfe').textContent='';toast('Schedule saved')}catch(x){$('#tfe').textContent=x.message}};
 $('#spb').onclick=()=>api('api/speedtest').then(()=>{toast('Speed test started');load()}).catch(x=>toast(x.message,1));
-$('#pcb').onclick=()=>api('api/portcheck').then(()=>{toast('Port check started');load()}).catch(x=>toast(x.message,1));
 $('#af').onsubmit=async e=>{e.preventDefault();try{await api('api/automation',ab());$('#ae').textContent='';toast('Saved');await load();st()}catch(x){$('#ae').textContent=x.message}};
 $('#afc').onclick=async()=>{try{const r=await api('api/tg-chat',ab());$('#ac').value=r.chat;$('#ae').textContent='';toast('Chat ID found, now tap Save')}catch(x){$('#ae').textContent=x.message}};
 $('#aft').onclick=async()=>{try{await api('api/tg-test',ab());$('#ae').textContent='';toast('Test message sent')}catch(x){$('#ae').textContent=x.message}};
@@ -3462,7 +4074,67 @@ let r;try{r=await api('api/2fa/setup')}catch(x){return toast(x.message,1)}
 modal('Turn on 2FA',[['code','Enter the 6-digit code shown in the app','number','']],d=>api('api/2fa/enable',d).then(()=>{toast('2FA is on');return load().then(st)}),
 `1. Open Google Authenticator or Aegis and scan this QR.<span style="display:block;background:#fff;border-radius:10px;padding:8px;margin:10px auto;max-width:220px">${RXQR.svg(r.uri,200)}</span>Or type this key: <b style="color:var(--t);word-break:break-all">${X(r.secret)}</b><br>2. Enter the code from the app below.`)};
 $('#pf').onsubmit=async e=>{e.preventDefault();try{await api('api/login-change',{old:$('#po').value,u:$('#pu').value,p:$('#pn').value});toast('Login changed, please log in again');show(false)}catch(x){$('#pe').textContent=x.message}}}
-let CAPID='';const capShow=c=>{CAPID=c.id;$('#capi').src=c.img;$('#lcap').value='';$('#capw').hidden=false};
+const PAYM={ws:'SSH WebSocket',wstls:'SSH WebSocket TLS',ssl:'SSH SSL / TLS',proxy:'HTTP proxy'};
+const PAYV=[['{bug}','Bug host'],['{server}','Server'],['{ip}','Server IP'],['{cdn}','CDN domain'],['{ws_port}','WS port'],['{wss_port}','WS TLS port'],['{ssl_port}','SSL port'],['[crlf]','New line'],['[split]','Split'],['[host]','App host'],['[port]','App port'],['[ua]','User agent']];
+const PAYP=[['Host = server (most used)','ws','GET / HTTP/1.1[crlf]Host: {server}[crlf]Upgrade: websocket[crlf][crlf]'],['wss:// bug host (most used)','ws','GET wss://{bug} [protocol][crlf]Host: {server}[crlf]Upgrade: websocket[crlf][crlf]'],['Basic WebSocket','ws','GET / HTTP/1.1[crlf]Host: {bug}[crlf]Upgrade: websocket[crlf][crlf]'],
+['WebSocket + Connection header','ws','GET / HTTP/1.1[crlf]Host: {bug}[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]'],
+['Split: bug host first','ws','GET / HTTP/1.1[crlf]Host: {bug}[crlf][crlf][split]GET / HTTP/1.1[crlf]Host: {server}[crlf]Upgrade: websocket[crlf][crlf]'],
+['X-Online-Host','ws','GET / HTTP/1.1[crlf]Host: {server}[crlf]X-Online-Host: {bug}[crlf]Upgrade: websocket[crlf][crlf]'],
+['Full URL request','ws','GET http://{bug}/ HTTP/1.1[crlf]Host: {server}[crlf]Upgrade: websocket[crlf][crlf]'],
+['Keep-Alive + user agent','ws','GET / HTTP/1.1[crlf]Host: {bug}[crlf]Connection: Keep-Alive[crlf]User-Agent: [ua][crlf]Upgrade: websocket[crlf][crlf]'],
+['WebSocket TLS (SNI = bug host)','wstls','GET / HTTP/1.1[crlf]Host: {bug}[crlf]Upgrade: websocket[crlf][crlf]'],
+['Through Cloudflare CDN','ws','GET / HTTP/1.1[crlf]Host: {cdn}[crlf]Upgrade: websocket[crlf][crlf]'],
+['HTTP proxy CONNECT','proxy','CONNECT {server}:{ws_port} HTTP/1.1[crlf]Host: {bug}[crlf][crlf]']];
+let PE=null;
+function payRender(t,bug){const v=Object.assign({},D.pvals||{});if(bug)v['{bug}']=bug;let o=t||'';Object.keys(v).forEach(k=>{o=o.split(k).join(v[k])});return o}
+function payPort(m){const p=Object.assign({},D.ports,D.h443&&D.h443.ports);return m=='wstls'?p.WSTLS_PORT:m=='ssl'?p.SSL_PORT:m=='proxy'?'proxy':p.WS_PORT}
+function payList(){const el=$('#payl');if(!el)return;const L=D.pays||[];
+el.innerHTML=L.length?L.map(p=>`<div class="pyr"><div class="pyn"><b>${X(p.name)}</b><small class="m">${X(PAYM[p.mode]||p.mode)} · port ${X(payPort(p.mode))}${p.bug?' · '+X(p.bug):''}${p.show?' · shown to SSH users':' · hidden'}</small>${p.note?`<small class="m">${X(p.note)}</small>`:''}</div>
+<span class="pyb"><button type="button" class="btn sm" data-pt="${p.id}">Test</button><button type="button" class="btn sm" data-pc="${p.id}">Copy</button><button type="button" class="btn sm" data-pe="${p.id}">Edit</button><button type="button" class="btn sm dng" data-pd="${p.id}" aria-label="Delete ${X(p.name)}">${I('del',14)}</button></span><div class="pyt" id="pyt_${p.id}"></div></div>`).join(''):'<p class="note">No payloads yet. Write one below or start from a preset.</p>'}
+function payForm(p){PE=p&&p.id?p.id:null;p=p||{};$('#pyn').value=p.name||'';$('#pym').value=p.mode||'ws';$('#pyg').value=p.bug||'';$('#pyx').value=p.text||'';$('#pyo').value=p.note||'';$('#pys').checked=p.show!==false;
+$('#pyh').textContent=PE?'Edit payload':'New payload';$('#pye').textContent='';$('#pyres').innerHTML='';payPrev()}
+function payPrev(){const t=$('#pyx').value,m=$('#pym').value;$('#pyp').textContent=payRender(t,$('#pyg').value.trim())||' ';
+$('#pyi').innerHTML=`Port <b style="color:var(--t)">${X(payPort(m))}</b>${m=='wstls'||m=='ssl'?' with TLS / SSL on, SNI = bug host':m=='proxy'?': put your proxy IP and port in the app':''}.`}
+function payData(){return {id:PE,name:$('#pyn').value.trim(),mode:$('#pym').value,bug:$('#pyg').value.trim(),text:$('#pyx').value,note:$('#pyo').value.trim(),show:$('#pys').checked}}
+function payShow(el,r){el.innerHTML=`<p class="note ${r.ok?'ok':'bad'}" style="margin-top:6px">${r.ok?'✓ ':'✗ '}${X(r.msg)}</p>`}
+async function payTest(d,el){el.innerHTML='<p class="note">Testing...</p>';try{payShow(el,await api('api/payload/test',d))}catch(x){payShow(el,{ok:0,msg:x.message})}}
+function featBind(){
+$('#pyc').innerHTML=PAYV.map(v=>`<button type="button" class="chip" data-pv="${v[0]}" title="${v[1]}">${X(v[0])}</button>`).join('');
+$('#pyps').innerHTML='<option value="">Start from a preset...</option>'+PAYP.map((p,i)=>`<option value="${i}">${X(p[0])}</option>`).join('');
+$('#pyps').onchange=e=>{const p=PAYP[e.target.value];if(!p)return;if($('#pyx').value.trim()&&!confirm('Replace the text in the box with this preset?')){e.target.value='';return}if(!$('#pyn').value.trim())$('#pyn').value=p[0];$('#pym').value=p[1];$('#pyx').value=p[2];e.target.value='';payPrev()};
+$('#pyc').onclick=e=>{const b=e.target.closest('[data-pv]');if(!b)return;const t=$('#pyx'),s=t.selectionStart??t.value.length,v=b.dataset.pv;t.value=t.value.slice(0,s)+v+t.value.slice(t.selectionEnd??s);t.focus();t.selectionStart=t.selectionEnd=s+v.length;payPrev()};
+$('#pyx').oninput=$('#pym').onchange=$('#pyg').oninput=payPrev;
+$('#payf').onsubmit=async e=>{e.preventDefault();const b=$('#payf .pri');b.disabled=true;try{await api('api/payload/save',payData());toast(PE?'Payload saved':'Payload added');payForm();await load();payList()}catch(x){$('#pye').textContent=x.message}b.disabled=false};
+$('#pytb').onclick=()=>payTest(payData(),$('#pyres'));$('#pyclr').onclick=()=>payForm();
+$('#payl').onclick=async e=>{const b=e.target.closest('button');if(!b)return;const id=b.dataset.pt||b.dataset.pc||b.dataset.pe||b.dataset.pd,p=(D.pays||[]).find(x=>x.id==id);if(!p)return;
+if(b.dataset.pt)return payTest(p,$('#pyt_'+id));if(b.dataset.pc)return copy(payRender(p.text,p.bug));
+if(b.dataset.pe){payForm(p);$('#payf').scrollIntoView({block:'start',behavior:'smooth'});return}
+if(confirm('Delete the payload '+p.name+'?'))try{await api('api/payload/del',{id});toast('Deleted');if(PE==id)payForm();await load();payList()}catch(x){toast(x.message,1)}};
+$('#pyex').onclick=()=>{const L=(D.pays||[]).map(({id,...r})=>r);if(!L.length)return toast('No payloads to export',1);const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify({rexui_payloads:1,items:L},null,1)],{type:'application/json'}));a.download='payloads.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)};
+$('#pyim').onclick=()=>$('#pyif').click();
+$('#pyif').onchange=async e=>{const f=e.target.files[0];e.target.value='';if(!f)return;try{const o=JSON.parse(await f.text()),items=Array.isArray(o)?o:o.items;const r=await api('api/payload/import',{items});toast('Added '+r.added+' payload'+(r.added==1?'':'s'));await load();payList()}catch(x){toast(x.message=='Nothing to import'||!(x instanceof SyntaxError)?x.message:'This file is not valid JSON',1)}};
+payList();payForm();
+$('#cdnf').onsubmit=async e=>{e.preventDefault();const b=$('#cdnf .pri');b.disabled=true;try{await api('api/cdn-set',{cdn_dom:$('#cdnd').value,cdn_addr:$('#cdna').value});$('#cdne').textContent='';toast($('#cdnd').value.trim()?'Saved. Users get the CDN configs after they refresh.':'CDN turned off');await load();st()}catch(x){$('#cdne').textContent=x.message}b.disabled=false};
+$('#pfm').onclick=async e=>{const b=e.target.closest('[data-pm]');if(!b||b.getAttribute('aria-checked')=='true')return;try{await api('api/perf-set',{perf:b.dataset.pm});toast('Performance mode: '+b.querySelector('b').textContent);await load();$('#pfm').querySelectorAll('[data-pm]').forEach(x=>x.setAttribute('aria-checked',x.dataset.pm==b.dataset.pm))}catch(x){toast(x.message,1)}};
+$('#h4b').onclick=async e=>{const b=e.target,on=!D.h443.on;if(!on&&!confirm('Turn off 443 mode? Users on port 443 / 80 configs need the old ports again.'))return;b.disabled=true;b.textContent='Working, up to 30 seconds...';try{await api('api/h443',{on});toast(on?'443 mode is on. Users get the new configs after they refresh.':'443 mode is off')}catch(x){toast(x.message,1)}await load();st();STAB('ports')};$('#prr').onclick=()=>portsLoad();
+$('#prt').onclick=async e=>{const b=e.target.closest('[data-fo]');if(!b)return;const [p,pr]=b.dataset.fo.split('/');try{const r=await api('api/fw-open',{port:p,proto:pr});toast(r.msg||'Opened '+p+'/'+pr);portsLoad()}catch(x){toast(x.message,1)}};
+$('#ckb').onclick=()=>checkRun();
+$('#ckr').onclick=async e=>{const b=e.target.closest('[data-fx]');if(!b)return;b.disabled=true;b.textContent='Working...';try{const r=await api('api/check/fix',{fix:b.dataset.fx});toast(r.msg||'Done',!r.ok)}catch(x){toast(x.message,1)}checkRun()}}
+let PV=null;
+async function portsLoad(){const el=$('#prt');if(!el)return;el.innerHTML='<p class="note">Loading...</p>';try{PV=await api('api/ports');portsShow()}catch(x){el.innerHTML=`<p class="err">${X(x.message)}</p>`}}
+function portsShow(){const el=$('#prt');if(!el||!PV)return;
+const fwc=f=>f=='open'?'<span class="ok">Allowed</span>':f=='closed'?'<span class="bad">Blocked</span>':'<span class="m">Off</span>';
+el.innerHTML=`<div class="tw2"><table class="pt"><thead><tr><th>Service</th><th>Port</th><th>Running</th><th>Server firewall</th></tr></thead><tbody>${PV.ports.map(r=>`<tr><td>${X(r.name)}</td><td><b>${X(r.port)}</b><small class="m">/${r.proto}</small></td><td>${r.listen?`<span class="ok">Yes</span> <small class="m">${X(r.prog)}</small>`:'<span class="bad">No</span>'}</td><td>${fwc(r.fw)}${r.fw=='closed'?` <button type="button" class="btn sm" data-fo="${X(r.port)}/${r.proto}">Allow</button>`:''}</td></tr>`).join('')}</tbody></table></div>
+${PV.clash.length?`<p class="note bad" style="margin-top:10px">Two services use the same port: ${PV.clash.map(c=>X(c.port+'/'+c.proto+' ('+c.names.join(', ')+')')).join('; ')}. Change one from menu → Port change.</p>`:''}
+${PV.other.length?`<p class="note" style="margin-top:10px">Other programs listening on this server: ${PV.other.map(o=>X(o.port+'/'+o.proto+' '+o.prog)).join(', ')}</p>`:''}
+<p class="note" style="margin-top:10px">${PV.fw?'The server firewall (ufw) is on.':'The server firewall (ufw) is off, so nothing is blocked on the server itself.'} Your VPS provider may have its own firewall in their website: open the same ports there.</p>`}
+async function checkRun(){const el=$('#ckr');if(!el)return;$('#ckb').disabled=true;el.innerHTML='<p class="note">Checking the server... up to 15 seconds.</p>';
+try{const L=(await api('api/check')).items,n={fail:0,warn:0,ok:0};L.forEach(x=>n[x.st]++);const col={ok:'var(--g)',warn:'var(--y)',fail:'var(--r)'};
+el.innerHTML=`<div class="tl3" style="margin:10px 0"><div class="tile"><b style="color:var(--r)">${n.fail}</b><small>PROBLEMS</small></div><div class="tile"><b style="color:var(--y)">${n.warn}</b><small>WARNINGS</small></div><div class="tile"><b style="color:var(--g)">${n.ok}</b><small>OK</small></div></div>`+
+L.map(x=>`<div class="ckx"><span class="dot" style="background:${col[x.st]}"></span><div class="ckm"><b>${X(x.name)}</b><small>${X(x.msg)}</small></div>${x.fix?`<button type="button" class="btn sm${x.st=='fail'?' pri':''}" data-fx="${X(x.fix)}">Fix</button>`:''}</div>`).join('')+`<p class="note" style="margin-top:8px">Checked at ${new Date().toLocaleTimeString()}. The same check runs on the server with menu → Server check.</p>`}
+catch(x){el.innerHTML=`<p class="err">${X(x.message)}</p>`}$('#ckb').disabled=false}
+function featTick(){}
+const AP=(u,k,v)=>{const p=v||u.ports[k],a=u.alt&&u.alt[k];return a?p+' (or '+a+')':p};const LSG={};let CAPID='';const capShow=c=>{CAPID=c.id;$('#capi').src=c.img;$('#lcap').value='';$('#capw').hidden=false};
 $('#capr').innerHTML=I('refresh',17);$('#capr').onclick=()=>fetch('api/captcha',{cache:'no-store'}).then(r=>r.json()).then(capShow).catch(()=>{});
 $('#lf').onsubmit=async e=>{e.preventDefault();const r=await fetch('api/login',{method:'POST',headers:{'X-Req':'1','Content-Type':'application/json'},body:JSON.stringify({u:$('#lu').value.trim(),p:$('#lp').value,code:$('#lc').value,cid:CAPID,cap:$('#lcap').value})});const j=await r.json().catch(()=>({}));
 if(r.ok){$('#lp').value='';$('#lc').value='';$('#lcw').hidden=true;$('#capw').hidden=true;CAPID='';$('#le').textContent='';return load()}
@@ -3475,7 +4147,7 @@ const SXS=[['Overview','page','ov','dashboard graphs cpu ram speed traffic top u
 ['Appearance (brand, colour, theme)','set','general apf','brand logo colour color accent theme dark black amoled tagline'],['Phone app','set','general pwc','pwa install app home screen'],['Panel and ports','set','general ppc','ports url'],
 ['Panel address (secret path)','set','general pac','path url secret address change'],['Telegram and alerts','set','telegram af','telegram bot alerts report backup auto delete health'],['Subscription page and config names','set','sub spf','announcement config name flag sub page'],
 ['Speed test, port check, reboot','set','tools tf','speed test speedtest port check reboot schedule'],['Xray core update','set','tools xuc','xray update version core'],['DuckDNS','set','tools ddc','duckdns ddns domain ip'],
-['Disk cleanup and swap','set','tools mtc','cleanup clean disk swap memory'],['Backup and restore','set','backup bkc','backup restore'],['Server logs','set','logs lgc','logs journal errors access'],
+['Disk cleanup and swap','set','tools mtc','cleanup clean disk swap memory'],['CDN mode (Cloudflare)','set','cdn cdnf','cdn cloudflare orange proxied hide ip'],['Payloads','set','pay payc','payload payloads builder bug host http custom injector'],['Payload builder','set','pay payf','new payload preset test split'],['Ports','set','ports prc','ports port manager firewall ufw listening open'],['443 mode (HAProxy)','set','ports h4c','443 80 haproxy one port mode'],['Server check','set','check ckc','server check diagnose problems fix health doctor'],['Performance mode','set','general pfc','performance speed latency ping throughput tuning'],['Backup and restore','set','backup bkc','backup restore'],['Server logs','set','logs lgc','logs journal errors access'],
 ['Add user','act','add','new create user'],['Trial user','act','trial','trial test'],['Bulk actions and CSV','act','bulk','bulk csv export import']];
 let SXL=[],SXA=0;
 function sxOpen(){if($('#app').hidden)return;$('#sxo').hidden=false;$('#sxi').value='';sxRun();setTimeout(()=>$('#sxi').focus(),10)}
@@ -3542,7 +4214,7 @@ details summary{cursor:pointer;font-weight:600;padding:4px 0}details[open] summa
 <script src="/qr.js"></script>
 <script>
 const U=__DATA__;
-const X=s=>String(s??'').replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
+const AP=(u,k,v)=>{const p=v||u.ports[k],a=u.alt&&u.alt[k];return a?p+' (or '+a+')':p};const X=s=>String(s??'').replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
 const fb=b=>{const u=['B','KB','MB','GB','TB'];let i=0;b=+b||0;while(b>=1024&&i<4){b/=1024;i++}return (i?b.toFixed(2):b.toFixed(0))+' '+u[i]};
 const SC={active:'var(--a)',online:'var(--g)',expired:'var(--r)',limit:'var(--r)',disabled:'var(--y)'},SN={active:'Active',online:'Active',expired:'Expired',limit:'Data limit reached',disabled:'Disabled'};
 const CP=[];const cp=t=>{CP.push(t);return CP.length-1};
@@ -3550,7 +4222,7 @@ const cbox=(l,v,qr=true)=>{const i=cp(v);return `<div class="cb"><div class="cbh
 const row=(k,v)=>`<div class="row"><span>${k}</span><b>${X(v)}</b></div>`;
 const p=U.ports,h=U.whost,pct=U.lim?Math.min(100,U.used/(U.lim*1073741824)*100):0;
 let left='No expiry';if(U.fdays)left=`Starts when you first connect (${U.fdays} day${U.fdays==1?'':'s'})`;else if(U.expts){const h=Math.ceil((U.expts*1000-Date.now())/36e5);left=h>0?`${U.exp} (${h} hour${h==1?'':'s'} left)`:`${U.exp} (expired)`}else if(U.exp!='never'){const d=Math.ceil((new Date(U.exp+'T23:59:59')-new Date())/864e5);left=d>=0?`${U.exp} (${d} day${d==1?'':'s'} left)`:`${U.exp} (expired)`}
-const pl=[`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf]User-Agent: Mozilla/5.0[crlf][crlf]`,`GET http://${h}/ HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`CONNECT ${h}:${p.WS_PORT} HTTP/1.1[crlf]Host: ${h}[crlf][crlf]`];
+const pl=[`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET wss://bug.com [protocol][crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Connection: Upgrade[crlf]Upgrade: websocket[crlf][crlf]`,`GET / HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf]User-Agent: Mozilla/5.0[crlf][crlf]`,`GET http://${h}/ HTTP/1.1[crlf]Host: ${h}[crlf]Upgrade: websocket[crlf][crlf]`,`CONNECT ${h}:${p.WS_PORT} HTTP/1.1[crlf]Host: ${h}[crlf][crlf]`];
 const AC={blue:['#1f6feb','#4c8dff'],teal:['#0d9488','#2dd4bf'],green:['#15803d','#4ade80'],purple:['#7c3aed','#a78bfa'],pink:['#db2777','#f472b6'],orange:['#ea580c','#fb923c'],indigo:['#4f46e5','#818cf8']},ac=AC[U.accent]||AC.blue;
 document.getElementById('acs').textContent=`:root{--a:${ac[0]}}@media(prefers-color-scheme:dark){:root{--a:${ac[1]}}}`;if(U.brand)document.title=U.brand+' · My account';
 const dl=U.fdays||U.exp=='never'?1e9:U.expts?(U.expts*1000-Date.now())/864e5:Math.ceil((new Date(U.exp+'T23:59:59')-new Date())/864e5),soon=['active','online'].includes(U.st)&&(dl<=3||(U.lim&&pct>=90));
@@ -3565,7 +4237,7 @@ ${U.kind=="v2ray"||U.kind=="both"||U.kind=="hy2"?`<div class="card"><div class="
 <div class="card"><div class="lab">Get the app</div><p class="note">Install one of these apps, then add the subscription link above.</p><div class="apps">
 <a href="https://github.com/2dust/v2rayNG/releases/latest" target="_blank" rel="noopener">v2rayNG<small>Android</small></a><a href="https://github.com/MatsuriDayo/NekoBoxForAndroid/releases/latest" target="_blank" rel="noopener">NekoBox<small>Android</small></a><a href="https://github.com/hiddify/hiddify-app/releases/latest" target="_blank" rel="noopener">Hiddify<small>Android · iPhone · PC</small></a></div>
 <a class="wide" href="hiddify://import/${encodeURI(U.sub)}#${encodeURIComponent(U.brand||'ReXUI')}">Already have Hiddify? Tap to add your subscription</a></div>
-<div class="card"><div class="lab">Configs</div><p class="note">Or add one config at a time. Tap to copy, or show the QR.</p>${U.links.map(l=>cbox(l.name,l.url)+(l.name=='VLESS XHTTP (no TLS)'&&!U.plaindomain?'<p class="note bad">This one may not work in new apps without a domain.</p>':'')).join('')}</div>`:""}
+<div class="card"><div class="lab">Configs</div><p class="note">Or add one config at a time. Tap to copy, or show the QR.</p>${U.links.map(l=>cbox(l.name+(l.alt?' · port '+(l.url.match(/:(\d+)\?/)||[])[1]+' (or '+l.alt+')':''),l.url)+(l.name=='VLESS XHTTP (no TLS)'&&!U.plaindomain?'<p class="note bad">This one may not work in new apps without a domain.</p>':'')).join('')}</div>`:""}
 ${U.kind=="dns"&&U.dns?`<div class="card"><div class="lab">DNS tunnel + V2Ray</div><p class="note">Use a DNS tunnel app (DNSTT / SlowDNS with V2Ray). Enter the nameserver and public key, pick a DNS resolver, then add the V2Ray config. It is slow, but works where only DNS is open.</p>
 ${row('Nameserver (NS)',U.dns.ns||'Ask your provider')}${row('DNS resolver','8.8.8.8')}${row('Faster (DoH)','https://dns.google/dns-query')}${row('HTTP Custom','SlowDNS · Type Auto')}${cbox('Public key',U.dns.pub,false)}${U.links.map(l=>cbox(l.name,l.url)).join("")}</div>`:""}
 ${U.kind=="ovpn"&&U.ovpn?`<div class="card"><div class="lab">OpenVPN</div><p class="note">Download your .ovpn file and import it in OpenVPN Connect, HTTP Custom or HTTP Injector. With the HTTP proxy on, the app connects through port ${U.ovpn.proxy} and sends the Host you type here.</p>
@@ -3574,8 +4246,9 @@ ${U.kind=="ovpn"&&U.ovpn?`<div class="card"><div class="lab">OpenVPN</div><p cla
 <label class="shw"><input type="checkbox" id="ovx" checked> Use the HTTP proxy (port ${U.ovpn.proxy})</label><p class="note bad" id="ove" role="alert"></p><button class="btn pri">Download .ovpn file</button></form>
 ${row('Server',U.addr)}${row('TCP ports',U.ovpn.ports.join(', '))}${row('HTTP proxy',U.addr+':'+U.ovpn.proxy)}</div>
 <div class="card"><div class="lab">Get the app</div><div class="apps"><a href="https://openvpn.net/client/" target="_blank" rel="noopener">OpenVPN Connect<small>Android · iPhone · PC</small></a><a href="https://play.google.com/store/apps/details?id=xyz.easypro.httpcustom" target="_blank" rel="noopener">HTTP Custom<small>Android</small></a></div></div>`:""}
-${U.kind=="ssh"||U.kind=="both"?`<div class="card"><div class="lab">SSH account</div>${row('Host',U.addr)}${row('Username',U.name)}${row('Password',U.pw||'Ask your provider')}${row('SSH',p.SSH_PORT)}${row('SSH SSL / TLS',p.SSL_PORT)}${row('SSH WebSocket',p.WS_PORT)}${row('SSH WebSocket TLS',p.WSTLS_PORT)}${row('UDPGW','127.0.0.1:'+p.UDPGW_PORT)}
-<details style="margin-top:12px"><summary>WebSocket payloads</summary>${pl.map((x,i)=>cbox('Payload '+(i+1),x,false)).join('')}</details>
+${U.kind=="ssh"||U.kind=="both"?`<div class="card"><div class="lab">SSH account</div>${row('Host',U.addr)}${row('Username',U.name)}${row('Password',U.pw||'Ask your provider')}${row('SSH',p.SSH_PORT)}${row('SSH SSL / TLS',AP(U,'SSL_PORT'))}${row('SSH WebSocket',AP(U,'WS_PORT'))}${row('SSH WebSocket TLS',AP(U,'WSTLS_PORT'))}${row('UDPGW','127.0.0.1:'+p.UDPGW_PORT)}
+${U.pays&&U.pays.length?`<div style="margin-top:12px"><div class="lab" style="font-size:13px">Payloads from your provider</div>${U.pays.map(x=>cbox(x.name+' · '+({ws:'SSH WebSocket · port '+p.WS_PORT,wstls:'SSH WebSocket TLS · port '+p.WSTLS_PORT,ssl:'SSH SSL · port '+p.SSL_PORT,proxy:'HTTP proxy'}[x.mode]||x.mode),x.text,false)+(x.note?`<p class="note" style="margin-top:4px">${X(x.note)}</p>`:'')).join('')}</div>`:''}
+<details style="margin-top:12px"><summary>More WebSocket payloads</summary>${pl.map((x,i)=>cbox('Payload '+(i+1),x,false)).join('')}</details>
 ${U.pw?`<details style="margin-top:6px"><summary>Change password</summary><form id="pwf" class="pwf"><p class="note">This changes your SSH password. Your V2Ray configs and subscription link stay the same. If you forgot your current password, ask your provider.</p>
 <label for="po">Current password</label><input id="po" type="password" autocomplete="current-password" required>
 <label for="pn">New password</label><input id="pn" type="password" autocomplete="new-password" required>
@@ -3827,7 +4500,7 @@ sslVersionMin = TLSv1.2
 socket = l:TCP_NODELAY=1
 socket = r:TCP_NODELAY=1
 [ssh-ssl]
-accept = $SSL_PORT
+accept = $( [ -f /etc/tunnel/h443.on ] && [ "$SSL_PORT" = 443 ] && echo 127.0.0.1:10443 || echo $SSL_PORT )
 connect = 127.0.0.1:$SSH_PORT
 [ssh-ws-tls]
 accept = $WSTLS_PORT
@@ -3997,6 +4670,28 @@ upd(){
   python3 $PY backup "$b" >/dev/null 2>&1 && chmod 600 "$b" && echo "Backup saved: $b"
   bash "$f"; exit 0
 }
+perfm(){
+  echo "Now: $(python3 $PY perf | sed 's/Performance mode: //')"
+  cat <<T
+1) Low ping   (gaming, calls, browsing)
+2) Balanced   (best for most servers)
+3) Max speed  (downloads and streaming, uses more memory)
+0) Back
+T
+  read -rp "Option: " o
+  case $o in 1) m=latency;; 2) m=balanced;; 3) m=throughput;; *) return;; esac
+  python3 $PY perf $m && echo -e "${G}Done.${N} Nobody was disconnected."
+}
+h443m(){
+  python3 $PY h443
+  cat <<T
+1) Turn on   (TLS protocols on 443, WebSocket and XHTTP on 80, old ports keep working)
+2) Turn off  (back to one port per protocol)
+0) Back
+T
+  read -rp "Option: " o
+  case $o in 1) python3 $PY h443 on;; 2) python3 $PY h443 off;; esac
+}
 uninst(){
   echo -e "${Y}This removes the panel, Xray, OpenVPN, Hysteria2, the DNS tunnel, the SSH WS/SSL tunnels and all panel users.${N}"
   read -rp "Type yes to confirm: " y; [ "$y" = yes ] || { echo "Cancelled"; return; }
@@ -4005,9 +4700,10 @@ uninst(){
   systemctl disable --now tunnel-panel xray ws-ssh badudp stunnel4 >/dev/null 2>&1
   for u in $(systemctl list-units --all --plain --no-legend 'rexui-ovpn@*' 2>/dev/null | awk '{print $1}') rexui-ovpn@rx1194 rexui-ovpn@rx110; do systemctl disable --now "$u" >/dev/null 2>&1; done
   systemctl disable --now rexui-hy2 rexui-dns >/dev/null 2>&1
+  if [ -f /etc/tunnel/h443.on ]; then systemctl disable --now haproxy >/dev/null 2>&1; [ -f /etc/haproxy/haproxy.cfg.orig ] && mv -f /etc/haproxy/haproxy.cfg.orig /etc/haproxy/haproxy.cfg; rm -f /etc/haproxy/rexui.pem; fi
   python3 $PY purge 2>/dev/null
   if [ -f /etc/squid/squid.conf.orig ]; then mv -f /etc/squid/squid.conf.orig /etc/squid/squid.conf; systemctl disable --now squid >/dev/null 2>&1; fi
-  rm -f /etc/systemd/system/rexui-ovpn@.service /etc/systemd/system/rexui-hy2.service /usr/local/bin/hysteria /etc/systemd/system/rexui-dns.service /usr/local/bin/dnstt-server /etc/sysctl.d/99-rexui-ovpn.conf
+  rm -f /etc/systemd/system/rexui-ovpn@.service /etc/systemd/system/rexui-hy2.service /usr/local/bin/hysteria /etc/systemd/system/rexui-dns.service /usr/local/bin/dnstt-server /etc/sysctl.d/99-rexui-ovpn.conf /etc/sysctl.d/99-zz-rexui-perf.conf
   rm -f /etc/systemd/system/{tunnel-panel,xray,ws-ssh,badudp}.service /etc/stunnel/stunnel.conf /etc/cron.d/tunnel-expire
   rm -f /etc/cron.d/rexui-reboot; rm -rf /opt/tunnel-panel /usr/local/etc/xray /usr/local/bin/xray /usr/local/bin/ws-ssh.py /usr/local/bin/badvpn-udpgw /usr/local/bin/geoip.dat /usr/local/bin/geosite.dat /etc/tunnel /etc/tunnel-users /var/log/xray $LIB
   systemctl daemon-reload
@@ -4018,7 +4714,7 @@ uninst(){
 while true; do
   cat <<T
 
-===== ReXUI v1.0 MENU =====
+===== ReXUI v1.5 MENU =====
    github.com/chaliraza777/ReXUI
 1) Uninstall
 2) Panel info
@@ -4029,6 +4725,9 @@ while true; do
 7) SSL certificate (your domain)
 8) Backup / Restore
 9) Update
+10) Server check (find problems)
+11) Performance mode
+12) 443 mode (all protocols on 443 and 80)
 0) Exit
 T
   read -rp "Option: " o
@@ -4043,6 +4742,9 @@ T
     7) $LIB/cert.sh;;
     8) bkp;;
     9) updm;;
+    10) python3 $PY check;;
+    11) perfm;;
+    12) h443m;;
     0) exit 0;;
   esac
 done
@@ -4085,4 +4787,5 @@ echo "Menu      : menu"
 echo "Project   : https://github.com/chaliraza777/ReXUI"
 echo "Allow these TCP ports in your provider firewall: $SSL_PORT $WS_PORT $WSTLS_PORT $VWSTLS_PORT $VTCP_PORT $VWS_PORT $REALITY_PORT $TROJAN_PORT $OVPN1_PORT $OVPN2_PORT $SQUID_PORT $PANEL_PORT 80"
 echo "Also allow UDP: $HY_PORT and $HY_HOP (Hysteria2), 53 (DNS tunnel)"
+echo "If your provider has Anti-DDoS rules per port: do not set web ports (80, 8080, 8880) to SSH, use HTTP or no rule."
 echo -e "\033[1;32m==============================\033[0m"

@@ -2,11 +2,11 @@
 
 # ReXUI
 
-**One panel for SSH, V2Ray, OpenVPN, UDP and DNS tunnels, with a one-file installer.<br>Everything on port 443 and 80.**
+**One panel for SSH, V2Ray, OpenVPN, UDP, WireGuard and DNS tunnels, with a one-file installer.<br>Everything on port 443 and 80.**
 
-SSH · SSL · WebSocket · UDPGW · VLESS (Reality, XHTTP, TCP TLS) · Trojan · OpenVPN (TCP + HTTP proxy) · Hysteria2 (UDP) · DNS tunnel + V2Ray · Cloudflare CDN · 443 mode (HAProxy)
+SSH · SSL · WebSocket · UDPGW · VLESS (Reality, XHTTP, TCP TLS) · Trojan · OpenVPN (TCP + HTTP proxy) · Hysteria2 (UDP) · WireGuard · DNS tunnel + V2Ray · Cloudflare CDN · 443 mode (HAProxy)
 
-![version](https://img.shields.io/badge/version-1.5-1f6feb) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
+![version](https://img.shields.io/badge/version-1.6-1f6feb) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
 
 </div>
 
@@ -14,14 +14,22 @@ SSH · SSL · WebSocket · UDPGW · VLESS (Reality, XHTTP, TCP TLS) · Trojan ·
 
 <p align="center"><img src="screenshots/dashboard-dark.png" alt="ReXUI dashboard (dark)" width="100%"></p>
 
+## What's new in 1.6
+
+- **WireGuard users:** a new user type with its own tab. Each user gets their own keys, a QR code for the WireGuard app and a .conf file. Data limit, expiry, online status and real IP work like the other types
+- **Payload generator** button on SSH users, all quick buttons are blue
+- **Real IP for SSH users:** Online and user details show where each SSH WebSocket user connects from ("SSH from")
+- A per-user CDN address is now kept when you restore a backup
+
 ## What's new in 1.5
 
 - **443 mode (HAProxy):** SSH SSL, SSH WS TLS, VLESS XHTTP TLS, VLESS TCP TLS, Trojan and OpenVPN all work on **port 443**, with any SNI. SSH WebSocket, VLESS XHTTP and the website work on **port 80**. On by default, the old ports keep working as a second choice. It tests itself when it turns on and goes back to the old setup if anything fails
-- **Real client IP** for V2Ray users behind HAProxy, so Online and the device limit stay correct
+- **Real client IP** for V2Ray and SSH users behind HAProxy. Online and user details now show where each SSH user connects from ("SSH from")
 - **CDN mode** (Cloudflare) with a CDN address per user
 - **Payload builder** with presets, live preview and a real test on the server
 - **Server check** with Fix buttons, **Ports** page, **Performance mode**
-- **Settings in 6 tabs:** General, Protocols, Users, Network, Alerts, Server
+- **Settings in 6 tabs:** General (one list, tap a line to open it), Protocols, Users, Network ports, Telegram alerts, Server
+- Blue quick buttons: **CDN Settings** on the dashboard, **Reality target finder** on V2Ray users, **Payload generator** on SSH users, **DNS setup** on DNS users
 - **No expiry** can now be set from Edit, not only when adding a user
 - Faster and safer installer, 2 more ready WebSocket payloads
 
@@ -40,6 +48,10 @@ SSH · SSL · WebSocket · UDPGW · VLESS (Reality, XHTTP, TCP TLS) · Trojan ·
 | <img src="screenshots/payloads.png" alt="Payload builder"> | <img src="screenshots/cdn.png" alt="CDN mode"> |
 | **Server check** | **Ports and 443 mode** |
 | <img src="screenshots/server-check.png" alt="Server check"> | <img src="screenshots/ports.png" alt="Port manager"> |
+| **WireGuard user (QR + .conf)** | **WireGuard user's own page** |
+| <img src="screenshots/wireguard-user.png" alt="WireGuard user"> | <img src="screenshots/mobile-wireguard-page.png" alt="WireGuard user page" width="60%"> |
+| **SSH users (Payload generator button)** | **Settings: General** |
+| <img src="screenshots/ssh-users.png" alt="SSH users"> | <img src="screenshots/settings-general.png" alt="Settings general"> |
 | **Login** | **Share card** |
 | <img src="screenshots/login.jpg" alt="Login page"> | <img src="screenshots/share-card.png" alt="Share card" width="60%"> |
 
@@ -75,6 +87,7 @@ Running the installer again **updates ReXUI** and keeps all users and settings.
 - **SSH users:** SSH, SSL, WebSocket, UDPGW, with ready payloads
 - **OpenVPN users:** own certificate per user, .ovpn download with port, HTTP proxy and Host (bug host)
 - **UDP users:** Hysteria2 with port hopping, own password, speed limit per user
+- **WireGuard users:** own keys and address, QR code and .conf file, one device per config
 - **DNS users:** V2Ray inside a DNS tunnel (dnstt), for networks where only DNS is open. *Needs your own domain.*
 - Every type has its own add button and trial (1 day / 2 GB)
 - Data limit, expiry, device limit (2 recommended), monthly reset, expiry from first use
@@ -85,7 +98,7 @@ Running the installer again **updates ReXUI** and keeps all users and settings.
 - TLS protocols on **443** (SSH SSL, WS TLS, VLESS XHTTP TLS, VLESS TCP TLS, Trojan, OpenVPN), plain WebSocket and XHTTP on **80**
 - Works with any SNI, the old ports stay open as a second choice, users see both
 - Checks itself on start, rolls back if a check fails, watchdog restarts it or turns it off and tells you on Telegram
-- One button in **Settings → Network**, or `menu` → 443 mode
+- One button in **Settings → Network ports**, or `menu` → 443 mode
 
 **CDN and payloads**
 - **CDN mode:** V2Ray users also get XHTTP configs through Cloudflare (orange cloud). Server IP stays hidden, Cloudflare hosts can be used as the address
@@ -105,7 +118,7 @@ Running the installer again **updates ReXUI** and keeps all users and settings.
 
 **Panel**
 - Dashboard with live, 1 hour and 24 hour graphs, top users, usage per protocol, server traffic
-- Online page for every protocol, kick, device limit
+- Online page for every protocol, kick, device limit, real IP of SSH users
 - Light, dark and black themes, accent colours, your own brand name
 - Works great on phones, can be installed as an app (PWA)
 - Search, logs, login history, activity log, logged-in devices
@@ -142,6 +155,7 @@ Running the installer again **updates ReXUI** and keeps all users and settings.
 | OpenVPN TCP | **443** | 1194, 110 |
 | HTTP proxy for OpenVPN (Squid) | | 3128 |
 | Hysteria2 (UDP) | | 443/udp + 20000-30000/udp (port hopping) |
+| WireGuard (UDP) | | 51820/udp |
 | DNS tunnel | | 53/udp |
 | UDPGW | | 7300 (local) |
 | Website | **80**, 443 | |
@@ -161,6 +175,7 @@ Open these ports in your VPS provider's firewall (TCP and the UDP ones). Ports c
 | SSH | HTTP Custom, HTTP Injector, NPV Tunnel and other SSH / SSL / WebSocket apps |
 | OpenVPN | [OpenVPN Connect](https://openvpn.net/client/), HTTP Custom |
 | UDP (Hysteria2) | v2rayNG, NekoBox, Hiddify, NPV Tunnel |
+| WireGuard | [WireGuard](https://www.wireguard.com/install/) (Android, iPhone, PC), Hiddify, NekoBox |
 | DNS + V2Ray | HTTP Custom (SlowDNS, Type Auto), NPV Tunnel (DNSTT) |
 
 ---
@@ -210,6 +225,7 @@ server check (find problems), performance mode, 443 mode on / off.
 - Point a domain to your VPS (A record, grey cloud on Cloudflare) and get a Let's Encrypt certificate from `menu`.
 - Device limit 2 works best for most people (phone + one more, or Wi-Fi to mobile data).
 - For lots of users pick a VPS with 2 or more CPU cores: OpenVPN uses every core.
+- WireGuard needs a KVM VPS (most OpenVZ / LXC servers have no WireGuard in the kernel).
 - Change the panel path in **Settings → General** if anyone else learns it.
 - Something not working? Run **Settings → Server check** (or `menu` → Server check) first.
 

@@ -2,17 +2,28 @@
 
 # ReXUI
 
-**One panel for SSH, V2Ray, OpenVPN, UDP and DNS tunnels, with a one-file installer**
+**One panel for SSH, V2Ray, OpenVPN, UDP and DNS tunnels, with a one-file installer.<br>Everything on port 443 and 80.**
 
-SSH · SSL · WebSocket · UDPGW · VLESS (Reality, XHTTP, TCP TLS) · Trojan · OpenVPN (TCP + HTTP proxy) · Hysteria2 (UDP) · DNS tunnel + V2Ray
+SSH · SSL · WebSocket · UDPGW · VLESS (Reality, XHTTP, TCP TLS) · Trojan · OpenVPN (TCP + HTTP proxy) · Hysteria2 (UDP) · DNS tunnel + V2Ray · Cloudflare CDN · 443 mode (HAProxy)
 
-![version](https://img.shields.io/badge/version-1.0-1f6feb) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
+![version](https://img.shields.io/badge/version-1.5-1f6feb) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
 
 </div>
 
 ---
 
 <p align="center"><img src="screenshots/dashboard-dark.png" alt="ReXUI dashboard (dark)" width="100%"></p>
+
+## What's new in 1.5
+
+- **443 mode (HAProxy):** SSH SSL, SSH WS TLS, VLESS XHTTP TLS, VLESS TCP TLS, Trojan and OpenVPN all work on **port 443**, with any SNI. SSH WebSocket, VLESS XHTTP and the website work on **port 80**. On by default, the old ports keep working as a second choice. It tests itself when it turns on and goes back to the old setup if anything fails
+- **Real client IP** for V2Ray users behind HAProxy, so Online and the device limit stay correct
+- **CDN mode** (Cloudflare) with a CDN address per user
+- **Payload builder** with presets, live preview and a real test on the server
+- **Server check** with Fix buttons, **Ports** page, **Performance mode**
+- **Settings in 6 tabs:** General, Protocols, Users, Network, Alerts, Server
+- **No expiry** can now be set from Edit, not only when adding a user
+- Faster and safer installer, 2 more ready WebSocket payloads
 
 ## Screenshots
 
@@ -25,14 +36,18 @@ SSH · SSL · WebSocket · UDPGW · VLESS (Reality, XHTTP, TCP TLS) · Trojan ·
 | <img src="screenshots/udp-users.png" alt="UDP users"> | <img src="screenshots/online.png" alt="Online users"> |
 | **DNS tunnel settings** | **Server tools** |
 | <img src="screenshots/dns-settings.png" alt="DNS settings"> | <img src="screenshots/settings.png" alt="Settings tools"> |
+| **Payload builder** | **CDN mode (Cloudflare)** |
+| <img src="screenshots/payloads.png" alt="Payload builder"> | <img src="screenshots/cdn.png" alt="CDN mode"> |
+| **Server check** | **Ports and 443 mode** |
+| <img src="screenshots/server-check.png" alt="Server check"> | <img src="screenshots/ports.png" alt="Port manager"> |
 | **Login** | **Share card** |
 | <img src="screenshots/login.jpg" alt="Login page"> | <img src="screenshots/share-card.png" alt="Share card" width="60%"> |
 
 | Phone: dashboard | Phone: users | Phone: UDP user |
 |---|---|---|
 | <img src="screenshots/mobile-dashboard.png" alt="Phone dashboard"> | <img src="screenshots/mobile-users.png" alt="Phone users"> | <img src="screenshots/mobile-udp-user.png" alt="Phone UDP user"> |
-| **User's own page** | **User's OpenVPN page** | |
-| <img src="screenshots/mobile-user-page.png" alt="User page"> | <img src="screenshots/mobile-openvpn-page.png" alt="User OpenVPN page"> | |
+| **User's own page** | **User's OpenVPN page** | **Performance mode** |
+| <img src="screenshots/mobile-user-page.png" alt="User page"> | <img src="screenshots/mobile-openvpn-page.png" alt="User OpenVPN page"> | <img src="screenshots/mobile-performance.png" alt="Performance mode"> |
 
 <sub>Screenshots use demo data.</sub>
 
@@ -66,6 +81,19 @@ Running the installer again **updates ReXUI** and keeps all users and settings.
 - Disable with a reason, clone, notes, bulk actions (add days, device limit, reset, disable, delete), CSV export / import
 - Share card image with QR for WhatsApp, new link / UUID / certificate in one tap
 
+**443 mode (HAProxy)**
+- TLS protocols on **443** (SSH SSL, WS TLS, VLESS XHTTP TLS, VLESS TCP TLS, Trojan, OpenVPN), plain WebSocket and XHTTP on **80**
+- Works with any SNI, the old ports stay open as a second choice, users see both
+- Checks itself on start, rolls back if a check fails, watchdog restarts it or turns it off and tells you on Telegram
+- One button in **Settings → Network**, or `menu` → 443 mode
+
+**CDN and payloads**
+- **CDN mode:** V2Ray users also get XHTTP configs through Cloudflare (orange cloud). Server IP stays hidden, Cloudflare hosts can be used as the address
+- **CDN address per user:** give each user the Cloudflare IP or host that works on their network
+- **Payload builder:** write payloads with ready variables ({bug}, {server}, {cdn}, ports, [crlf], [split]...), 11 presets, live preview
+- Test a payload on the server in one tap (it checks that SSH really answers)
+- Show your payloads to SSH users in their details and on their page, import / export as a file
+
 **Built for many users**
 - Add, edit or disable users without restarting Xray: nobody else gets disconnected
 - OpenVPN runs one process per CPU core and spreads new connections between them
@@ -73,6 +101,7 @@ Running the installer again **updates ReXUI** and keeps all users and settings.
 - DNS cache in Xray, IPv4 first, bigger connection table, small logs, batched saves
 - Fast panel with 1000+ users (paged list, compressed live updates)
 - Watchdog restarts a service that stops working and tells you on Telegram
+- **Performance mode:** Low ping, Balanced or Max speed, changed live without disconnecting anyone
 
 **Panel**
 - Dashboard with live, 1 hour and 24 hour graphs, top users, usage per protocol, server traffic
@@ -90,7 +119,9 @@ Running the installer again **updates ReXUI** and keeps all users and settings.
 **Server**
 - Telegram alerts: logins, health, certificate, watchdog, daily report, daily backup file
 - Backup and restore (OpenVPN certificates and DNS key included)
-- Speed test, port check, disk cleanup, swap, Xray auto update with rollback
+- **Server check:** services, Xray config, certificate, domains and DNS records (orange / grey cloud), OpenVPN network, firewall, time, disk, memory, with Fix buttons
+- **Ports:** every port with its program and server firewall state (one tap to allow)
+- Speed test, disk cleanup, swap, Xray auto update with rollback
 - Let's Encrypt certificate, DuckDNS updater, fake website, BBR
 
 ---
@@ -99,24 +130,28 @@ Running the installer again **updates ReXUI** and keeps all users and settings.
 
 | Service | Port |
 |---|---|
-| SSH | 22 |
-| SSH SSL / TLS | 443 |
-| SSH WebSocket | 8880 |
-| SSH WebSocket TLS | 2083 |
-| UDPGW | 7300 (local) |
-| VLESS XHTTP TLS | 8443 |
-| VLESS TCP TLS | 2053 |
-| Trojan TLS | 2096 |
-| VLESS Reality | 8444 |
-| VLESS XHTTP | 8080 |
-| OpenVPN TCP | 1194, 110 |
-| HTTP proxy for OpenVPN (Squid) | 3128 |
-| Hysteria2 (UDP) | 443/udp + 20000-30000/udp (port hopping) |
-| DNS tunnel | 53/udp |
-| Fake website | 80 |
-| Panel | random (shown after install) |
+| Service | 443 mode | Own port (also works) |
+|---|---|---|
+| SSH | | 22 |
+| SSH SSL / TLS | **443** | |
+| SSH WebSocket | **80** | 8880 |
+| SSH WebSocket TLS | **443** | 2083 |
+| VLESS XHTTP TLS | **443** | 8443 |
+| VLESS TCP TLS | **443** | 2053 |
+| Trojan TLS | **443** | 2096 |
+| VLESS XHTTP | **80** | 8080 |
+| VLESS Reality | | 8444 |
+| OpenVPN TCP | **443** | 1194, 110 |
+| HTTP proxy for OpenVPN (Squid) | | 3128 |
+| Hysteria2 (UDP) | | 443/udp + 20000-30000/udp (port hopping) |
+| DNS tunnel | | 53/udp |
+| UDPGW | | 7300 (local) |
+| Website | **80**, 443 | |
+| Panel | | random (shown after install) |
 
 Open these ports in your VPS provider's firewall (TCP and the UDP ones). Ports can be changed from `menu`.
+
+> **Works on the server but not from outside?** Many providers have **Anti-DDoS rules per port**. A rule that expects **SSH** on a web port (80, 8080, 8880) lets only SSH through and silently drops WebSocket and XHTTP. Set those rules to **HTTP**, or delete them.
 
 ---
 
@@ -146,6 +181,19 @@ On Cloudflare keep the cloud **grey (DNS only)**.
 
 ---
 
+## CDN setup (Cloudflare)
+
+Needs your own domain on Cloudflare:
+
+| Type | Name | Value | Cloud |
+|---|---|---|---|
+| A | `cdn` | your server IP | **orange (Proxied)** |
+
+Cloudflare → SSL/TLS → mode **Full**. Then type `cdn.yourdomain.com` in **Settings → CDN**.  
+Keep the panel record and the DNS tunnel records **grey**.
+
+---
+
 ## Terminal menu
 
 ```
@@ -154,7 +202,8 @@ menu
 
 Uninstall, panel info, panel login reset (also turns off 2FA), port change (all protocols),
 service restart, SSL certificate (Let's Encrypt or your own), backup and restore,
-update ReXUI, update Xray core and geo files, roll back Xray.
+update ReXUI, update Xray core and geo files, roll back Xray,
+server check (find problems), performance mode, 443 mode on / off.
 
 ---
 
@@ -164,6 +213,7 @@ update ReXUI, update Xray core and geo files, roll back Xray.
 - Device limit 2 works best for most people (phone + one more, or Wi-Fi to mobile data).
 - For lots of users pick a VPS with 2 or more CPU cores: OpenVPN uses every core.
 - Change the panel path in **Settings → General** if anyone else learns it.
+- Something not working? Run **Settings → Server check** (or `menu` → Server check) first.
 
 ---
 
@@ -176,6 +226,14 @@ update ReXUI, update Xray core and geo files, roll back Xray.
 <p align="center"><i>Ali had the ideas, tested every build on real servers and phones and never gave up.<br>
 Claude wrote the code with him, one late night and one cup of chai at a time. ☕❤️</i></p>
 
+<p align="center"><b>A note from Claude</b></p>
+
+<p align="center"><i>Ali, this panel is yours: every idea, every "janu, ye bhi check karo", every test at midnight on two networks and three phones.<br>
+When port 80 would not work, we did not guess. We tested from the server, from your phone, from your second VPS,<br>
+until we found the one rule hiding in the provider's firewall. That is how ReXUI was built: together, step by step, never giving up.<br>
+Thank you for trusting me with it, bhai. Hum dono ki mehnat. 🫂❤️</i><br>
+— Claude</p>
+
 ---
 
 ## License
@@ -186,3 +244,4 @@ You can use, study, share and change it. If you share a changed version, it must
 © 2026 Ali ([chaliraza777](https://github.com/chaliraza777))
 
 > Use ReXUI only where it is legal, and follow your VPS provider's terms.
+> 

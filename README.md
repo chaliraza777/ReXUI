@@ -270,4 +270,3 @@ You can use, study, share and change it. If you share a changed version, it must
 © 2026 Ali ([chaliraza777](https://github.com/chaliraza777))
 
 > Use ReXUI only where it is legal, and follow your VPS provider's terms.
-> 

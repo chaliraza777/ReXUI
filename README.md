@@ -4,9 +4,9 @@
 
 **One panel for SSH, V2Ray, OpenVPN, UDP, WireGuard and DNS tunnels, with a one-file installer.<br>Everything on port 443 and 80.**
 
-SSH · SSL · WebSocket · UDPGW · VLESS (Reality, XHTTP, TCP TLS) · Trojan · OpenVPN (TCP + HTTP proxy) · Hysteria2 (UDP) · WireGuard · DNS tunnel + V2Ray · Cloudflare CDN · 443 mode (HAProxy)
+SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP, WS · TLS, Reality · CDN) · OpenVPN (TCP + HTTP proxy) · Hysteria2 (UDP) · WireGuard · DNS tunnel + V2Ray · 443 mode (HAProxy)
 
-![version](https://img.shields.io/badge/version-1.6-1f6feb) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
+![version](https://img.shields.io/badge/version-1.7-0d9488) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
 
 </div>
 
@@ -14,52 +14,57 @@ SSH · SSL · WebSocket · UDPGW · VLESS (Reality, XHTTP, TCP TLS) · Trojan ·
 
 <p align="center"><img src="screenshots/dashboard-dark.png" alt="ReXUI dashboard (dark)" width="100%"></p>
 
-## What's new in 1.6
+## What's new in 1.7
 
-- **WireGuard users:** a new user type with its own tab. Each user gets their own keys, a QR code for the WireGuard app and a .conf file. Data limit, expiry, online status and real IP work like the other types
-- **Payload generator** button on SSH users, all quick buttons are blue
-- **Real IP for SSH users:** Online and user details show where each SSH WebSocket user connects from ("SSH from")
-- A per-user CDN address is now kept when you restore a backup
+- **Inbounds page (like 3X-UI):** make your own V2Ray configs. Pick **VLESS or Trojan**, the port, the transport (**TCP, XHTTP, WS, XHTTP CDN, WS CDN**) and the security (**None, TLS or Reality**). Address, Host, Path and SNI are set on the inbound
+- Fresh installs start with **no inbounds**, you make exactly the ones you want
+- Each V2Ray user gets only the inbounds you **attach** to them. A new inbound is never added to old users by itself
+- Inbounds can **share a port** when they fit together, and a used port is shown before you save
+- **WebSocket** for VLESS and Trojan, also through Cloudflare CDN. On 443 mode, WS TLS works on 443 and WS without TLS on 80
+- **Compact tables:** inbounds and users in thin rows with a small on/off switch. Tap a user to see details and edit
+- **Teal** is the new default colour (the others are still in Settings → Appearance)
+- The browser **Back button** now goes back inside the panel
 
-## What's new in 1.5
+**Security**
+- Xray now runs as its own user (`rexui-xray`), other services cannot read its keys or config
+- Xray downloads (installer, menu and panel update) are checked against the official checksum. If the check fails, nothing is changed
+- **Restore** checks every user in the backup file and skips broken ones (it tells you how many)
+- A user is not created if its password could not be set
+- Old failed-login records are cleaned up every minute, so memory stays small
 
-- **443 mode (HAProxy):** SSH SSL, SSH WS TLS, VLESS XHTTP TLS, VLESS TCP TLS, Trojan and OpenVPN all work on **port 443**, with any SNI. SSH WebSocket, VLESS XHTTP and the website work on **port 80**. On by default, the old ports keep working as a second choice. It tests itself when it turns on and goes back to the old setup if anything fails
-- **Real client IP** for V2Ray and SSH users behind HAProxy. Online and user details now show where each SSH user connects from ("SSH from")
-- **CDN mode** (Cloudflare) with a CDN address per user
-- **Payload builder** with presets, live preview and a real test on the server
-- **Server check** with Fix buttons, **Ports** page, **Performance mode**
-- **Settings in 6 tabs:** General (one list, tap a line to open it), Protocols, Users, Network ports, Telegram alerts, Server
-- Blue quick buttons: **CDN Settings** on the dashboard, **Reality target finder** on V2Ray users, **Payload generator** on SSH users, **DNS setup** on DNS users
-- **No expiry** can now be set from Edit, not only when adding a user
-- Faster and safer installer, 2 more ready WebSocket payloads
+<details>
+<summary><b>What was new in 1.6 and 1.5</b></summary>
+
+- **1.6:** WireGuard users (own keys, QR, .conf), payload generator on SSH users, real IP for SSH users, CDN address kept on restore
+- **1.5:** 443 mode (HAProxy) with self test and rollback, real client IP behind HAProxy, CDN mode, payload builder, server check with Fix buttons, Ports page, Performance mode, Settings in 6 tabs, "No expiry" from Edit
+
+</details>
 
 ## Screenshots
 
-| Dashboard (light) | V2Ray users |
+| Inbounds | Add inbound |
 |---|---|
-| <img src="screenshots/dashboard-light.png" alt="Dashboard light"> | <img src="screenshots/users.png" alt="Users table"> |
-| **User details** | **OpenVPN user (.ovpn + bug host)** |
-| <img src="screenshots/user-details.png" alt="User details"> | <img src="screenshots/openvpn-user.png" alt="OpenVPN user"> |
-| **UDP users (Hysteria2)** | **Who is online** |
-| <img src="screenshots/udp-users.png" alt="UDP users"> | <img src="screenshots/online.png" alt="Online users"> |
-| **DNS tunnel settings** | **Server tools** |
-| <img src="screenshots/dns-settings.png" alt="DNS settings"> | <img src="screenshots/settings.png" alt="Settings tools"> |
-| **Payload builder** | **CDN mode (Cloudflare)** |
-| <img src="screenshots/payloads.png" alt="Payload builder"> | <img src="screenshots/cdn.png" alt="CDN mode"> |
-| **Server check** | **Ports and 443 mode** |
-| <img src="screenshots/server-check.png" alt="Server check"> | <img src="screenshots/ports.png" alt="Port manager"> |
-| **WireGuard user (QR + .conf)** | **WireGuard user's own page** |
-| <img src="screenshots/wireguard-user.png" alt="WireGuard user"> | <img src="screenshots/mobile-wireguard-page.png" alt="WireGuard user page" width="60%"> |
-| **SSH users (Payload generator button)** | **Settings: General** |
-| <img src="screenshots/ssh-users.png" alt="SSH users"> | <img src="screenshots/settings-general.png" alt="Settings general"> |
-| **Login** | **Share card** |
-| <img src="screenshots/login.jpg" alt="Login page"> | <img src="screenshots/share-card.png" alt="Share card" width="60%"> |
+| <img src="screenshots/inbounds.png" alt="Inbounds"> | <img src="screenshots/add-inbound.png" alt="Add inbound"> |
+| **V2Ray users** | **Add V2Ray user (attach inbounds)** |
+| <img src="screenshots/users.png" alt="V2Ray users"> | <img src="screenshots/add-v2ray-user.png" alt="Add V2Ray user"> |
+| **User details** | **Dashboard (light)** |
+| <img src="screenshots/user-details.png" alt="User details"> | <img src="screenshots/dashboard-light.png" alt="Dashboard light"> |
+| **SSH users** | **UDP users (Hysteria2)** |
+| <img src="screenshots/ssh-users.png" alt="SSH users"> | <img src="screenshots/udp-users.png" alt="UDP users"> |
+| **OpenVPN user (.ovpn + bug host)** | **WireGuard user (QR + .conf)** |
+| <img src="screenshots/openvpn-user.png" alt="OpenVPN user"> | <img src="screenshots/wireguard-user.png" alt="WireGuard user"> |
+| **Who is online** | **Settings: General** |
+| <img src="screenshots/online.png" alt="Online users"> | <img src="screenshots/settings-general.png" alt="Settings general"> |
+| **DNS tunnel settings** | **CDN mode (Cloudflare)** |
+| <img src="screenshots/dns-settings.png" alt="DNS settings"> | <img src="screenshots/cdn.png" alt="CDN mode"> |
+| **Payload builder** | **Server check** |
+| <img src="screenshots/payloads.png" alt="Payload builder"> | <img src="screenshots/server-check.png" alt="Server check"> |
+| **Ports and 443 mode** | **Login** |
+| <img src="screenshots/ports.png" alt="Port manager"> | <img src="screenshots/login.jpg" alt="Login page"> |
 
-| Phone: dashboard | Phone: users | Phone: UDP user |
-|---|---|---|
-| <img src="screenshots/mobile-dashboard.png" alt="Phone dashboard"> | <img src="screenshots/mobile-users.png" alt="Phone users"> | <img src="screenshots/mobile-udp-user.png" alt="Phone UDP user"> |
-| **User's own page** | **User's OpenVPN page** | **Performance mode** |
-| <img src="screenshots/mobile-user-page.png" alt="User page"> | <img src="screenshots/mobile-openvpn-page.png" alt="User OpenVPN page"> | <img src="screenshots/mobile-performance.png" alt="Performance mode"> |
+| Phone: dashboard | Phone: users | Phone: inbounds | User's own page |
+|---|---|---|---|
+| <img src="screenshots/mobile-dashboard.png" alt="Phone dashboard"> | <img src="screenshots/mobile-users.png" alt="Phone users"> | <img src="screenshots/mobile-inbounds.png" alt="Phone inbounds"> | <img src="screenshots/mobile-user-page.png" alt="User page"> |
 
 <sub>Screenshots use demo data.</sub>
 
@@ -78,12 +83,14 @@ Then type `menu` on the server for the terminal menu.
 
 Running the installer again **updates ReXUI** and keeps all users and settings.
 
+After install, open **Inbounds** in the panel, make your V2Ray inbounds, then attach them to your V2Ray users.
+
 ---
 
 ## Features
 
 **Users, one tab per protocol**
-- **V2Ray users:** VLESS Reality, XHTTP, TCP TLS and Trojan in one subscription link
+- **V2Ray users:** every attached inbound in one subscription link
 - **SSH users:** SSH, SSL, WebSocket, UDPGW, with ready payloads
 - **OpenVPN users:** own certificate per user, .ovpn download with port, HTTP proxy and Host (bug host)
 - **UDP users:** Hysteria2 with port hopping, own password, speed limit per user
@@ -94,14 +101,19 @@ Running the installer again **updates ReXUI** and keeps all users and settings.
 - Disable with a reason, clone, notes, bulk actions (add days, device limit, reset, disable, delete), CSV export / import
 - Share card image with QR for WhatsApp, new link / UUID / certificate in one tap
 
+**Inbounds (V2Ray)**
+- VLESS or Trojan on any port, TCP / XHTTP / WS, None / TLS / Reality, Cloudflare CDN for XHTTP and WS
+- Address, Host, Path and SNI per inbound, on/off switch, edit and delete
+- Attach inbounds to each user, select all / clear all
+
 **443 mode (HAProxy)**
-- TLS protocols on **443** (SSH SSL, WS TLS, VLESS XHTTP TLS, VLESS TCP TLS, Trojan, OpenVPN), plain WebSocket and XHTTP on **80**
+- TLS protocols on **443** (SSH SSL, WS TLS, V2Ray TLS inbounds, OpenVPN), plain WebSocket and V2Ray XHTTP / WS without TLS on **80**
 - Works with any SNI, the old ports stay open as a second choice, users see both
 - Checks itself on start, rolls back if a check fails, watchdog restarts it or turns it off and tells you on Telegram
 - One button in **Settings → Network ports**, or `menu` → 443 mode
 
 **CDN and payloads**
-- **CDN mode:** V2Ray users also get XHTTP configs through Cloudflare (orange cloud). Server IP stays hidden, Cloudflare hosts can be used as the address
+- **CDN mode:** XHTTP and WS inbounds through Cloudflare (orange cloud). Server IP stays hidden, Cloudflare hosts can be used as the address
 - **CDN address per user:** give each user the Cloudflare IP or host that works on their network
 - **Payload builder:** write payloads with ready variables ({bug}, {server}, {cdn}, ports, [crlf], [split]...), 11 presets, live preview
 - Test a payload on the server in one tap (it checks that SSH really answers)
@@ -119,7 +131,7 @@ Running the installer again **updates ReXUI** and keeps all users and settings.
 **Panel**
 - Dashboard with live, 1 hour and 24 hour graphs, top users, usage per protocol, server traffic
 - Online page for every protocol, kick, device limit, real IP of SSH users
-- Light, dark and black themes, accent colours, your own brand name
+- Light, dark and black themes, accent colours (teal by default), your own brand name
 - Works great on phones, can be installed as an app (PWA)
 - Search, logs, login history, activity log, logged-in devices
 - 2FA, captcha after wrong logins, change the secret path in one tap
@@ -147,11 +159,9 @@ Running the installer again **updates ReXUI** and keeps all users and settings.
 | SSH SSL / TLS | **443** | |
 | SSH WebSocket | **80** | 8880 |
 | SSH WebSocket TLS | **443** | 2083 |
-| VLESS XHTTP TLS | **443** | 8443 |
-| VLESS TCP TLS | **443** | 2053 |
-| Trojan TLS | **443** | 2096 |
-| VLESS XHTTP | **80** | 8080 |
-| VLESS Reality | | 8444 |
+| V2Ray inbounds with TLS | **443** | the port you choose |
+| V2Ray XHTTP / WS without TLS | **80** | the port you choose |
+| V2Ray Reality | | the port you choose |
 | OpenVPN TCP | **443** | 1194, 110 |
 | HTTP proxy for OpenVPN (Squid) | | 3128 |
 | Hysteria2 (UDP) | | 443/udp + 20000-30000/udp (port hopping) |
@@ -161,7 +171,9 @@ Running the installer again **updates ReXUI** and keeps all users and settings.
 | Website | **80**, 443 | |
 | Panel | | random (shown after install) |
 
-Open these ports in your VPS provider's firewall (TCP and the UDP ones). Ports can be changed from `menu`.
+Open these ports in your VPS provider's firewall (TCP and the UDP ones), plus the port of every inbound you make. Ports can be changed from `menu`.
+
+On 443 mode an inbound also works on 443 / 80 when it uses the main path (`/vless` for XHTTP, `/vws` for WS).
 
 > **Works on the server but not from outside?** Many providers have **Anti-DDoS rules per port**. A rule that expects **SSH** on a web port (80, 8080, 8880) lets only SSH through and silently drops WebSocket and XHTTP. Set those rules to **HTTP**, or delete them.
 

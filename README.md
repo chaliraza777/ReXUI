@@ -6,7 +6,7 @@
 
 SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP, WS · TLS, Reality · CDN) · OpenVPN (TCP + HTTP proxy) · Hysteria2 (UDP) · WireGuard · DNS tunnel + V2Ray · 443 mode (HAProxy)
 
-![version](https://img.shields.io/badge/version-1.7-0d9488) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
+![version](https://img.shields.io/badge/version-1.8-0d9488) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
 
 </div>
 
@@ -14,7 +14,20 @@ SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP
 
 <p align="center"><img src="screenshots/dashboard-dark.png" alt="ReXUI dashboard (dark)" width="100%"></p>
 
-## What's new in 1.7
+## What's new in 1.8
+
+- **Live users table:** a green or red dot on every user, "Online" or "Seen 5m ago", live speed (↓ ↑) and today's usage under the bandwidth
+- **TLS fingerprint and ALPN per inbound** (like 3X-UI): chrome (default), firefox, safari, edge, ios, android, random or none, and h2 / http/1.1. Every TLS and Reality link now carries `fp`, so the app's TLS looks like a real browser
+- New sorts: **Online first** and **Fastest now**. The expiry date turns yellow or red when it is close
+- Every user type (V2Ray, SSH, OpenVPN, UDP, WireGuard, DNS) uses the same compact table
+- **Update notice:** the panel checks GitHub every 6 hours and shows a banner when a new ReXUI is out (and sends one Telegram message)
+- **Terminal menu:** a 2-line status on top (Xray, Panel, HAProxy, CPU, RAM, users online), a shorter 2-column menu, and "press any key" after every action
+- New in the menu: **Update** is now option 1, **Speed test (Ookla)**, **Logs** (last problem of Xray, panel and HAProxy, plus live logs) and **Firewall check** (every ReXUI port, open blocked ufw ports with one key)
+
+<details>
+<summary><b>What was new in 1.7, 1.6 and 1.5</b></summary>
+
+**1.7**
 
 - **Inbounds page (like 3X-UI):** make your own V2Ray configs. Pick **VLESS or Trojan**, the port, the transport (**TCP, XHTTP, WS, XHTTP CDN, WS CDN**) and the security (**None, TLS or Reality**). Address, Host, Path and SNI are set on the inbound
 - Fresh installs start with **no inbounds**, you make exactly the ones you want
@@ -32,9 +45,6 @@ SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP
 - A user is not created if its password could not be set
 - Old failed-login records are cleaned up every minute, so memory stays small
 
-<details>
-<summary><b>What was new in 1.6 and 1.5</b></summary>
-
 - **1.6:** WireGuard users (own keys, QR, .conf), payload generator on SSH users, real IP for SSH users, CDN address kept on restore
 - **1.5:** 443 mode (HAProxy) with self test and rollback, real client IP behind HAProxy, CDN mode, payload builder, server check with Fix buttons, Ports page, Performance mode, Settings in 6 tabs, "No expiry" from Edit
 
@@ -44,8 +54,8 @@ SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP
 
 | Inbounds | Add inbound |
 |---|---|
-| <img src="screenshots/inbounds.png" alt="Inbounds"> | <img src="screenshots/add-inbound.png" alt="Add inbound"> |
-| **V2Ray users** | **Add V2Ray user (attach inbounds)** |
+| <img src="screenshots/inbounds.png" alt="Inbounds"> | <img src="screenshots/add-inbound.png" alt="Add inbound: security, fingerprint, ALPN"> |
+| **V2Ray users (live speed, online dot)** | **Add V2Ray user (attach inbounds)** |
 | <img src="screenshots/users.png" alt="V2Ray users"> | <img src="screenshots/add-v2ray-user.png" alt="Add V2Ray user"> |
 | **User details** | **Dashboard (light)** |
 | <img src="screenshots/user-details.png" alt="User details"> | <img src="screenshots/dashboard-light.png" alt="Dashboard light"> |
@@ -61,6 +71,8 @@ SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP
 | <img src="screenshots/payloads.png" alt="Payload builder"> | <img src="screenshots/server-check.png" alt="Server check"> |
 | **Ports and 443 mode** | **Login** |
 | <img src="screenshots/ports.png" alt="Port manager"> | <img src="screenshots/login.jpg" alt="Login page"> |
+| **Terminal menu** | |
+| <img src="screenshots/terminal-menu.png" alt="Terminal menu" width="360"> | |
 
 | Phone: dashboard | Phone: users | Phone: inbounds | User's own page |
 |---|---|---|---|
@@ -103,7 +115,7 @@ After install, open **Inbounds** in the panel, make your V2Ray inbounds, then at
 
 **Inbounds (V2Ray)**
 - VLESS or Trojan on any port, TCP / XHTTP / WS, None / TLS / Reality, Cloudflare CDN for XHTTP and WS
-- Address, Host, Path and SNI per inbound, on/off switch, edit and delete
+- Address, Host, Path and SNI per inbound, TLS fingerprint (uTLS) and ALPN, on/off switch, edit and delete
 - Attach inbounds to each user, select all / clear all
 
 **443 mode (HAProxy)**
@@ -225,10 +237,17 @@ Keep the panel record and the DNS tunnel records **grey**.
 menu
 ```
 
-Uninstall, panel info, panel login reset (also turns off 2FA), port change (all protocols),
-service restart, SSL certificate (Let's Encrypt or your own), backup and restore,
-update ReXUI, update Xray core and geo files, roll back Xray,
-server check (find problems), performance mode, 443 mode on / off.
+A short status on top (Xray, Panel, HAProxy, CPU, RAM, users online), then:
+
+| | | |
+|---|---|---|
+| 1 Update (ReXUI, Xray, geo files, roll back) | 6 Port change (all protocols) | 11 Performance mode |
+| 2 Uninstall | 7 Service restart | 12 443 mode on / off |
+| 3 Panel info | 8 SSL certificate | 13 Speed test (Ookla) |
+| 4 Login reset (also turns off 2FA) | 9 Backup / Restore | 14 Logs (last errors, live) |
+| 5 Panel restart | 10 Server check | 15 Firewall check |
+
+Every action waits for a key before the menu comes back. Inside a sub menu, 0 goes back.
 
 ---
 
@@ -239,7 +258,7 @@ server check (find problems), performance mode, 443 mode on / off.
 - For lots of users pick a VPS with 2 or more CPU cores: OpenVPN uses every core.
 - WireGuard needs a KVM VPS (most OpenVZ / LXC servers have no WireGuard in the kernel).
 - Change the panel path in **Settings → General** if anyone else learns it.
-- Something not working? Run **Settings → Server check** (or `menu` → Server check) first.
+- Something not working? Run **Settings → Server check** (or `menu` → 10 Server check) first.
 
 ---
 
@@ -270,3 +289,4 @@ You can use, study, share and change it. If you share a changed version, it must
 © 2026 Ali ([chaliraza777](https://github.com/chaliraza777))
 
 > Use ReXUI only where it is legal, and follow your VPS provider's terms.
+> 

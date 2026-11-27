@@ -4,9 +4,9 @@
 
 **One panel for SSH, V2Ray, OpenVPN, UDP, WireGuard and DNS tunnels, with a one-file installer.<br>Everything on port 443 and 80.**
 
-SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP, WS · TLS, Reality · CDN) · OpenVPN (TCP + HTTP proxy) · Hysteria2 (UDP) · WireGuard · DNS tunnel + V2Ray · 443 mode (HAProxy)
+SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP, WS, HTTPUpgrade · TLS, Reality, ECH · CDN) · OpenVPN (TCP + HTTP proxy) · Hysteria2 (UDP) · WireGuard · DNS tunnel + V2Ray · 443 mode (HAProxy)
 
-![version](https://img.shields.io/badge/version-1.8-0d9488) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
+![version](https://img.shields.io/badge/version-1.9-1677ff) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
 
 </div>
 
@@ -14,15 +14,27 @@ SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP
 
 <p align="center"><img src="screenshots/dashboard-dark.png" alt="ReXUI dashboard (dark)" width="100%"></p>
 
-## What's new in 1.8
+## What's new in 1.9
 
-- **Live users table:** a green or red dot on every user, "Online" or "Seen 5m ago", live speed (↓ ↑) and today's usage under the bandwidth
-- **TLS fingerprint and ALPN per inbound** (like 3X-UI): chrome (default), firefox, safari, edge, ios, android, random or none, and h2 / http/1.1. Every TLS and Reality link now carries `fp`, so the app's TLS looks like a real browser
-- New sorts: **Online first** and **Fastest now**. The expiry date turns yellow or red when it is close
-- Every user type (V2Ray, SSH, OpenVPN, UDP, WireGuard, DNS) uses the same compact table
-- **Update notice:** the panel checks GitHub every 6 hours and shows a banner when a new ReXUI is out (and sends one Telegram message)
-- **Terminal menu:** a 2-line status on top (Xray, Panel, HAProxy, CPU, RAM, users online), a shorter 2-column menu, and "press any key" after every action
-- New in the menu: **Update** is now option 1, **Speed test (Ookla)**, **Logs** (last problem of Xray, panel and HAProxy, plus live logs) and **Firewall check** (every ReXUI port, open blocked ufw ports with one key)
+- **New Add Inbound, like 3X-UI:** 5 tabs (Basics, Stream, Security, Sniffing, Advanced), labels on the left, blue design, no Address box, Path editable
+- **More inbound types:** HTTPUpgrade, XHTTP modes (auto, packet-up, stream-up, stream-one), **Vision flow**, TCP **HTTP obfuscation**, WS heartbeat and headers, TCP Fast Open, fragment (TCP mask)
+- **TLS:** min / max version, Reject Unknown SNI, **ECH** (keys made by the panel), certificate **File Path / File Content** with the panel paths filled in (**Set Cert from Panel**), and ALPN always set to what the port supports
+- **Reality:** several SNIs and Short IDs, SpiderX, **Scan** (checks the target: TLS 1.3, ALPN, certificate, expiry, latency, and fills the SNI from the certificate) and **Find Targets** inside the form
+- **Sniffing per inbound** (off by default) and **External Proxy:** extra addresses (Cloudflare IPs, other domains), each one gets its own link
+- **1-click all protocols:** 7 inbounds on free ports in one tap, and **Remove 1-click** removes only those (your own inbounds stay)
+- **Port check:** after you make an inbound (or with the shield button) the panel checks that Xray listens, the server firewall, and that the port is open **from the internet** (3 countries)
+- **JSON subscription:** a second link with full configs for v2rayNG / v2rayN, with TLS fragment and noise (Settings → Xray). In user details every config has **Show JSON / Copy JSON**
+- Light theme is the default now (dark and black are one tap away)
+
+<details>
+<summary><b>What was new in 1.8</b></summary>
+
+- **Live users table:** a green or red dot on every user, "Online" or "Seen 5m ago", live speed (↓ ↑) and today's usage
+- **TLS fingerprint and ALPN per inbound**, every TLS and Reality link carries `fp`
+- Sorts **Online first** and **Fastest now**, expiry turns yellow or red when it is close
+- **Update notice** in the panel and on Telegram, terminal menu with status, Speed test (Ookla), Logs and Firewall check
+
+</details>
 
 <details>
 <summary><b>What was new in 1.7, 1.6 and 1.5</b></summary>
@@ -54,7 +66,9 @@ SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP
 
 | Inbounds | Add inbound |
 |---|---|
-| <img src="screenshots/inbounds.png" alt="Inbounds"> | <img src="screenshots/add-inbound.png" alt="Add inbound: security, fingerprint, ALPN"> |
+| <img src="screenshots/inbounds.png" alt="Inbounds"> | <img src="screenshots/add-inbound.png" alt="Add inbound: TLS"> |
+| **Reality scan** | |
+| <img src="screenshots/inbound-reality.png" alt="Reality scan"> | |
 | **V2Ray users (live speed, online dot)** | **Add V2Ray user (attach inbounds)** |
 | <img src="screenshots/users.png" alt="V2Ray users"> | <img src="screenshots/add-v2ray-user.png" alt="Add V2Ray user"> |
 | **User details** | **Dashboard (light)** |
@@ -114,8 +128,13 @@ After install, open **Inbounds** in the panel, make your V2Ray inbounds, then at
 - Share card image with QR for WhatsApp, new link / UUID / certificate in one tap
 
 **Inbounds (V2Ray)**
-- VLESS or Trojan on any port, TCP / XHTTP / WS, None / TLS / Reality, Cloudflare CDN for XHTTP and WS
-- Address, Host, Path and SNI per inbound, TLS fingerprint (uTLS) and ALPN, on/off switch, edit and delete
+- VLESS or Trojan on any port, TCP / XHTTP / WS / HTTPUpgrade, None / TLS / Reality, Cloudflare CDN
+- Vision flow, HTTP obfuscation, XHTTP modes, WS heartbeat and headers, TCP Fast Open, fragment
+- TLS min / max, Reject Unknown SNI, ECH, own certificate, uTLS fingerprint and ALPN
+- Reality with several SNIs and Short IDs, SpiderX, Scan and Find Targets
+- Sniffing per inbound, External Proxy (one link per address), port check from the internet
+- 1-click all protocols, and remove them in one tap
+- JSON subscription with fragment and noise
 - Attach inbounds to each user, select all / clear all
 
 **443 mode (HAProxy)**
@@ -143,7 +162,7 @@ After install, open **Inbounds** in the panel, make your V2Ray inbounds, then at
 **Panel**
 - Dashboard with live, 1 hour and 24 hour graphs, top users, usage per protocol, server traffic
 - Online page for every protocol, kick, device limit, real IP of SSH users
-- Light, dark and black themes, accent colours (teal by default), your own brand name
+- Light (default), dark and black themes, accent colours, your own brand name
 - Works great on phones, can be installed as an app (PWA)
 - Search, logs, login history, activity log, logged-in devices
 - 2FA, captcha after wrong logins, change the secret path in one tap
@@ -289,4 +308,3 @@ You can use, study, share and change it. If you share a changed version, it must
 © 2026 Ali ([chaliraza777](https://github.com/chaliraza777))
 
 > Use ReXUI only where it is legal, and follow your VPS provider's terms.
-> 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# ReXUI v1.8 installer
+# ReXUI v1.9 installer
 # Self-hosted SSH + Xray panel: SSH, SSL, SSH WebSocket (+TLS), UDPGW, Xray (VLESS XHTTP TLS / TCP TLS / Reality / XHTTP, Trojan), OpenVPN (TCP + HTTP proxy), Hysteria2 (UDP), WireGuard, DNS tunnel (dnstt) + V2Ray,
 # web panel with users, subscriptions, data and device limits, Telegram alerts, backups, 2FA, and a terminal menu.
 # Run as root on Ubuntu or Debian:  bash install.sh   (running it again updates ReXUI and keeps users and settings)
@@ -357,7 +357,7 @@ cat > /opt/tunnel-panel/panel.py <<'PANELPY'
 #!/usr/bin/env python3
 # ReXUI panel: one user = SSH + Xray (VLESS), subscription, GB limit, device limit, monthly reset, online/kick, backup/restore
 import os,sys,re,json,time,hmac,hashlib,secrets,ssl,shutil,socket,subprocess as sp,threading,datetime,pwd,platform,uuid,base64,html,http.server,urllib.request
-from urllib.parse import quote
+from urllib.parse import quote,unquote,parse_qs
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
 T='/etc/tunnel'; CONF=T+'/config'; LOGIN=T+'/panel.json'; UDB=T+'/users.json'; SETF=T+'/settings.json'; OLDDB='/etc/tunnel-users'
 CD=T+'/cert'; SELF=T+'/panel.pem'; XSC,XSK=T+'/xray-self.crt',T+'/xray-self.key'; HTML='/opt/tunnel-panel/index.html'
@@ -438,7 +438,8 @@ def sload():
     s={'addr':'','sni':'','host':'','path':'/vless','wspath':'/vws','rsni':'www.microsoft.com','rpriv':'','rpub':'','rsid':'',
        'btorrent':True,'bads':False,'warp':'off','wsites':'geosite:google,geosite:openai,geosite:netflix',
        'b25':True,'autodel':0,'tgtoken':'','tgchat':'','brand':'','tagline':'','accent':'teal',
-       'health':True,'report':False,'rhour':9,'tgbackup':False,'reboot':'off','rbday':0,'rbtime':'04:00','announce':'','cname':'{user}-{proto}','flag':'','autoclean':True,'rports':{},'fsite':'off','ftitle':'','xauto':False,'ddns_dom':'','ddns_tok':'','ovhost':'','dns_ns':'','hy_bw':0,'cdn_dom':'','cdn_addr':'','perf':'balanced','h443':True}
+       'health':True,'report':False,'rhour':9,'tgbackup':False,'reboot':'off','rbday':0,'rbtime':'04:00','announce':'','cname':'{user}-{proto}','flag':'','autoclean':True,'rports':{},'fsite':'off','ftitle':'','xauto':False,'ddns_dom':'','ddns_tok':'','ovhost':'','dns_ns':'','hy_bw':0,'cdn_dom':'','cdn_addr':'','perf':'balanced','h443':True,
+       'jsub':True,'jfrag':True,'jpk':'tlshello','jlen':'100-200','jint':'10-20','jnoise':False}
     try: s.update({k:v for k,v in json.loads(rd(SETF)).items() if k in s})
     except Exception: pass
     return s
@@ -966,6 +967,37 @@ def links(u):
     if hasdns(u): return dns_links(u)
     if not hasx(u): return []
     return _links(u)
+def ib_tq(x,hh,cdn=False):
+    """Transport part of a share link."""
+    P_=quote(ib_path(x),safe=''); n=x['net']
+    if n=='tcp':
+        if x.get('obfs'): return '&type=tcp&headerType=http&host=%s&path=%s'%(quote(x.get('obhost') or 'www.bing.com'),quote(x.get('obpath') or '/',safe=''))
+        return '&type=tcp'
+    if n=='xhttp': return '&type=xhttp&host=%s&path=%s&mode=%s'%(quote(hh),P_,'packet-up' if cdn and (x.get('xmode') or 'auto')=='auto' else x.get('xmode') or 'auto')
+    if n=='ws': return '&type=ws&host=%s&path=%s'%(quote(hh),P_)
+    if n=='httpupgrade': return '&type=httpupgrade&host=%s&path=%s'%(quote(hh),P_)
+    if n=='grpc': return '&type=grpc&serviceName=%s&mode=%s'%(quote(ib_svc(x),safe=''),'multi' if x.get('multi',True) else 'gun')+('&authority='+quote(x['host']) if x.get('host') else '')
+    return ''
+def ib_url(x,u,A_,port,q,N):
+    """Build the final share link. q = security + transport query (no leading &)."""
+    if x['proto']=='trojan': return 'trojan://%s@%s:%d?%s#%s'%(u['uuid'],A_,port,q,N)
+    if x['proto']=='vless': return 'vless://%s@%s:%d?encryption=none&%s#%s'%(u['uuid'],A_,port,q,N)
+    p={k:v[0] for k,v in parse_qs(q,keep_blank_values=True).items()}; nt=p.get('type','tcp')
+    j={'v':'2','ps':unquote(N),'add':A_.strip('[]'),'port':str(port),'id':u['uuid'],'aid':'0','scy':'auto','net':nt,
+       'type':p.get('headerType','none') if nt=='tcp' else ('multi' if p.get('mode')=='multi' else 'gun') if nt=='grpc' else p.get('mode','') if nt=='xhttp' else 'none',
+       'host':p.get('host',p.get('authority','')),'path':p.get('serviceName') if nt=='grpc' else p.get('path',''),'tls':'' if p.get('security')=='none' else p.get('security',''),
+       'sni':p.get('sni',''),'alpn':p.get('alpn',''),'fp':p.get('fp','')}
+    if p.get('allowInsecure'): j['allowInsecure']=1
+    if p.get('pcs'): j['pcs']=p['pcs']
+    if p.get('ech'): j['ech']=p['ech']
+    return 'vmess://'+base64.b64encode(json.dumps(j,separators=(',',':')).encode()).decode()
+def ib_exts(x,u,lk,N):
+    """One more link per external proxy address (same settings, other address / port)."""
+    out=[]
+    for e in x.get('ext') or []:
+        A_='['+e['addr']+']' if ':' in e['addr'] else e['addr']; nm=N+quote(' · '+(e.get('remark') or e['addr']))
+        out.append((x['name']+' · '+(e.get('remark') or e['addr']),ib_url(x,u,A_,e['port'],lk,nm),None))
+    return out
 def ib_slug(n): return re.sub(r'[^a-z0-9]+','-',n.lower()).strip('-')[:20] or 'config'
 def _links(u):
     s=sload(); ci=certinfo(); a=pub_addr(s); cn=ci['name'] if ci['src']!='self-signed' else ''
@@ -984,28 +1016,88 @@ def _links(u):
         if b=='reality':
             if not s['rpub']: continue
             rt,rs=ureal(u,s)
-            out.append((x['name'],'vless://%s@%s:%d?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=tcp#%s'%(
-                u['uuid'],('['+x['addr']+']' if ':' in x['addr'] else x['addr']) if x.get('addr') else A,rport(rt,s),quote(rs),ib_fp(x),s['rpub'],s['rsid'],N))); continue
+            out.append((x['name'],'vless://%s@%s:%d?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s%s&type=tcp#%s'%(
+                u['uuid'],('['+x['addr']+']' if ':' in x['addr'] else x['addr']) if x.get('addr') else A,rport(rt,s),quote(rs),ib_fp(x),s['rpub'],ib_sids(x)[0],
+                '&spx='+quote(x['spx'],safe='') if x.get('spx') else '',N)))
+            out+=ib_exts(dict(x,port=rport(rt,s)),u,'flow=xtls-rprx-vision&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=tcp'%(quote(rs),ib_fp(x),s['rpub'],ib_sids(x)[0]),N); continue
         own=x['port']; main,alt=own,None
         if h_on() and ib_h(x) and own not in (80,443): main,alt=(443 if x['sec']=='tls' else 80),own
         bi=bool(b)   # default inbounds keep the old per-user SNI / Host
         sni=(u.get('sni') if bi else '') or x['sni'] or s['sni'] or ci['domain']
         if x.get('addr'): A_='['+x['addr']+']' if ':' in x['addr'] else x['addr']
         else: A_=PA if x['net']!='tcp' and x['sec']=='none' else A
-        hh=(u.get('host') if bi else '') or x.get('host') or ((x['sni'] or s['host'] or ci['domain'] or a) if x['sec']=='reality' else (s['host'] or ci['domain'] or a))
-        P_=quote(ib_path(x),safe='')
-        tq={'tcp':'&type=tcp','xhttp':'&type=xhttp&host=%s&path=%s&mode=auto'%(quote(hh),P_),'ws':'&type=ws&host=%s&path=%s'%(quote(hh),P_)}[x['net']]
+        hh=(u.get('host') if bi else '') or x.get('host') or ((x['sni'] or s['host'] or ci['domain'] or a) if x['sec']=='reality' or x.get('cmode') in ('path','content') else (s['host'] or ci['domain'] or a))
+        tq=ib_tq(x,hh)
         if x['sec']=='reality':
             if not s['rpub']: continue
-            sq='security=reality&sni=%s&fp=%s&pbk=%s&sid=%s'%(quote(x['sni']),ib_fp(x),s['rpub'],s['rsid'])+('&flow=xtls-rprx-vision' if x['proto']=='vless' and x['net']=='tcp' else '')
+            sq='security=reality&sni=%s&fp=%s&pbk=%s&sid=%s'%(quote(x['sni']),ib_fp(x),s['rpub'],ib_sids(x)[0])+('&spx='+quote(x['spx'],safe='') if x.get('spx') else '')+('&flow=xtls-rprx-vision' if ib_vision(x) else '')
         elif x['sec']=='tls':
             al_=['http/1.1'] if main==443 and h_on() and own!=443 or own==443 else ib_alpn(x)   # 443 mode (HAProxy) speaks http/1.1
-            sq=tlsq(sni,ib_fp(x))+('&alpn='+quote(','.join(al_),safe='') if al_ else '')
+            sq=(('security=tls&sni='+quote(x['sni'])+('&fp='+ib_fp(x) if ib_fp(x)!='none' else '')) if x.get('cmode') in ('path','content') else tlsq(sni,ib_fp(x)))+('&alpn='+quote(','.join(al_),safe='') if al_ else '')+('&ech='+quote(x['echcfg'],safe='') if x.get('ech') and x.get('echcfg') else '')+('&flow=xtls-rprx-vision' if ib_vision(x) else '')
         else: sq='security=none'
-        if x['proto']=='trojan': url='trojan://%s@%s:%d?%s%s#%s'%(u['uuid'],A_,main,sq,tq,N)
-        else: url='vless://%s@%s:%d?encryption=none&%s%s#%s'%(u['uuid'],A_,main,sq,tq,N)
-        out.append((x['name'],url,alt))
+        out.append((x['name'],ib_url(x,u,A_,main,sq+tq,N),alt)); out+=ib_exts(x,u,sq+tq,N)
     return out
+def link_ob(url):
+    """Turn a vless / vmess / trojan share link into an Xray outbound (for the JSON subscription)."""
+    if url.startswith('vmess://'):
+        j=json.loads(base64.b64decode(url[8:]+'='*(-len(url[8:])%4)))
+        pr='vmess'; uid=j['id']; host,port=j['add'],int(j['port']); nt=j.get('net','tcp'); sec=j.get('tls') or 'none'
+        q={'type':nt,'host':j.get('host',''),'path':j.get('path',''),'sni':j.get('sni',''),'alpn':j.get('alpn',''),'fp':j.get('fp',''),'security':sec,
+           'headerType':j.get('type','none'),'serviceName':j.get('path',''),'mode':j.get('type',''),'ech':j.get('ech','')}
+        if j.get('allowInsecure'): q['allowInsecure']='1'
+        if j.get('pcs'): q['pcs']=j['pcs']
+        name=j.get('ps','')
+    else:
+        m=re.fullmatch(r'(vless|trojan)://([^@]+)@(\[[^\]]+\]|[^:]+):(\d+)\?([^#]*)#?(.*)',url)
+        if not m: return None,''
+        pr,uid,host,port=m[1],m[2],m[3].strip('[]'),int(m[4]); q={k:v[0] for k,v in parse_qs(m[5],keep_blank_values=True).items()}; name=unquote(m[6])
+        nt=q.get('type','tcp'); sec=q.get('security','none')
+    if pr=='trojan': st_={'servers':[{'address':host,'port':port,'password':uid,'level':8}]}
+    else:
+        us={'id':uid,'level':8}
+        if pr=='vless': us['encryption']='none'; us.update({'flow':q['flow']} if q.get('flow') else {})
+        else: us.update(alterId=0,security='auto')
+        st_={'vnext':[{'address':host,'port':port,'users':[us]}]}
+    ss={'network':nt,'security':sec}
+    if sec=='tls':
+        t={'serverName':q.get('sni',''),'fingerprint':q.get('fp') or 'chrome'}
+        if q.get('alpn'): t['alpn']=q['alpn'].split(',')
+        if q.get('pcs'): t['pinnedPeerCertSha256']=q['pcs']
+        if q.get('ech'): t['echConfigList']=q['ech']
+        ss['tlsSettings']=t
+    if sec=='reality': ss['realitySettings']={'serverName':q.get('sni',''),'fingerprint':q.get('fp') or 'chrome','publicKey':q.get('pbk',''),'shortId':q.get('sid',''),'spiderX':q.get('spx','')}
+    if nt=='tcp' and q.get('headerType')=='http': ss['tcpSettings']={'header':{'type':'http','request':{'path':[q.get('path') or '/'],'headers':{'Host':[q.get('host','')]}}}}
+    if nt=='ws': ss['wsSettings']={'path':q.get('path','/'),'host':q.get('host','')}
+    if nt=='httpupgrade': ss['httpupgradeSettings']={'path':q.get('path','/'),'host':q.get('host','')}
+    if nt=='xhttp': ss['xhttpSettings']={'path':q.get('path','/'),'host':q.get('host',''),'mode':q.get('mode') or 'auto'}
+    if nt=='grpc': ss['grpcSettings']={'serviceName':q.get('serviceName',''),'multiMode':q.get('mode')=='multi',**({'authority':q['authority']} if q.get('authority') else {})}
+    return {'tag':'proxy','protocol':pr,'settings':st_,'streamSettings':ss,'mux':{'enabled':False}},name
+def json_sub(u):
+    """Full client configs (v2rayNG / v2rayN JSON subscription), with optional TLS fragment and noise."""
+    s=sload(); out=[]
+    for l in links(u):
+        c=json_cfg(l[1],s)
+        if c: out.append(c)
+    return out
+def json_cfg(url,s=None):
+    """One full client config (v2rayNG custom config) from a share link."""
+    s=s or sload()
+    try: ob,name=link_ob(url)
+    except Exception: ob=None
+    if not ob: return None
+    obs=[ob,{'tag':'direct','protocol':'freedom','streamSettings':{'sockopt':{'domainStrategy':'UseIP'}}},{'tag':'block','protocol':'blackhole'}]
+    fr=s.get('jfrag') and ob['streamSettings']['security']=='tls'
+    if fr or s.get('jnoise'):
+        f={'tag':'fragment','protocol':'freedom','settings':{},'streamSettings':{'sockopt':{'tcpNoDelay':True,'domainStrategy':'UseIP'}}}
+        if fr: f['settings']['fragment']={'packets':s.get('jpk') or 'tlshello','length':s.get('jlen') or '100-200','interval':s.get('jint') or '10-20'}
+        if s.get('jnoise'): f['settings']['noises']=[{'type':'rand','packet':'10-20','delay':'10-16'}]
+        ob['streamSettings']['sockopt']={'dialerProxy':'fragment'}; obs.append(f)
+    return ({'remarks':name,'log':{'loglevel':'warning'},
+        'dns':{'servers':['1.1.1.1','8.8.8.8']},
+        'inbounds':[{'tag':'socks','port':10808,'listen':'127.0.0.1','protocol':'socks','settings':{'auth':'noauth','udp':True},'sniffing':{'enabled':True,'destOverride':['http','tls'],'routeOnly':True}},
+                    {'tag':'http','port':10809,'listen':'127.0.0.1','protocol':'http','settings':{}}],
+        'outbounds':obs,
+        'routing':{'domainStrategy':'AsIs','rules':[{'type':'field','ip':['geoip:private'],'outboundTag':'direct'}]}})
 def sub_url(u): return 'https://%s:%s/sub/%s'%(certinfo()['domain'] or pub_addr(),E.get('PANEL_PORT',''),u['sub'])
 def detail(n):
     u=next((x for x in uload() if x['name']==n),None)
@@ -1014,7 +1106,7 @@ def detail(n):
     return {'name':u['name'],'pw':u['pw'],'uuid':u['uuid'],'exp':u['exp'],'lim':u['lim'],'used':u['up']+u['down'],'up':u['up'],'down':u['down'],
             'sni':u['sni'],'host':u['host'],'rtarget':u.get('rtarget',''),'rsni_u':u.get('rsni',''),'cdn':u.get('cdn',''),'rt':ureal(u,s)[0],'rport':rport(ureal(u,s)[0],s),'ibs':u.get('ibs'),'st':ustate(u),'created':u.get('created',''),'dev':u.get('dev',0),'rday':u.get('rday',0),
             'note':u.get('note',''),'hist':hist30(u),'fdays':u.get('fdays',0),'trial':u.get('trial',False),'expts':u.get('expts',0),'reason':u.get('reason',''),'kind':kind(u),
-            'ssh':sessions().get(u['name'],0),'sips':ssh_ips().get(u['name'],[]),'ips':xips_on(u['name']),'ovpn':ov_info(u),'hy2':hy_info(u),'wg':wg_info(u),'dns':dns_info(u),'pays':[{'name':p['name'],'mode':p['mode'],'note':p.get('note',''),'text':pay_render(p)} for p in pay_load() if p.get('show') and hassh(u)],'sub':sub_url(u),'links':[dict({'name':l[0],'url':l[1]},**({'alt':l[2]} if len(l)>2 and l[2] else {})) for l in links(u)],
+            'ssh':sessions().get(u['name'],0),'sips':ssh_ips().get(u['name'],[]),'ips':xips_on(u['name']),'ovpn':ov_info(u),'hy2':hy_info(u),'wg':wg_info(u),'dns':dns_info(u),'pays':[{'name':p['name'],'mode':p['mode'],'note':p.get('note',''),'text':pay_render(p)} for p in pay_load() if p.get('show') and hassh(u)],'sub':sub_url(u),'jsub':sub_url(u)+'/json' if hasx(u) and sload().get('jsub',True) else '','links':[dict({'name':l[0],'url':l[1]},**({'alt':l[2]} if len(l)>2 and l[2] else {}),**({'json':json_cfg(l[1])} if l[1].startswith(('vless://','trojan://','vmess://')) else {})) for l in links(u)],
             'addr':a,'whost':u['host'] or s['host'] or ci['domain'] or a,'path':s['path'],'rsni':s['rsni'],
             'plaindomain':bool((s['addr'] and re.search('[a-z]',s['addr'])) or ci['domain']),
             'ports':dict({k:str(P(k,d)) for k,d in (('SSH_PORT',22),('UDPGW_PORT',7300))},**{k:str(v) for k,v in h_uports(u)[0].items()}),
@@ -1046,8 +1138,12 @@ def ib_load():
             L=[]; wjson(IBF,L,0o600); log('inbounds: empty list made (add inbounds in the panel)')
         for x in L:
             if x.get('b') in IBB: k,d=IBB[x['b']][4],IBB[x['b']][5]; x['port']=P(k,d)
-            for k in ('sni','addr','host','path','target','b','alpn'): x.setdefault(k,'')
-            x.setdefault('fp','chrome')
+            for k in ('sni','addr','host','path','target','b','alpn','svc','obhost','minv','maxv','echkey','echcfg','spx'): x.setdefault(k,'')
+            x.setdefault('fp','chrome'); x.setdefault('xmode','auto'); x.setdefault('multi',True); x.setdefault('obfs',False); x.setdefault('obpath','/')
+            x.setdefault('hb',0); x.setdefault('hdrs',[]); x.setdefault('tfo',False); x.setdefault('frag',{}); x.setdefault('rsni',False); x.setdefault('ech',False)
+            x.setdefault('flow','vision' if x.get('sec')=='reality' and x.get('proto')=='vless' and x.get('net')=='tcp' else '')
+            x.setdefault('sids',[]); x.setdefault('snix',[]); x.setdefault('ext',[]); x.setdefault('sniff',{'on':True,'dest':['http','tls'],'ro':False}); x.setdefault('cmode','panel')
+            for k in ('cfile','kfile','ccrt','ckey'): x.setdefault(k,'')
             x.setdefault('cdn',False); x.setdefault('on',True)
         return L
 def cfg_set(k,v):
@@ -1076,14 +1172,64 @@ def ib_alpn(x,srv=False):
     """ALPN list for a TLS inbound. Empty setting = the default for the transport."""
     if x.get('sec')!='tls': return []
     a=[v for v in ALPNS if v in str(x.get('alpn') or '').split(',')]
-    if not a: a={'xhttp':['h2','http/1.1'],'ws':['http/1.1']}.get(x['net'],[])
+    if not a: a={'xhttp':['h2','http/1.1'],'ws':['http/1.1'],'httpupgrade':['http/1.1'],'grpc':['h2']}.get(x['net'],[])
     if srv and x['net']=='tcp' and sload()['fsite']!='off' and 'http/1.1' not in a: a=a+['http/1.1']
     return a
-def ib_kind(x): return (x['proto'],x['net'],x['sec'],(x.get('target') or x['sni']) if x['sec']=='reality' else '',ib_path(x) if x['net'] in ('xhttp','ws') else '',','.join(ib_alpn(x)))
+PROTOS=('vless','trojan'); NETS=('tcp','xhttp','ws','httpupgrade'); XMODES=('auto','packet-up','stream-up','stream-one')
+TLSV=('1.0','1.1','1.2','1.3'); SNIFFS=('http','tls','quic','fakedns')
+def ib_svc(x): return x.get('svc') or 'rexgrpc'
+def ib_sids(x):
+    v=[i for i in (x.get('sids') or []) if re.fullmatch(r'[0-9a-f]{0,16}',str(i))]
+    return v or [sload()['rsid']]
+def ib_snis(x): return [x['sni']]+[h for h in (x.get('snix') or []) if h and h!=x['sni']]
+def ib_vision(x): return x['proto']=='vless' and x['net']=='tcp' and x['sec'] in ('tls','reality') and x.get('flow')=='vision' and not x.get('obfs')
+def ib_stream(x,cert=None):
+    """Xray streamSettings of one inbound (server side)."""
+    net,sec=x['net'],x['sec']; st={'network':net,'security':sec}
+    if sec=='tls':
+        t=dict(cert or {}); al_=ib_alpn(x,True)
+        if x.get('cmode') in ('path','content'):   # read by the panel (root), so Xray does not need access to the files
+            c_,k_=(rd(x['cfile']),rd(x['kfile'])) if x['cmode']=='path' else (x['ccrt'],x['ckey'])
+            t['certificates']=[{'certificate':c_.strip().splitlines(),'key':k_.strip().splitlines()}]
+        if al_: t['alpn']=al_
+        if x.get('minv'): t['minVersion']=x['minv']
+        if x.get('maxv'): t['maxVersion']=x['maxv']
+        if x.get('rsni'): t['rejectUnknownSni']=True
+        if x.get('ech') and x.get('echkey'): t['echServerKeys']=x['echkey']
+        st['tlsSettings']=t
+    if sec=='reality': st['realitySettings']={'target':x.get('target') or x['sni']+':443','serverNames':ib_snis(x),'privateKey':sload()['rpriv'],'shortIds':ib_sids(x)}
+    if net=='xhttp': st['xhttpSettings']={'path':ib_path(x),'mode':x.get('xmode') or 'auto'}
+    if net=='ws':
+        w={'path':ib_path(x)}
+        if int(x.get('hb') or 0): w['heartbeatPeriod']=int(x['hb'])
+        hd={k:v for k,v in (x.get('hdrs') or [])}
+        if hd: w['headers']=hd
+        st['wsSettings']=w
+    if net=='httpupgrade':
+        w={'path':ib_path(x)}; hd={k:v for k,v in (x.get('hdrs') or [])}
+        if hd: w['headers']=hd
+        st['httpupgradeSettings']=w
+    if net=='grpc': st['grpcSettings']={'serviceName':ib_svc(x),'multiMode':bool(x.get('multi',True))}
+    if net=='tcp' and x.get('obfs'):
+        st['tcpSettings']={'header':{'type':'http','request':{'path':[x.get('obpath') or '/'],'headers':{'Host':[x.get('obhost') or 'www.bing.com']}}}}
+    if x.get('tfo'): st['sockopt']={'tcpFastOpen':True}
+    f=x.get('frag') or {}
+    if f.get('on'): st['finalmask']={'tcp':[{'type':'fragment','settings':{'packets':f.get('packets') or 'tlshello','lengths':[f.get('lengths') or '100-200'],'delays':[f.get('delays') or '10-20']}}]}
+    return st
+def ib_sniff(x):
+    v=x.get('sniff') or {}
+    if not v.get('on',True): return {'enabled':False}
+    d=[i for i in (v.get('dest') or ['http','tls']) if i in SNIFFS] or ['http','tls']
+    return dict({'enabled':True,'destOverride':d},**({'routeOnly':True} if v.get('ro') else {}))
+def ib_kind(x):
+    st=ib_stream(x); st.pop('realitySettings',None)
+    return (x['proto'],x['sec'],(x.get('target') or x['sni']) if x['sec']=='reality' else '',json.dumps(st,sort_keys=True),ib_vision(x),json.dumps(ib_sniff(x),sort_keys=True),
+            json.dumps([ib_snis(x),ib_sids(x)]) if x['sec']=='reality' else '')
 def ib_h(x):
     """Which HAProxy route (443 mode) can carry this inbound: xhttp, vless, trojan or None."""
-    if x['sec']=='reality': return None
-    if x['net'] in ('xhttp','ws') and x['proto']=='vless': return x['net'] if ib_path(x)==ib_main(x['net']) else None
+    if x['sec']=='reality' or x['proto']=='vmess' or x['net'] in ('grpc','httpupgrade') or x.get('obfs') or x.get('ech') or ib_vision(x): return None
+    if x.get('cmode') in ('path','content') or x.get('frag',{}).get('on') or x.get('tfo') or x.get('minv') or x.get('maxv') or x.get('rsni'): return None
+    if x['net'] in ('xhttp','ws') and x['proto']=='vless': return x['net'] if ib_path(x)==ib_main(x['net']) and (x.get('xmode') or 'auto')=='auto' and not x.get('hb') and not x.get('hdrs') else None
     if x['net']=='tcp' and x['sec']=='tls': return 'vless' if x['proto']=='vless' else 'trojan'
     return None
 def ib_ok(x):
@@ -1093,8 +1239,8 @@ def ib_check(x,L,old=None):
     n=str(x.get('name') or '').strip()
     if not n or len(n)>40: raise Err('Give the inbound a name (up to 40 letters)')
     pr=x.get('proto'); net=x.get('net'); sec=x.get('sec'); cdn=bool(x.get('cdn'))
-    if pr not in ('vless','trojan'): raise Err('Protocol must be VLESS or Trojan')
-    if net not in ('tcp','xhttp','ws'): raise Err('Pick TCP, XHTTP, WS or XHTTP CDN')
+    if pr not in PROTOS: raise Err('Protocol must be VLESS or Trojan')
+    if net not in NETS: raise Err('Transport must be TCP, XHTTP, WS or HTTPUpgrade')
     if sec not in ('none','tls','reality'): raise Err('Security must be None, TLS or Reality')
     try: p=int(x.get('port'))
     except (TypeError,ValueError): raise Err('Port must be a number')
@@ -1102,8 +1248,9 @@ def ib_check(x,L,old=None):
     sni=hostok(x.get('sni'),'SNI'); host=hostok(x.get('host'),'Host'); addr=hostok(x.get('addr'),'Address')
     path=str(x.get('path') or '').strip(); tg=str(x.get('target') or '').strip()
     if path and not re.fullmatch(r'/[A-Za-z0-9._~/-]{0,60}',path): raise Err('Path must start with / (letters, numbers, - _ . /)')
-    if net=='tcp': path=host=''
-    if cdn and net not in ('xhttp','ws'): raise Err('CDN works only with XHTTP or WS')
+    if net in ('tcp','grpc'): path=''
+    if net=='tcp': host=''
+    if cdn and net not in ('xhttp','ws','grpc','httpupgrade'): raise Err('CDN works only with XHTTP, WS or HTTPUpgrade')
     if path and path==ib_main(net): path=''
     if sec!='reality': tg=''
     fp=str(x.get('fp') or 'chrome').lower()
@@ -1115,11 +1262,13 @@ def ib_check(x,L,old=None):
     al=[v.strip().lower() for v in str(al).split(',') if v.strip()]
     if any(v not in ALPNS for v in al): raise Err('ALPN can be h2 and / or http/1.1')
     if sec!='tls': al=[]
-    if net=='ws' and al and 'http/1.1' not in al: raise Err('WS needs http/1.1 in ALPN (WebSocket does not work on h2 alone)')
+    if net in ('ws','httpupgrade') and al and 'http/1.1' not in al: raise Err('%s needs http/1.1 in ALPN (it does not work on h2 alone)'%('WS' if net=='ws' else 'HTTPUpgrade'))
+    if net=='grpc' and al and 'h2' not in al: raise Err('gRPC needs h2 in ALPN')
     al=','.join(v for v in ALPNS if v in al)
     if not sni and (old or {}).get('b')=='reality': sni=sload()['rsni']
+    ex=ib_extra(x,pr,net,sec,cdn,p,sni,old)
     if sec=='reality':
-        if net=='ws': raise Err('Reality does not work with WS. Use TLS, or pick TCP / XHTTP.')
+        if net in ('ws','httpupgrade'): raise Err('Reality does not work with %s. Use TLS, or pick TCP / XHTTP.'%('WS' if net=='ws' else 'HTTPUpgrade'))
         if cdn: raise Err('Reality does not work through a CDN. Use TLS or None.')
         if not sni or re.fullmatch(r'[\d.]+',sni): raise Err('Reality needs an SNI: a big site with TLS 1.3, like www.microsoft.com')
         if tg:
@@ -1131,14 +1280,18 @@ def ib_check(x,L,old=None):
     if cdn and sec=='tls' and p not in CF_HTTPS: raise Err('Cloudflare CDN with TLS works only on ports '+', '.join(map(str,CF_HTTPS)))
     if cdn and sec=='none' and p not in CF_HTTP: raise Err('Cloudflare CDN without TLS works only on ports '+', '.join(map(str,CF_HTTP)))
     b=(old or {}).get('b','')
+    if b and b!='reality' and ib_h(dict(x,proto=pr,net=net,sec=sec,path=path,**ex)) is None and ib_h(old): b=''
     if b and (any(old.get(k)!=v for k,v in (('proto',pr),('net',net),('sec',sec),('cdn',cdn)) if k in old) or path or tg): b=''
     if b in IBB and p in (80,443): raise Err('Default inbounds already use 443/80 when 443 mode is on. Make a new inbound for port %d.'%p)
     if p in (80,443):
         if not h_on(): raise Err('Port %d needs 443 mode. Turn it on in Settings → Network ports, or pick another port.'%p)
         if net=='tcp' and sec!='tls': raise Err('On port %d TCP needs TLS (TCP without TLS cannot share the port). Use XHTTP or WS, or another port.'%p)
         if pr=='trojan' and net!='tcp': raise Err('On port %d Trojan works only with TCP + TLS. Use VLESS for XHTTP / WS here.'%p)
-        if path: raise Err('On port %d (443 mode) %s uses the main path %s. Leave Path empty.'%(p,net.upper(),ib_main(net)))
-    o=dict(x,name=n,proto=pr,net=net,sec=sec,cdn=cdn,port=p,sni=sni,host=host,addr=addr,path=path,target=tg,b=b,fp=fp,alpn=al,on=bool(x.get('on',True)))
+        if pr=='vmess' or net in ('grpc','httpupgrade') or (net=='tcp' and sec!='tls') or (pr=='trojan' and net!='tcp'): pass
+        elif path: raise Err('On port %d (443 mode) %s uses the main path %s. Leave Path empty.'%(p,net.upper(),ib_main(net)))
+        if ib_h(dict(x,proto=pr,net=net,sec=sec,path=path,**ex)) is None:
+            raise Err('Port %d (443 mode) carries only plain VLESS XHTTP / WS and VLESS / Trojan TCP+TLS. %s needs its own port, for example 2083.'%(p,ib_why(dict(x,proto=pr,net=net,sec=sec,**ex))))
+    o=dict(x,name=n,proto=pr,net=net,sec=sec,cdn=cdn,port=p,sni=sni,host=host,addr=addr,path=path,target=tg,b=b,fp=fp,alpn=al,on=bool(x.get('on',True)),**ex)
     if o['on'] and p not in (80,443):
         hp=ib_hports()
         if p in hp: raise Err('Port %d is used by %s. Pick another port.'%(p,hp[p]))
@@ -1149,6 +1302,138 @@ def ib_check(x,L,old=None):
         if not any(y['on'] and y['port']==p and y['id']!=(old or {}).get('id') for y in L) and p!=(old or {}).get('port'):
             g=ss_listeners().get(('tcp',p))
             if g and g not in ('xray','?'): raise Err('Port %d is already used by %s on this server. Pick another port.'%(p,g))
+    return o
+IBKEYS=('name','port','sni','on','proto','net','sec','cdn','addr','host','path','target','fp','alpn','xmode','svc','multi','obfs','obhost','obpath','hb','hdrs','tfo','frag',
+        'minv','maxv','rsni','ech','flow','sids','snix','spx','sniff','ext','cmode','cfile','kfile','ccrt','ckey')
+def ib_why(x):
+    w=[]
+    if x['proto']=='vmess': w.append('VMess')
+    if x['net'] in ('grpc','httpupgrade'): w.append({'grpc':'gRPC','httpupgrade':'HTTPUpgrade'}[x['net']])
+    if ib_vision(x): w.append('Vision flow')
+    for k,t in (('obfs','HTTP obfuscation'),('ech','ECH'),('tfo','TCP Fast Open'),('rsni','Reject Unknown SNI'),('hb','heartbeat'),('hdrs','headers')):
+        if x.get(k): w.append(t)
+    if x.get('minv') or x.get('maxv'): w.append('TLS version')
+    if x.get('cmode') in ('path','content'): w.append('Own certificate')
+    if (x.get('frag') or {}).get('on'): w.append('fragment')
+    if x['net']=='xhttp' and (x.get('xmode') or 'auto')!='auto': w.append('XHTTP mode')
+    return ', '.join(w) or 'custom path'
+def ech_keys(name):
+    r=run(XBIN,'tls','ech','--serverName',name,t=20); L=[l.strip() for l in (r.stdout or '').splitlines() if l.strip()]
+    try: return L[L.index('ECH server keys:')+1],L[L.index('ECH config list:')+1]
+    except (ValueError,IndexError): raise Err('Could not make ECH keys (xray tls ech failed). '+(r.stderr or '')[:120])
+def cert_paths(all_=False):
+    """Files of the panel certificate (Let's Encrypt, or the self-signed one)."""
+    L=[(CD+'/xray.crt',CD+'/xray.key'),(XSC,XSK),(XD+'/cert.crt',XD+'/key.key')]
+    if all_: return L
+    return next(((c,k) for c,k in L[:2] if os.path.exists(c) and os.path.exists(k)),L[1])
+def ib_extra(x,pr,net,sec,cdn,p,sni,old):
+    """Check and clean the advanced settings of an inbound."""
+    old=old or {}; o={}
+    def hostv(k,what):
+        return hostok(x.get(k),what)
+    def tb(k): return bool(x.get(k)) and x.get(k) not in ('0','false','off')
+    o['xmode']=str(x.get('xmode') or 'auto')
+    if o['xmode'] not in XMODES: raise Err('XHTTP mode must be one of: '+', '.join(XMODES))
+    if net!='xhttp': o['xmode']='auto'
+    sv=str(x.get('svc') or '').strip()
+    if sv and not re.fullmatch(r'[A-Za-z0-9._-]{1,60}',sv): raise Err('gRPC service name: letters, numbers, - _ . only')
+    o['svc']=sv if net=='grpc' else ''
+    o['multi']=bool(x.get('multi',True))
+    o['obfs']=net=='tcp' and tb('obfs')
+    if o['obfs'] and sec=='reality': raise Err('HTTP obfuscation does not work with Reality')
+    o['obhost']=hostv('obhost','Obfuscation host') if o['obfs'] else ''
+    op=str(x.get('obpath') or '/').strip() or '/'
+    if not re.fullmatch(r'/[A-Za-z0-9._~/?=&%-]{0,80}',op): raise Err('Obfuscation path must start with /')
+    o['obpath']=op if o['obfs'] else '/'
+    try: hb=int(x.get('hb') or 0)
+    except (TypeError,ValueError): raise Err('Heartbeat must be a number of seconds')
+    if not 0<=hb<=600: raise Err('Heartbeat must be 0-600 seconds')
+    o['hb']=hb if net=='ws' else 0
+    hd=[]
+    for it in (x.get('hdrs') or []):
+        k,v=(str(it[0]).strip(),str(it[1]).strip()) if isinstance(it,(list,tuple)) and len(it)==2 else ('','')
+        if not k and not v: continue
+        if not re.fullmatch(r'[A-Za-z0-9-]{1,40}',k) or len(v)>200 or any(c in v for c in '\r\n'): raise Err('Header "%s" is not valid'%k[:40])
+        if k.lower()=='host': raise Err('Use the Host box for the Host header')
+        hd.append([k,v])
+    if len(hd)>10: raise Err('Up to 10 headers')
+    o['hdrs']=hd if net in ('ws','httpupgrade') else []
+    o['tfo']=tb('tfo')
+    f=x.get('frag') or {}
+    if isinstance(f,dict) and f.get('on'):
+        pk=str(f.get('packets') or 'tlshello').strip(); ln=str(f.get('lengths') or '100-200').strip(); dl=str(f.get('delays') or '10-20').strip()
+        if not re.fullmatch(r'tlshello|\d{1,2}-\d{1,2}',pk): raise Err('Fragment packets: tlshello or a range like 1-3')
+        for v,t in ((ln,'length'),(dl,'delay')):
+            if not re.fullmatch(r'\d{1,4}(-\d{1,4})?',v): raise Err('Fragment %s: a number or range like 100-200'%t)
+        o['frag']={'on':True,'packets':pk,'lengths':ln,'delays':dl}
+    else: o['frag']={}
+    mi=str(x.get('minv') or ''); ma=str(x.get('maxv') or '')
+    if mi and mi not in TLSV or ma and ma not in TLSV: raise Err('TLS version must be 1.0, 1.1, 1.2 or 1.3')
+    if mi and ma and TLSV.index(mi)>TLSV.index(ma): raise Err('TLS min version is higher than max version')
+    o['minv'],o['maxv']=(mi,ma) if sec=='tls' else ('','')
+    o['rsni']=sec=='tls' and tb('rsni')
+    o['ech']=sec=='tls' and tb('ech')
+    if o['ech']:
+        if cdn: raise Err('ECH does not work through the CDN')
+        if o['maxv'] and o['maxv']!='1.3': raise Err('ECH needs TLS 1.3 (set Max version to 1.3 or empty)')
+        en=sni or sload().get('domain') or 'cloudflare-ech.com'
+        if old.get('ech') and old.get('echkey') and old.get('echsn')==en: o['echkey'],o['echcfg'],o['echsn']=old['echkey'],old['echcfg'],en
+        else: k_,c_=ech_keys(en); o['echkey'],o['echcfg'],o['echsn']=k_,c_,en
+    else: o['echkey']=o['echcfg']=o['echsn']=''
+    cm=str(x.get('cmode') or 'panel')
+    if cm not in ('panel','path','content'): raise Err('Certificate must be panel, file path or file content')
+    if sec!='tls': cm='panel'
+    if cm=='path' and (str(x.get('cfile') or '').strip(),str(x.get('kfile') or '').strip()) in cert_paths(True): cm='panel'   # the panel's own certificate
+    o.update(cmode=cm,cfile='',kfile='',ccrt='',ckey='')
+    if cm!='panel':
+        if cdn: raise Err('Through the CDN the panel certificate is used. Turn CDN off for your own certificate.')
+        if not sni: raise Err('Your own certificate needs the SNI (the domain on the certificate)')
+        import tempfile
+        if cm=='path':
+            cf,kf=str(x.get('cfile') or '').strip(),str(x.get('kfile') or '').strip()
+            for v,t in ((cf,'Public key (certificate)'),(kf,'Private key')):
+                if not v.startswith('/') or not os.path.isfile(v): raise Err(t+' file not found on the server: '+(v or 'empty'))
+            ct,kt=rd(cf),rd(kf); o['cfile'],o['kfile']=cf,kf
+        else:
+            ct=str(x.get('ccrt') or '').strip(); kt=str(x.get('ckey') or '').strip() or (old.get('ckey','') if old.get('cmode')=='content' else '')
+            if 'BEGIN CERTIFICATE' not in ct: raise Err('Paste the certificate (-----BEGIN CERTIFICATE-----)')
+            if 'PRIVATE KEY' not in kt: raise Err('Paste the private key (-----BEGIN PRIVATE KEY-----)')
+            o['ccrt'],o['ckey']=ct,kt
+        with tempfile.TemporaryDirectory() as td:
+            open(td+'/c','w').write(ct); open(td+'/k','w').write(kt)
+            try: ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(td+'/c',td+'/k')
+            except Exception: raise Err('The certificate and private key do not match, or one of them is broken')
+    fl=str(x.get('flow','vision' if sec=='reality' else '') or '')
+    if fl not in ('','vision'): raise Err('Flow must be empty or xtls-rprx-vision')
+    o['flow']=fl if pr=='vless' and net=='tcp' and sec in ('tls','reality') and not o['obfs'] else ''
+    if o['flow'] and cdn: raise Err('Vision flow does not work through a CDN')
+    sids=x.get('sids') or []
+    if isinstance(sids,str): sids=[v for v in re.split(r'[\s,]+',sids) if v]
+    sids=[str(v).lower() for v in sids]
+    if any(not re.fullmatch(r'[0-9a-f]{0,16}',v) or len(v)%2 for v in sids): raise Err('Short IDs: hex, even length, up to 16 (like a1b2c3d4)')
+    if len(sids)>8: raise Err('Up to 8 Short IDs')
+    o['sids']=list(dict.fromkeys(sids)) if sec=='reality' else []
+    sx=x.get('snix') or []
+    if isinstance(sx,str): sx=[v for v in re.split(r'[\s,]+',sx) if v]
+    sx=[hostok(v,'SNI') for v in sx][:10]
+    o['snix']=[v for v in dict.fromkeys(sx) if v and v!=sni] if sec=='reality' else []
+    spx=str(x.get('spx') or '').strip()
+    if spx and not re.fullmatch(r'/[A-Za-z0-9._~/?=&%-]{0,80}',spx): raise Err('SpiderX must start with /')
+    o['spx']=spx if sec=='reality' else ''
+    sn=x.get('sniff') if isinstance(x.get('sniff'),dict) else {'on':True}
+    o['sniff']={'on':bool(sn.get('on',True)),'dest':[v for v in SNIFFS if v in (sn.get('dest') or ['http','tls'])],'ro':bool(sn.get('ro'))}
+    if o['sniff']['on'] and not o['sniff']['dest']: raise Err('Sniffing is on: pick at least one of HTTP, TLS, QUIC, FakeDNS')
+    ext=[]
+    for e in (x.get('ext') or [])[:20]:
+        if not isinstance(e,dict): continue
+        a=hostok(e.get('addr'),'External proxy address')
+        if not a: continue
+        try: ep=int(e.get('port') or p)
+        except (TypeError,ValueError): raise Err('External proxy port must be a number')
+        if not 1<=ep<=65535: raise Err('External proxy port must be 1-65535')
+        rm=str(e.get('remark') or '').strip()[:30]
+        ext.append({'addr':a,'port':ep,'remark':rm})
+    o['ext']=ext
     return o
 def ib_tls13(x):
     t=x.get('target') or x['sni']+':443'; h,pt=t.rsplit(':',1)
@@ -1161,6 +1446,32 @@ def ib_apply_change(old,new):
     if new.get('b')=='reality' and new.get('sni') and new['sni']!=sload()['rsni']:
         s=sload(); s['rsni']=new['sni']; wjson(SETF,s,0o600)
     if new['on'] and new['port'] not in (80,443): ufw_allow(new['port'])
+# 1-click set: one inbound of every kind. Only these (marked qk) are removed by "Remove 1-click".
+QUICK=[('q1','VLESS TCP Vision TLS',20001,{'proto':'vless','net':'tcp','sec':'tls','flow':'vision'}),
+       ('q2','VLESS WS TLS',20002,{'proto':'vless','net':'ws','sec':'tls','path':'/rxws'}),
+       ('q3','VLESS HTTPUpgrade TLS',20003,{'proto':'vless','net':'httpupgrade','sec':'tls','path':'/rxhu'}),
+       ('q4','VLESS XHTTP Reality',20004,{'proto':'vless','net':'xhttp','sec':'reality','path':'/rxxh'}),
+       ('q5','VLESS XHTTP TLS stream-up',20005,{'proto':'vless','net':'xhttp','sec':'tls','path':'/rxsu','xmode':'stream-up'}),
+       ('q6','Trojan WS TLS',20006,{'proto':'trojan','net':'ws','sec':'tls','path':'/rxtr'}),
+       ('q7','Trojan HTTPUpgrade TLS',20007,{'proto':'trojan','net':'httpupgrade','sec':'tls','path':'/rxth'})]
+QOFF={'on':False,'dest':['http','tls'],'ro':False}
+def ib_quick(L):
+    """Add the 1-click inbounds that are missing. Ports that are taken move to the next free one."""
+    have={x.get('qk') for x in L}; add=[]; skip=[]; rs=sload()['rsni']; r_ok=None
+    for k,n,p,d in QUICK:
+        if k in have: continue
+        x=dict(d,name=n,on=True,b='',qk=k,sniff=QOFF)
+        if x['sec']=='reality':
+            x['sni']=rs
+            if r_ok is None: r_ok=bool(rs) and tls13(rs)
+            if not r_ok: skip.append(n+' (Reality target %s did not answer with TLS 1.3)'%rs); continue
+        last=''
+        for pt in list(range(p,p+40))+list(range(p+1000,p+1040)):
+            try: o=ib_check(dict(x,port=pt),L+add); break
+            except Err as e: last=str(e)
+        else: skip.append(n+' ('+last+')'); continue
+        o['id']='i'+secrets.token_hex(4); o['b']=''; o['qk']=k; add.append(o)
+    return add,skip
 def ib_api(a,d):
     with IBL:
         L=ib_load()
@@ -1190,7 +1501,7 @@ def ib_api(a,d):
             else:
                 if a=='toggle': d=dict(old,on=not old['on'])
                 else:
-                    d=dict(old,**{k:d[k] for k in ('name','port','sni','on','proto','net','sec','cdn','addr','host','path','target','fp','alpn') if k in d})
+                    d=dict(old,**{k:d[k] for k in IBKEYS if k in d})
                 x=ib_check(d,L,old); x['id']=old['id']
                 if x['sec']=='reality' and (x['sni'],x['target'])!=(old['sni'] or (sload()['rsni'] if old.get('b')=='reality' else ''),old.get('target','')): ib_tls13(x)
                 ib_apply_change(old,x)
@@ -1201,6 +1512,21 @@ def ib_api(a,d):
             for x in add:
                 if any(y['on'] and y['port']==x['port'] and ib_kind(y)!=ib_kind(x) for y in L): x['on']=False
             L+=add; ib_save(L); res={'ok':1,'added':len(add)}
+        elif a=='quick':
+            add,skip=ib_quick(L)
+            if not add and not skip: raise Err('All 1-click inbounds are already there.')
+            if add: ib_freeze(L); L+=add; ib_save(L)
+            for x in add: ib_apply_change(None,x)
+            res={'ok':1,'added':[x['name']+' :'+str(x['port']) for x in add],'skipped':skip}
+        elif a=='quickdel':
+            gone={x['id'] for x in L if x.get('qk')}
+            if not gone: raise Err('There are no 1-click inbounds.')
+            L=[x for x in L if x['id'] not in gone]; ib_save(L)
+            us=uload(); ch=False
+            for u in us:
+                if isinstance(u.get('ibs'),list) and gone&set(u['ibs']): u['ibs']=[i for i in u['ibs'] if i not in gone]; ch=True
+            if ch: usave(us)
+            res={'ok':1,'removed':len(gone)}
         elif a=='move':
             i=next((k for k,y in enumerate(L) if y['id']==d.get('id')),None)
             if i is None: raise Err('Inbound not found')
@@ -1220,6 +1546,7 @@ def ib_view(L=None):
         warn=''
         if x['port'] in (80,443) and not h_on(): warn='Needs 443 mode: turn it on in Settings → Network ports.'
         elif x['cdn'] and not s.get('cdn_dom'): warn='Set your CDN domain in Settings → CDN, or users get no link for this inbound.'
+        x=dict({k:v for k,v in x.items() if k not in ('echkey','ckey')},ckey_set=bool(x.get('ckey')))
         out.append(dict(x,sni=sni,users=sum(1 for u in us if uhas_ib(u,x)),run=ib_ok(x),warn=warn,
                         hp=(443 if x['sec']=='tls' else 80) if h_on() and ib_h(x) and x['port'] not in (80,443) else 0))
     return out
@@ -1374,31 +1701,28 @@ def xray_apply(force=False):
         def cli(u,pr,flow=False):
             c={'password':u['uuid']} if pr=='trojan' else {'id':u['uuid']}
             c.update(email=u['name'],level=0)
+            if pr=='vmess': c['alterId']=0
             if flow: c['flow']='xtls-rprx-vision'
             return c
         sn={'enabled':True,'destOverride':['http','tls']}; fs=s['fsite']!='off'
-        ibs=[]; hs={'xhttp':{},'vless':{},'trojan':{},'ws':{}}; grp={}; rl=None
+        ibs=[]; hs={'xhttp':{},'vless':{},'trojan':{},'ws':{}}; grp={}; rl=None; rx={}
         for x in ib_load():
             if not ib_ok(x): continue
             mem=[u for u in act if uhas_ib(u,x)]; hk=ib_h(x)
             if hk and h_on():
                 for u in mem: hs[hk][u['name']]=u
             if x['port'] in (80,443): continue
-            if x.get('b')=='reality': rl=mem; continue
+            if x.get('b')=='reality': rl=mem; rx=x; continue
             if x['sec']=='reality' and not s['rpriv']: continue
             g=grp.setdefault(x['port'],{'x':x,'u':{}})
             for u in mem: g['u'][u['name']]=u
         for p,g in grp.items():
             x=g['x']; mem=list(g['u'].values()); pr,net,sec=x['proto'],x['net'],x['sec']
-            st={'network':net,'security':sec}
-            if sec=='tls': al_=ib_alpn(x,True); st['tlsSettings']=dict(cert,**({'alpn':al_} if al_ else {}))
-            if sec=='reality': st['realitySettings']={'target':x.get('target') or x['sni']+':443','serverNames':[x['sni']],'privateKey':s['rpriv'],'shortIds':[s['rsid']]}
-            if net=='xhttp': st['xhttpSettings']={'path':ib_path(x),'mode':'auto'}
-            if net=='ws': st['wsSettings']={'path':ib_path(x)}
-            vs={'clients':[cli(u,pr,sec=='reality' and net=='tcp' and pr=='vless') for u in mem]}
+            st=ib_stream(x,cert)
+            vs={'clients':[cli(u,pr,ib_vision(x)) for u in mem]}
             if pr=='vless': vs['decryption']='none'
-            if net=='tcp' and sec=='tls' and fs: vs['fallbacks']=[{'dest':FBP}]
-            ibs.append({'tag':IBB[x['b']][6] if x.get('b') in IBB else 'ib-%d'%p,'listen':'0.0.0.0','port':p,'protocol':pr,'settings':vs,'streamSettings':st,'sniffing':sn})
+            if net=='tcp' and sec=='tls' and fs and not x.get('obfs'): vs['fallbacks']=[{'dest':FBP}]
+            ibs.append({'tag':IBB[x['b']][6] if x.get('b') in IBB else 'ib-%d'%p,'listen':'0.0.0.0','port':p,'protocol':pr,'settings':vs,'streamSettings':st,'sniffing':ib_sniff(x)})
         if dns_on():
             dl=[u for u in uload() if hasdns(u) and ustate(u)=='active']
             ibs.append({'tag':'vless-dns','listen':'127.0.0.1','port':DNSUP,'protocol':'vless','settings':{'clients':[{'id':u['uuid'],'email':u['name'],'level':0} for u in dl],'decryption':'none'},
@@ -1408,11 +1732,13 @@ def xray_apply(force=False):
             for u in rl:
                 t,sn_=ureal(u,s); grp.setdefault(t,[]).append((u,sn_))
             for t,L in grp.items():
-                pt=rport(t,s); names=sorted({x[1] for x in L}|{t.rsplit(':',1)[0]})
+                pt=rport(t,s); names=sorted({x[1] for x in L}|{t.rsplit(':',1)[0]}|(set(rx.get('snix') or []) if t==dt else set()))
+                rst={'network':'tcp','security':'reality','realitySettings':{'target':t,'serverNames':names,'privateKey':s['rpriv'],'shortIds':ib_sids(rx)}}
+                for k_,v_ in ib_stream(dict(rx,sec='none',net='tcp',flow='')).items():
+                    if k_ in ('sockopt','finalmask'): rst[k_]=v_
                 ibs.append({'tag':'vless-reality' if t==dt else 'vless-reality-%d'%pt,'listen':'0.0.0.0','port':pt,'protocol':'vless',
                             'settings':{'clients':[{'id':u['uuid'],'email':u['name'],'level':0,'flow':'xtls-rprx-vision'} for u,_ in L],'decryption':'none'},
-                            'streamSettings':{'network':'tcp','security':'reality','realitySettings':{'target':t,'serverNames':names,'privateKey':s['rpriv'],'shortIds':[s['rsid']]}},
-                            'sniffing':sn})
+                            'streamSettings':rst,'sniffing':ib_sniff(rx) if rx else sn})
         ibs+=h_xinbounds(s,[cli(u,'vless') for u in hs['xhttp'].values()],[cli(u,'vless') for u in hs['vless'].values()],[cli(u,'trojan') for u in hs['trojan'].values()],[cli(u,'vless') for u in hs['ws'].values()])
         obs=[{'protocol':'freedom','tag':'direct','streamSettings':{'sockopt':{'domainStrategy':'UseIPv4v6'}}},{'protocol':'blackhole','tag':'block'}]; rules=[]
         if s['btorrent']: rules.append({'type':'field','protocol':['bittorrent'],'outboundTag':'block'})
@@ -2267,16 +2593,15 @@ def cdn_link(u,s,x,N):
     dom=s.get('cdn_dom')
     if not dom: return []
     A=(u.get('cdn') if x.get('b') else '') or x.get('addr') or s.get('cdn_addr') or dom; A='['+A+']' if ':' in A else A; pth=quote(ib_path(x),safe=''); dom=x.get('host') or dom
-    ws=x['net']=='ws'; xh=('&type=ws&host=%s&path=%s' if ws else '&type=xhttp&host=%s&path=%s&mode=packet-up')%(quote(dom),pth); tls=x['sec']=='tls'; ok=CF_HTTPS if tls else CF_HTTP
+    xh=ib_tq(x,dom,True); tls=x['sec']=='tls'; ok=CF_HTTPS if tls else CF_HTTP
     own=x['port']; main,alt=own,None
     if h_on() and ib_h(x) and own not in (80,443): main,alt=(443 if tls else 80),(own if own in ok else None)
     if main not in ok: return []
-    pre=('trojan://%s@%s:%d?'%(u['uuid'],A,main)) if x['proto']=='trojan' else ('vless://%s@%s:%d?encryption=none&'%(u['uuid'],A,main))
     if tls:
         al_=ib_alpn(x); f_=ib_fp(x)   # client ↔ Cloudflare
-        url=pre+'security=tls&sni=%s'%quote(dom)+('&fp='+f_ if f_!='none' else '')+('&alpn='+quote(','.join(al_),safe='') if al_ else '')+xh+'#'+N
-    else: url=pre+'security=none'+xh+'#'+N
-    return [(x['name'],url,alt)]
+        q='security=tls&sni=%s'%quote(dom)+('&fp='+f_ if f_!='none' else '')+('&alpn='+quote(','.join(al_),safe='') if al_ else '')+xh
+    else: q='security=none'+xh
+    return [(x['name'],ib_url(x,u,A,main,q,N),alt)]+ib_exts(x,u,q,N)
 def cdn_info():
     s=sload(); d=s.get('cdn_dom','')
     HP=h_ports()[0]
@@ -2452,6 +2777,26 @@ def ports_view():
     for n,p,pr in mine: dup.setdefault((pr,p),[]).append(n)
     clash=[{'port':p,'proto':pr,'names':sorted(set(v))} for (pr,p),v in dup.items() if len(set(v))>1]
     return {'ports':res,'other':other,'clash':clash,'fw':fw is not None}
+CHAPI=os.environ.get('REXUI_CHAPI','https://check-host.net')
+def ib_portcheck(d):
+    """Is the inbound port open? Xray listening, server firewall (ufw), and from the internet (check-host.net, 3 countries)."""
+    x=next((y for y in ib_load() if y['id']==d.get('id')),None)
+    if not x: raise Err('Inbound not found')
+    p=x['port']; o={'port':p,'name':x['name'],'listen':('tcp',p) in ss_listeners() or (p in (80,443) and h_on())}
+    fw=ufw_rules(); o['fw']='off' if fw is None else ('open' if any(r[0]=='tcp' and r[1]<=p<=r[2] for r in fw) else 'closed')
+    host=IPS.get('v4') or pub_addr(); o['host']=host
+    def get(u):
+        rq=urllib.request.Request(u,headers={'Accept':'application/json','User-Agent':'ReXUI'})
+        with urllib.request.urlopen(rq,timeout=15) as r: return json.loads(r.read())
+    try:
+        rid=get('%s/check-tcp?host=%s:%d&max_nodes=3'%(CHAPI,quote(host),p))['request_id']; r={}
+        for i in range(8):
+            time.sleep(2 if i else 4); r=get('%s/check-result/%s'%(CHAPI,rid))
+            if r and all(v is not None for v in r.values()): break
+        ok=sum(1 for v in r.values() if isinstance(v,list) and v and isinstance(v[0],dict) and 'error' not in v[0] and v[0].get('time') is not None)
+        o['out']={'ok':ok,'n':len(r)}
+    except Exception as e: o['out']={'err':'The online checker (check-host.net) could not be reached: '+str(e)[:60]}
+    return o
 def fw_open(d):
     pr=str(d.get('proto','tcp'))
     if pr not in ('tcp','udp'): raise Err('bad request')
@@ -3085,7 +3430,7 @@ def state(uh=''):
     return {'info':dict(INFO,uptime=float(rd('/proc/uptime','0').split()[0]),puptime=time.time()-START),
             'cpu':S['cpu'],'ram':[m['MemTotal']-m['MemAvailable'],m['MemTotal']],'swap':[m.get('SwapTotal',0)-m.get('SwapFree',0),m.get('SwapTotal',0)],
             'disk':[du.used,du.total],'rx':S['rx'],'tx':S['tx'],'rxt':S['rxt'],'txt':S['txt'],'hist':H,'tcp':tc,'udp':uc,
-            'ip':IPS,'stats':stats(),'tools':TOOLS,'fs':FS['err'],'xup':XUP,'rxup':rx_info(),'ddns':dict(DDNS,dom=sload()['ddns_dom']),'stime':time.strftime('%H:%M %Z'),'svc':services(),'xray':xinfo(),'proc':procinfo(),'online':online(),'ibs':ib_view(),'backups':sorted(os.listdir(BKD))[::-1] if os.path.isdir(BKD) else [],**ustate_part(uh),'cert':certinfo(),'set':dict({k:v for k,v in sload().items() if k not in ('rpriv','tgtoken','ddns_tok')},tgmask=mask(sload()['tgtoken']),ddmask=mask(sload()['ddns_tok'])),'tfa':bool(lread().get('totp')),'warp':warp_info(),'geo':geo_ok(),'addr':pub_addr(),'me':curuser(),'ov':ov_on(),'hy':hy_on(),'wg':wg_on(),'dns':dns_info(),'cdn':cdn_info(),'pays':pay_load(),'pvals':pay_vals(),'h443':h_info(),
+            'ip':IPS,'stats':stats(),'tools':TOOLS,'fs':FS['err'],'xup':XUP,'rxup':rx_info(),'ddns':dict(DDNS,dom=sload()['ddns_dom']),'stime':time.strftime('%H:%M %Z'),'svc':services(),'xray':xinfo(),'proc':procinfo(),'online':online(),'ibs':ib_view(),'cpath':cert_paths(),'backups':sorted(os.listdir(BKD))[::-1] if os.path.isdir(BKD) else [],**ustate_part(uh),'cert':certinfo(),'set':dict({k:v for k,v in sload().items() if k not in ('rpriv','tgtoken','ddns_tok')},tgmask=mask(sload()['tgtoken']),ddmask=mask(sload()['ddns_tok'])),'tfa':bool(lread().get('totp')),'warp':warp_info(),'geo':geo_ok(),'addr':pub_addr(),'me':curuser(),'ov':ov_on(),'hy':hy_on(),'wg':wg_on(),'dns':dns_info(),'cdn':cdn_info(),'pays':pay_load(),'pvals':pay_vals(),'h443':h_info(),
             'port':E.get('PANEL_PORT',''),'path':E.get('WEB_PATH',''),'ports':dict({k:v for k,v in E.items() if k.endswith('_PORT')},REALITY_PORT=str(P('REALITY_PORT',8444)),TROJAN_PORT=str(P('TROJAN_PORT',2096)),OVPN1_PORT=str(P('OVPN1_PORT',1194)),OVPN2_PORT=str(P('OVPN2_PORT',110)),SQUID_PORT=str(P('SQUID_PORT',3128)),HY_PORT=str(hyport()),WG_PORT=str(wgport()),HY_HOP='%d-%d'%hyhop() if hyhop() else '')}
 
 # ---------- stats: server traffic, protocols, top users ----------
@@ -3178,12 +3523,13 @@ def act_desc(r,d,res):
     if r=='/api/trial': return 'Created %s trial user %s'%({'v2ray':'V2Ray','ssh':'SSH','ovpn':'OpenVPN','hy2':'UDP (Hysteria2)','dns':'DNS','wg':'WireGuard'}.get(d.get('kind'),''),res.get('name',''))
     if r.startswith('/api/inbound/'):
         a=r[13:]; nm=str(d.get('name') or next((x['name'] for x in ib_load() if x['id']==d.get('id')),'') or '')
-        return {'add':'Added inbound %s','edit':'Changed inbound %s','toggle':'Turned inbound %s on/off','del':'Deleted inbound %s','restore':'Added the default inbounds back%s','move':'Moved inbound %s'}.get(a,'Inbound %s')%(nm if a!='restore' else '')
+        return {'add':'Added inbound %s','edit':'Changed inbound %s','toggle':'Turned inbound %s on/off','del':'Deleted inbound %s','restore':'Added the default inbounds back%s','move':'Moved inbound %s','quick':'Added the 1-click inbounds%s','quickdel':'Removed the 1-click inbounds%s'}.get(a,'Inbound %s')%(nm if a not in ('restore','quick','quickdel') else '')
     if r=='/api/ovpn-set': return 'Changed the OpenVPN default Host'
     if r=='/api/dns-set': return 'Changed the DNS tunnel domain'
     if r=='/api/hy-set': return 'Changed the UDP speed limit to %s Mbps'%(d.get('hy_bw') or 0)
     if r=='/api/cdn-set': return 'Changed the CDN domain to %s'%(d.get('cdn_dom') or 'off')
     if r=='/api/perf-set': return 'Changed the performance mode to %s'%d.get('perf')
+    if r=='/api/jsub-set': return 'Changed the JSON subscription settings'
     if r=='/api/payload/save': return 'Saved the payload %s'%str(d.get('name',''))[:40]
     if r=='/api/payload/del': return 'Deleted a payload'
     if r=='/api/payload/import': return 'Imported payloads'
@@ -3582,13 +3928,53 @@ def rfind(d):
         with cf.ThreadPoolExecutor(10) as ex: res=list(ex.map(_probe,list(dict.fromkeys(extra+RCAND))))
         TOOLS['rfind']={'t':int(time.time()),'res':sorted(res,key=lambda r:(not r['ok'],not r.get('h2'),r.get('ms',9e9)))}
     threading.Thread(target=go,daemon=True).start(); return {'ok':1}
+def rscan(d):
+    """Check one site for Reality: TLS 1.3, ALPN, certificate names and expiry, latency."""
+    t=str(d.get('target') or '').strip().lower()
+    m=re.fullmatch(r'([a-z0-9.-]+)(?::(\d{1,5}))?',t)
+    if not m or not re.search('[a-z]',m[1]): raise Err('Write a domain like www.microsoft.com:443')
+    h,pt=m[1],int(m[2] or 443); sni=hostok(d.get('sni') or h,'SNI') or h
+    t0=time.time(); o={'target':'%s:%d'%(h,pt),'sni':sni}
+    try:
+        c=ssl.create_default_context(); c.set_alpn_protocols(['h2','http/1.1'])
+        with socket.create_connection((h,pt),timeout=6) as k:
+            o['ip']=k.getpeername()[0]; t1=time.time()
+            with c.wrap_socket(k,server_hostname=sni) as z:
+                o['ms']=round((time.time()-t1)*1000); o['tls']=z.version(); o['alpn']=z.selected_alpn_protocol() or ''; o['cipher']=(z.cipher() or [''])[0]
+                ce=z.getpeercert() or {}
+    except ssl.SSLCertVerificationError as e: return dict(o,ok=False,err='Certificate is not valid for %s (%s)'%(sni,(e.verify_message or '')[:60]))
+    except Exception as e: return dict(o,ok=False,err=(str(e) or e.__class__.__name__)[:90])
+    sub=dict(x[0] for x in ce.get('subject',()) if x); iss=dict(x[0] for x in ce.get('issuer',()) if x)
+    o['cn']=sub.get('commonName',''); o['issuer']=iss.get('organizationName') or iss.get('commonName','')
+    o['names']=[v for k,v in ce.get('subjectAltName',()) if k=='DNS'][:30]
+    try: ex=ssl.cert_time_to_seconds(ce['notAfter']); o['exp']=time.strftime('%Y-%m-%d',time.gmtime(ex)); o['days']=int((ex-time.time())//86400)
+    except Exception: pass
+    o['ok']=o.get('tls')=='TLSv1.3'
+    if not o['ok']: o['err']='The site answers with %s, Reality needs TLS 1.3'%o.get('tls','?')
+    o['h2']=o.get('alpn')=='h2'
+    return o
+def rtargets(d):
+    """Find Targets: check a list of big sites (plus your own) and sort the good ones first."""
+    extra=[x for x in re.split(r'[\s,]+',str(d.get('extra','')).lower()) if re.fullmatch(r'[a-z0-9-]+(\.[a-z0-9-]+)+',x)][:10]
+    import concurrent.futures as cf
+    with cf.ThreadPoolExecutor(16) as ex: res=list(ex.map(_probe,list(dict.fromkeys(extra+RCAND))))
+    return {'ok':1,'res':sorted(res,key=lambda r:(not r['ok'],not r.get('h2'),r.get('ms',9e9)))}
+def jsub_set(d):
+    s=sload()
+    for k in ('jsub','jfrag','jnoise'):
+        if isinstance(d.get(k),bool): s[k]=d[k]
+    pk=str(d.get('jpk',s['jpk'])).strip(); ln=str(d.get('jlen',s['jlen'])).strip(); it=str(d.get('jint',s['jint'])).strip()
+    if not re.fullmatch(r'tlshello|\d{1,2}-\d{1,2}',pk): raise Err('Packets: tlshello or a range like 1-3')
+    for v,t in ((ln,'Length'),(it,'Interval')):
+        if not re.fullmatch(r'\d{1,4}(-\d{1,4})?',v): raise Err(t+': a number or a range like 100-200')
+    s['jpk'],s['jlen'],s['jint']=pk,ln,it; wjson(SETF,s,0o600); return {'ok':1}
 def rdefault(d):
     h=hostok(d.get('domain'),'Domain')
     if not h or not tls13(h): raise Err('%s did not answer with TLS 1.3'%h)
     s=sload(); s['rsni']=h; wjson(SETF,s,0o600); xray_apply(); return {'ok':1}
 
 # ---------- ReXUI new version check (GitHub, every 6 hours) ----------
-RXVER='1.8'; RXURL=os.environ.get('REXUI_UPURL','https://raw.githubusercontent.com/chaliraza777/ReXUI/main/install.sh'); RXUPF=T+'/rxup.json'; RXUP={'latest':'','t':0}
+RXVER='1.9'; RXURL=os.environ.get('REXUI_UPURL','https://raw.githubusercontent.com/chaliraza777/ReXUI/main/install.sh'); RXUPF=T+'/rxup.json'; RXUP={'latest':'','t':0}
 def vtup(v): return tuple(int(x) for x in re.findall(r'\d+',v)[:3])
 def rx_check():
     import urllib.request
@@ -3757,12 +4143,19 @@ class Hd(BaseHTTPRequestHandler):
             u=next((x for x in uload() if hmac.compare_digest(x['sub'],m[1])),None)
             if not u or not haswg(u): return self.nf()
             return self.wg_out(u)
+        m=re.fullmatch(r'/sub/([0-9a-f]{32})/json',p)
+        if m:
+            u=next((x for x in uload() if hmac.compare_digest(x['sub'],m[1])),None)
+            if not u or not hasx(u) or not sload().get('jsub',True): return self.nf()
+            ex=0 if u['exp']=='never' else int(datetime.datetime.fromisoformat(u['exp']+'T23:59:59').timestamp())
+            return self.out(200,body=json.dumps(json_sub(u),indent=1).encode(),ct='application/json; charset=utf-8',hdr=(('Subscription-Userinfo','upload=%d; download=%d; total=%d; expire=%d'%(u['up'],u['down'],int(u['lim']*GB),ex)),
+                            ('Profile-Update-Interval','12'),('Profile-Title','base64:'+base64.b64encode(((sload()['brand'] or 'ReXUI')+' '+u['name']).encode()).decode())))
         m=re.fullmatch(r'/sub/([0-9a-f]{32})',p)
         if m:
             u=next((x for x in uload() if hmac.compare_digest(x['sub'],m[1])),None)
             if not u: return self.nf()
             if 'text/html' in self.headers.get('Accept','') and 'raw' not in self.path.split('?',1)[-1]:
-                d=detail(u['name']); keep=('name','pw','exp','lim','used','up','down','st','sub','links','addr','whost','ports','alt','plaindomain','created','dev','hist','fdays','expts','reason','kind','ovpn','hy2','wg','dns','pays')
+                d=detail(u['name']); d['links']=[{k:v for k,v in l.items() if k!='json'} for l in d['links']]; keep=('name','pw','exp','lim','used','up','down','st','sub','jsub','links','addr','whost','ports','alt','plaindomain','created','dev','hist','fdays','expts','reason','kind','ovpn','hy2','wg','dns','pays')
                 data=json.dumps(dict({k:d[k] for k in keep},announce=sload()['announce'],**brand())).replace('<','\\u003c').replace('>','\\u003e').replace('&','\\u0026')
                 return self.out(200,body=rd(UHTML).replace('__DATA__',data).encode(),ct='text/html; charset=utf-8')
             body=base64.b64encode('\n'.join(l[1] for l in links(u)).encode())
@@ -3883,12 +4276,12 @@ class Hd(BaseHTTPRequestHandler):
            '/api/bulk':lambda:bulk(d),'/api/automation':lambda:automation_save(d),'/api/tg-test':lambda:tg_test(d),'/api/tg-chat':lambda:tg_findchat(d),
            '/api/trial':lambda:trial_new(d),'/api/csv-import':lambda:csv_import(d),'/api/appearance':lambda:appearance_save(d),
            '/api/logs':lambda:logs(self.tok()),'/api/session-kill':lambda:session_kill(self.tok(),d),'/api/tg-backup':tg_backup_now,
-           '/api/fsite':lambda:fsite_save(d),'/api/rfind':lambda:rfind(d),'/api/rdefault':lambda:rdefault(d),'/api/xcheck':xcheck,'/api/xupdate':lambda:xup_bg(bool(d.get('force'))),
+           '/api/fsite':lambda:fsite_save(d),'/api/rfind':lambda:rfind(d),'/api/rscan':lambda:rscan(d),'/api/rtargets':lambda:rtargets(d),'/api/jsub-set':lambda:jsub_set(d),'/api/rdefault':lambda:rdefault(d),'/api/xcheck':xcheck,'/api/xupdate':lambda:xup_bg(bool(d.get('force'))),
            '/api/xauto':lambda:xauto_save(d),'/api/ddns':lambda:ddns_save(d),'/api/panel-path':lambda:panel_path(d),'/api/logview':lambda:logview(d),
            '/api/maint':maint_info,'/api/cleanup':cleanup,'/api/swap':lambda:swap_set(d),'/api/autoclean':lambda:autoclean_save(d),
            '/api/speedtest':speedtest,'/api/reboot':lambda:reboot_save(d),'/api/subpage':lambda:subpage_save(d),'/api/ovpn-set':lambda:ov_set(d),'/api/dns-set':lambda:dns_set(d),'/api/hy-set':lambda:hy_set(d),'/api/cdn-set':lambda:cdn_set(d),'/api/perf-set':lambda:perf_set(d),
            '/api/payload/save':lambda:pay_save(d),'/api/payload/del':lambda:pay_del(d),'/api/payload/import':lambda:pay_import(d),'/api/payload/test':lambda:pay_test(d),
-           '/api/check':server_check,'/api/check/fix':lambda:check_fix(d),'/api/ports':ports_view,'/api/fw-open':lambda:fw_open(d),'/api/h443':lambda:h_set(d)}.get(r)
+           '/api/check':server_check,'/api/check/fix':lambda:check_fix(d),'/api/ports':ports_view,'/api/fw-open':lambda:fw_open(d),'/api/ib-portcheck':lambda:ib_portcheck(d),'/api/h443':lambda:h_set(d)}.get(r)
         if not f: raise Err('not found')
         return f()
 def ctx():
@@ -4058,7 +4451,8 @@ label{display:block;font-size:13px;color:var(--m);font-weight:600;margin:12px 0 
 #dt{position:fixed;inset:0;z-index:25;background:rgba(10,14,22,.45);display:flex;justify-content:flex-end}#dt[hidden],#md[hidden],#lg[hidden],#app[hidden]{display:none}
 .dts{width:100%;max-width:600px;height:100%;overflow:auto;background:var(--bg);border-left:1px solid var(--l);padding:0 16px 40px}.dts .card{margin-bottom:12px}
 .dth{position:sticky;top:0;z-index:2;background:var(--bg);display:flex;align-items:center;justify-content:space-between;padding:14px 0;margin-bottom:6px;border-bottom:1px solid var(--l)}
-.cb{padding:10px 0;border-bottom:1px solid var(--l)}.cb:last-child{border:0;padding-bottom:0}.cbh{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.cb{padding:10px 0;border-bottom:1px solid var(--l)}.jsw{margin-top:8px;border:1px solid var(--l);border-radius:8px;overflow:hidden}.jsh{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 8px;background:var(--c2)}.jsh small{color:var(--m)}.jsb{margin:0;padding:10px;max-height:320px;overflow:auto;font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre;background:var(--c);color:var(--t)}
+#dt .lab{color:var(--t);font-size:13px;font-weight:700}#dt .cbh small{color:var(--t);font-weight:600}.cb:last-child{border:0;padding-bottom:0}.cbh{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
 .cbh small{font-size:12px;font-weight:700;letter-spacing:.4px;color:var(--m);text-transform:uppercase}
 .code{display:block;width:100%;text-align:left;font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace;color:var(--t);background:var(--c2);border:1px solid var(--l);border-radius:8px;padding:10px 12px;white-space:pre-wrap;word-break:break-all;cursor:copy}
 .code:hover{border-color:var(--a)}.sm{padding:5px 11px;font-size:12.5px}
@@ -4193,9 +4587,46 @@ a.btn{text-decoration:none;color:var(--t)}a.btn.pri{color:#fff}
 .sq small{font-weight:500;font-size:11px;color:var(--m);line-height:1.25}.sq.on{border-color:var(--a);background:var(--a2);color:var(--a)}.sq.on small{color:var(--a)}.sq:disabled{opacity:.35;cursor:not-allowed}
 .ibp{border:1px solid var(--l);border-radius:8px;padding:4px 10px;max-height:190px;overflow:auto;margin:4px 0 10px}.ibp label.ck{display:flex;gap:8px;align-items:flex-start;padding:6px 0;margin:0;font-size:13px;border-bottom:1px solid var(--l)}.ibp label.ck:last-child{border:0}.ibp .m{color:var(--m);font-size:12px}
 .ibg2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}.ibg2>div{min-width:0}@media (max-width:560px){.ibg2{grid-template-columns:1fr}}.alpg{display:flex;gap:16px;flex-wrap:wrap;padding:6px 0 2px}.alpc{display:inline-flex;align-items:center;gap:6px;font-weight:500;margin:0;cursor:pointer}.alpc input{width:16px;height:16px;margin:0;accent-color:var(--a)}#ib_fp{width:100%}
+.ibx{max-width:640px!important;position:relative}.ixh{display:flex;align-items:center;justify-content:space-between}.ixh h2{margin:0}.ixc{border:0;background:none;font-size:24px;line-height:1;color:var(--m);cursor:pointer;padding:2px 6px}
+.ixt{display:flex;gap:18px;border-bottom:1px solid var(--l);margin:10px 0 8px;overflow-x:auto;scrollbar-width:none}.ixt button{border:0;background:none;padding:9px 0;font:inherit;font-size:13.5px;color:var(--m);border-bottom:2px solid transparent;white-space:nowrap;cursor:pointer}.ixt button.on{color:var(--a);border-color:var(--a);font-weight:600}
+.ir{display:grid;grid-template-columns:150px minmax(0,1fr);gap:12px;align-items:center;margin:9px 0}.ir>label,.ir>span{text-align:right;margin:0;font-weight:500;font-size:13px;color:var(--t)}.ic{min-width:0}.ic input,.ic select{margin:0;width:100%}.ic input.sm{max-width:130px}.ir .note{margin:-4px 0 0;font-size:12px}
+.q{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border:1px solid var(--m);border-radius:50%;font-size:10px;color:var(--m);margin-left:4px;cursor:help;vertical-align:1px}
+.iseg{display:inline-flex;border:1px solid var(--l);border-radius:8px;overflow:hidden;flex-wrap:wrap}.iseg button{border:0;border-right:1px solid var(--l);background:var(--c);padding:7px 14px;font:inherit;font-size:13px;color:var(--t);cursor:pointer}.iseg button:last-child{border-right:0}.iseg button.on{background:var(--a);color:#fff}.iseg button:disabled{opacity:.4;cursor:not-allowed}
+.tgs{display:flex;gap:6px;flex-wrap:wrap}.tgs button{border:1px solid var(--l);background:var(--c);border-radius:6px;padding:5px 11px;font:inherit;font-size:12.5px;color:var(--m);cursor:pointer}.tgs button.on{border-color:var(--a);background:var(--a2);color:var(--a);font-weight:600}
+.chips[data-ck]{display:flex;flex-wrap:wrap;gap:5px;align-items:center;border:1px solid var(--l);border-radius:8px;padding:5px 6px;background:var(--c);min-height:38px}.chips[data-ck] input{flex:1;min-width:90px;border:0!important;padding:3px 4px!important;background:none;box-shadow:none!important;width:auto!important}
+.ichip{display:inline-flex;align-items:center;gap:3px;background:var(--c2);border:1px solid var(--l);border-radius:5px;padding:1px 3px 1px 7px;font-size:12.5px}.ichip button{border:0;background:none;color:var(--m);font-size:15px;line-height:1;cursor:pointer;padding:0 3px}
+.cg{border:1px solid var(--l);background:var(--c2);border-radius:6px;width:32px;height:30px;font-size:16px;cursor:pointer;color:var(--a);flex:none}
+.tgt{display:flex;gap:6px;align-items:center}.tgt input{flex:1;min-width:0}.tgt .btn{flex:none;white-space:nowrap}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.isub{border-top:1px solid var(--l);margin:14px 0 4px;padding-top:8px;font-size:12px;font-weight:600;color:var(--m);text-transform:uppercase;letter-spacing:.04em}
+.kvl,.exl{display:flex;flex-direction:column;gap:6px}.kvr{display:grid;grid-template-columns:1fr 1.4fr 32px;gap:6px}.exr{display:grid;grid-template-columns:1.6fr 74px 1fr 32px;gap:6px}.kvr input,.exr input{margin:0;min-width:0}
+.rm{border:1px solid var(--l);background:var(--c);border-radius:6px;color:var(--r);cursor:pointer;display:flex;align-items:center;justify-content:center}.addb{align-self:flex-start;display:inline-flex;align-items:center;gap:5px;border:1px dashed var(--a);color:var(--a);background:none;border-radius:6px;padding:5px 10px;font:inherit;font-size:12.5px;cursor:pointer}
+.scb{border:1px solid color-mix(in srgb,var(--g) 45%,var(--l));background:color-mix(in srgb,var(--g) 8%,var(--c));border-radius:9px;padding:9px 12px;font-size:12.5px}.scb>b{color:var(--g);display:flex;align-items:center;gap:5px;margin-bottom:3px}.scb div{display:grid;grid-template-columns:96px minmax(0,1fr);gap:6px;padding:1px 0}.scb div span:first-child{color:var(--m)}.scb div span:last-child{overflow-wrap:anywhere}.scb p{margin:5px 0 0;color:var(--m)}
+.scb.bad{border-color:color-mix(in srgb,var(--r) 45%,var(--l));background:color-mix(in srgb,var(--r) 7%,var(--c))}.scb.bad>b{color:var(--r)}
+.fpo{position:absolute;inset:0;background:rgba(10,14,20,.45);border-radius:inherit;display:flex;align-items:flex-start;justify-content:center;padding:40px 10px;z-index:5}.fpc{background:var(--c);border:1px solid var(--l);border-radius:12px;padding:14px 16px;width:100%;max-width:560px;box-shadow:0 10px 40px rgba(0,0,0,.3);max-height:calc(100% - 40px);overflow:auto}
+.fpt{border:1px solid var(--l);border-radius:8px;overflow:auto;max-height:340px}.fpt table{width:100%;border-collapse:collapse;font-size:12.5px}.fpt th{position:sticky;top:0;background:var(--c2);text-align:left;font-weight:600;padding:7px 8px}.fpt td{padding:6px 8px;border-top:1px solid var(--l);white-space:nowrap}.fpt .btn{padding:3px 10px;font-size:12px}
+.fpt td b{display:block;font-weight:600}.fpt td small{display:block;font-size:11px;white-space:normal}.fok{color:var(--g);background:color-mix(in srgb,var(--g) 12%,var(--c));border-radius:4px;padding:1px 6px;font-size:11.5px}.fno{color:var(--r);font-size:11.5px}
+@media (max-width:560px){.ir{grid-template-columns:104px minmax(0,1fr);gap:8px}.ir>label,.ir>span{font-size:12.5px}.exr{grid-template-columns:1fr 64px 32px}.exr input[data-er]{grid-column:1/3}.ixt{gap:14px}.tgt:not(.nw){flex-wrap:wrap}.tgt:not(.nw) input{flex-basis:100%}.fst{display:none}.scb div{grid-template-columns:78px minmax(0,1fr)}.fpc{padding:12px}}
+/* 3X-UI look for inbounds (blue) */
+.ibx,.ibc,.ibsc{--a:#1677ff;--a2:color-mix(in srgb,#1677ff 10%,var(--c))}
+.ibx{max-width:620px!important;padding:20px 24px 18px!important;border-radius:8px!important}.ibx .ixh h2{font-size:16px;font-weight:600}
+.ibx .ixt{gap:30px;margin:12px 0 16px}.ibx .ixt button{font-size:14px;padding:10px 0;font-weight:400}.ibx .ixt button.on{font-weight:400}
+.ibx .ir{grid-template-columns:150px minmax(0,1fr);gap:16px;margin:0 0 14px}.ibx .ir>label,.ibx .ir>span{font-size:14px;font-weight:400}
+.ibx .ic input,.ibx .ic select,.ibx .exr input,.ibx .kvr input,.ibx .fpc input{height:32px;padding:4px 11px;border-radius:6px;font-size:14px;border:1px solid var(--l);min-height:0}
+.ibx .ic input:focus,.ibx .ic select:focus{border-color:var(--a);box-shadow:0 0 0 2px color-mix(in srgb,var(--a) 18%,transparent);outline:0}
+.ibx .ic input.sm{max-width:120px}
+.ibx .sw{width:44px;height:22px;border-radius:11px;background:rgba(0,0,0,.25)}.ibx .sw.on{background:var(--a)}.ibx .sw i{top:2px;left:2px;width:18px;height:18px}.ibx .sw.on i{left:24px}
+.ibx .iseg{border-radius:6px}.ibx .iseg button{padding:4px 15px;font-size:14px;background:var(--c);color:var(--t);border-right:1px solid var(--l)}.ibx .iseg button.on{background:var(--c);color:var(--a);box-shadow:inset 0 0 0 1px var(--a)}
+.ibx .tgs button{border-radius:4px;font-size:12px;padding:2px 8px}.ibx .tgs button:disabled{cursor:not-allowed;opacity:.75}.ibx .tgs button.on{background:var(--a2);border-color:color-mix(in srgb,var(--a) 45%,var(--l));color:var(--a)}
+.ibx .chips[data-ck]{min-height:32px;border-radius:6px;padding:2px 4px}.ibx .ichip{border-radius:4px;font-size:12px}
+.ibx .btn{border-radius:6px;padding:4px 15px;font-size:14px;height:32px}.ibx .mr{margin-top:20px}.ibx .q{width:13px;height:13px;font-size:9px}
+.ibc .btn.pri,.ibx .btn.pri{background:var(--a);border-color:var(--a);border-radius:6px}
+@media (max-width:560px){.ibx{padding:16px!important}.ibx .ir{grid-template-columns:108px minmax(0,1fr);gap:10px}.ibx .ir>label,.ibx .ir>span{font-size:13px}.ibx .ixt{gap:18px}}
+.pck{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--l)}.pck:last-child{border:0}.pck>b{flex:none;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff;background:var(--m)}.pck.ok>b{background:var(--g)}.pck.no>b{background:var(--r)}.pck span{display:block;font-size:14px}.pck small{display:block;color:var(--m);font-size:12.5px;margin-top:2px}
+.ita{min-height:84px;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;border-radius:6px;padding:6px 10px}.btn.cdl{color:var(--r);border-color:color-mix(in srgb,var(--r) 55%,var(--l))}
 .ibsum{font-size:12.5px;background:var(--c2);border-radius:8px;padding:8px 10px;margin:6px 0 4px}
 .ibs3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.ibs3 span{display:block;font-size:12px;color:var(--m)}.ibs3 b{font-size:20px}
-.ibtop{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.ibtop input{flex:1;min-width:140px;max-width:260px;margin:0}
+.ibtop{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.ibq1{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}.btn.qk{padding:6px 12px;font-size:13px;min-height:0;color:var(--r);border-color:color-mix(in srgb,var(--r) 50%,var(--l));background:color-mix(in srgb,var(--r) 6%,var(--c))}.btn.qk.on{background:var(--r);color:#fff;border-color:var(--r)}.btn.qk:disabled{opacity:.5}.ibqt{font-size:10.5px;font-weight:600;color:var(--r);border:1px solid color-mix(in srgb,var(--r) 40%,var(--l));border-radius:4px;padding:0 5px;margin-left:6px;vertical-align:1px}.ibtop input{flex:1;min-width:140px;max-width:260px;margin:0}
 .ibtw{overflow-x:auto;margin-top:14px;border:1px solid var(--l);border-radius:10px}.ibtab{width:100%;border-collapse:collapse;font-size:13.5px;min-width:640px}
 .ibtab th{background:var(--c2);text-align:left;font-weight:600;padding:10px 12px;white-space:nowrap;border-bottom:1px solid var(--l)}.ibtab td{padding:10px 12px;border-bottom:1px solid var(--l);vertical-align:middle}
 .ibtab tr:last-child td{border:0}.ibtab tr.off td{opacity:.6}.ibtab tr.off td:nth-child(3){opacity:1}.ibtab .m{font-size:11.5px;color:var(--m)}
@@ -4244,9 +4675,9 @@ a.btn{text-decoration:none;color:var(--t)}a.btn.pri{color:#fff}
 <label for="lp">Password</label><div class="fi"><span data-i="lock"></span><input id="lp" type="password" autocomplete="current-password"><button type="button" class="ib" id="lpe" aria-label="Show password"></button></div>
 <div id="lcw" hidden><label for="lc">6-digit code from your authenticator app</label><div class="fi"><span data-i="shield"></span><input id="lc" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></div></div>
 <div id="capw" hidden><label for="lcap">Type the letters from the picture</label><div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><img id="capi" alt="Security check picture" width="200" height="64" style="border-radius:8px;max-width:100%"><button type="button" class="ib" id="capr" aria-label="Show a new picture"></button></div><div class="fi"><span data-i="shield"></span><input id="lcap" autocapitalize="characters" autocomplete="off" spellcheck="false" maxlength="8"></div></div>
-<div class="err" id="le" role="alert"></div><button class="btn pri lbtn">Log in</button><p class="lft">Protected panel · ReXUI v1.8</p></form></div>
-<div id="app" hidden><aside><div class="brand"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search" title="Search (/)" style="margin-left:auto"></button><button class="ib thb" id="th" aria-label="Switch theme"></button></div><nav id="nav"></nav><a class="pwr" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by <b>ReXUI</b> v1.8</a></aside>
-<main><div id="mt"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search"></button><button class="ib thb" aria-label="Switch theme"></button><button class="ib" id="lo2" aria-label="Log out"></button></div><div id="cbn"></div><div class="hdr"><span class="chip" id="xs"></span><span class="ver">ReXUI v1.8</span><small class="m" id="upd" style="margin-left:auto"></small></div><div id="pg"></div><a class="pwm" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by ReXUI v1.8</a></main><nav id="bn" aria-label="Main"></nav></div>
+<div class="err" id="le" role="alert"></div><button class="btn pri lbtn">Log in</button><p class="lft">Protected panel · ReXUI v1.9</p></form></div>
+<div id="app" hidden><aside><div class="brand"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search" title="Search (/)" style="margin-left:auto"></button><button class="ib thb" id="th" aria-label="Switch theme"></button></div><nav id="nav"></nav><a class="pwr" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by <b>ReXUI</b> v1.9</a></aside>
+<main><div id="mt"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search"></button><button class="ib thb" aria-label="Switch theme"></button><button class="ib" id="lo2" aria-label="Log out"></button></div><div id="cbn"></div><div class="hdr"><span class="chip" id="xs"></span><span class="ver">ReXUI v1.9</span><small class="m" id="upd" style="margin-left:auto"></small></div><div id="pg"></div><a class="pwm" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by ReXUI v1.9</a></main><nav id="bn" aria-label="Main"></nav></div>
 <div id="dt" hidden><div class="dts"><div class="dth"><b>User details</b><button class="btn sm" id="dx" aria-label="Close">Close</button></div><div id="dtb"></div></div></div>
 <div id="md" hidden><form class="card" id="mf"></form></div>
 <div id="sxo" hidden><div class="sxp" role="dialog" aria-label="Search"><div class="fi"><span data-i="search"></span><input id="sxi" placeholder="Search users, settings, tools..." autocomplete="off" spellcheck="false" aria-label="Search"><button type="button" class="btn sm" id="sxx">Esc</button></div><div id="sxr" role="listbox"></div></div></div>
@@ -4266,7 +4697,7 @@ function toast(t,e){const o=document.createElement('div');o.className='toast'+(e
 let D=null,pg=(()=>{try{const h=decodeURIComponent(location.hash.slice(1));return /^(ov|ib|st|on|sc|us:(v2ray|ssh|ovpn|hy2|wg|dns))$/.test(h)?h:'ov'}catch(e){return 'ov'}})(),hideIp=true,gid=0,SAC=null,RG=ls('rx-range')||'live',HMD=null,HMT=0;
 async function loadHist(){try{const r=await fetch('api/hist',{cache:'no-store'});if(r.ok){HMD=await r.json();HMT=Date.now()}}catch(e){}}const show=v=>{$('#lg').hidden=v;$('#app').hidden=!v};
 function theme(t){const de=document.documentElement;if(t=='auto')delete de.dataset.theme;else if(t)de.dataset.theme=t;const dk=de.dataset.theme?de.dataset.theme!='light':matchMedia('(prefers-color-scheme: dark)').matches;document.querySelectorAll('.thb').forEach(b=>{b.innerHTML=I(dk?'sun':'moon',18);b.setAttribute('aria-label',dk?'Switch to light theme':'Switch to dark theme')});return dk}
-try{const t=localStorage.getItem('rx-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}
+{let t='light';try{t=localStorage.getItem('rx-theme')||'light'}catch(e){}if(t!='auto')document.documentElement.dataset.theme=t}
 document.querySelectorAll('.thb').forEach(b=>b.onclick=()=>{const n=theme()?'light':(ls('rx-dark')||'dark');theme(n);try{localStorage.setItem('rx-theme',n)}catch(e){}if(D&&pg=='ov')ov()});theme();
 const AC={blue:['#1f6feb','#4c8dff','Blue'],teal:['#0d9488','#2dd4bf','Teal'],green:['#15803d','#4ade80','Green'],purple:['#7c3aed','#a78bfa','Purple'],pink:['#db2777','#f472b6','Pink'],orange:['#ea580c','#fb923c','Orange'],indigo:['#4f46e5','#818cf8','Indigo']};
 function accent(k){const a=AC[k]||AC.teal,d1=':root:not([data-theme=light])',d2=':root[data-theme=dark],:root[data-theme=black]',pt=q=>k=='blue'?'':q.split(',').map(x=>`${x} .pri,${x} .pri:hover`).join(',')+'{color:#0b1020}';
@@ -4486,7 +4917,7 @@ return `${o.ns?'':DNSH()}<div class="card"><div class="ct"><div class="lab">${I(
 ${[['Nameserver (NS)',o.ns||'Not set'],['DNS resolver','8.8.8.8 · DoH: https://dns.google/dns-query'],['HTTP Custom','SlowDNS · Type Auto']].map(r=>`<div class="kv"><span>${r[0]}</span><b>${X(r[1])}</b></div>`).join('')}${cbox('Public key',o.pub,false)}${u.links.map(l=>cbox(l.name,l.url)).join('')}
 <div class="ua" style="margin-top:10px"><button class="btn sm" data-ua="newuuid">${I('refresh',14)}New UUID</button></div></div>`}
 function hyCard(u,cbox){const o=u.hy2;return `${o.on?'':`<div class="banner w" role="status">${I('bolt',17)}<div><b>Hysteria2 is not installed yet.</b> Run the installer again to add it.</div></div>`}
-<div class="card"><div class="ct"><div class="lab">Subscription link</div><button class="btn sm" data-ua="newsub">${I('refresh',14)}New link</button></div><p class="note">Import into v2rayNG, NekoBox or Hiddify. It has the Hysteria2 configs and shows usage and expiry.</p>${cbox('Subscription',u.sub)}<a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>
+<div class="card"><div class="ct"><div class="lab">Subscription link</div><button class="btn sm" data-ua="newsub">${I('refresh',14)}New link</button></div><p class="note">Import into v2rayNG, NekoBox or Hiddify. It has the Hysteria2 configs and shows usage and expiry.</p>${cbox('Subscription',u.sub)}${u.jsub?cbox('JSON subscription (v2rayNG, fragment)',u.jsub):''}<a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>
 <div class="card"><div class="lab">${I('bolt',15)}Hysteria2 (UDP)</div><p class="note">Tap a config to copy it. Port hopping changes the UDP port all the time, which helps when the network slows down one port. To change the password use Edit; the user then needs the new config.</p>${u.links.map(l=>cbox(l.name,l.url)).join('')}
 <div style="margin-top:10px">${[['Server',u.addr],['UDP port',o.port],['Port hopping',o.hop||'Off'],['Password',u.pw||'-'],['Devices online',o.online]].map(r=>`<div class="kv"><span>${r[0]}</span><b>${X(r[1])}</b></div>`).join('')}</div></div>`}
 function wgCard(u,cbox){const o=u.wg;if(!o.on)return `<div class="card"><div class="lab">${I('wg',15)}WireGuard</div><p class="note bad">WireGuard is not installed on this server yet. Run the installer again to add it.</p></div>`;
@@ -4510,7 +4941,7 @@ function onlineCard(u){const any=u.ssh||u.ips.length||(u.ovpn&&u.ovpn.sess.lengt
 ${any?`${HS(u.kind)?`<div class="kv"><span>SSH sessions</span><b>${u.ssh}</b></div>`:''}${(u.sips||[]).length?`<div class="kv"><span>SSH from</span><b>${u.sips.map(ip=>X(ip)).join(', ')}</b></div>`:''}${u.ovpn?`<div class="kv"><span>OpenVPN sessions</span><b>${u.ovpn.sess.length}</b></div>`:''}${u.hy2?`<div class="kv"><span>Hysteria2 devices</span><b>${u.hy2.online}</b></div>`:''}${u.wg&&u.wg.online?`<div class="kv"><span>WireGuard from</span><b>${X(u.wg.from||'?')}</b></div>`:''}${u.dns&&u.ips.length?`<div class="kv"><span>DNS tunnel</span><b>Connected</b></div>`:''}${u.ips.map(x=>`<div class="kv"><span>Xray ${X(x.ip)}</span><b>${x.ban?'<span class="bad">Blocked '+x.ban+'s</span>':'Active '+x.ago+'s ago'+(x.shared?' · shared IP':'')}</b></div>`).join('')}`:'<p class="note">Not connected right now.</p>'}</div>`}
 function drawU(){const u=DT,p=u.ports,n=X(u.name),hx=HX(u.kind),hs=HS(u.kind);CP=[];
 const row=(k,v)=>`<div class="kv"><span>${k}</span><b>${X(v)}</b></div>`;
-const cbox=(label,v,qr)=>{const i=cp(v);return `<div class="cb"><div class="cbh"><small>${X(label)}</small><span style="display:flex;gap:6px">${qr===false?'':`<button class="btn sm" data-qr="${i}" data-ql="${X(label)}">QR</button>`}<button class="btn sm" data-cp="${i}">Copy</button></span></div><button class="code" data-cp="${i}" aria-label="Copy ${X(label)}">${X(v)}</button></div>`};
+const cbox=(label,v,qr,js)=>{const i=cp(v),jt=js?JSON.stringify(js,null,2):'',j=js?cp(jt):0;return `<div class="cb"><div class="cbh"><small>${X(label)}</small><span style="display:flex;gap:6px">${qr===false?'':`<button class="btn sm" data-qr="${i}" data-ql="${X(label)}">QR</button>`}<button class="btn sm" data-cp="${i}">Copy</button>${js?`<button class="btn sm" data-jsn aria-expanded="false">JSON</button>`:''}</span></div><button class="code" data-cp="${i}" aria-label="Copy ${X(label)}">${X(v)}</button>${js?`<div class="jsw" hidden><div class="jsh"><small>JSON config (v2rayNG → Custom config)</small><button class="btn sm pri" data-cp="${j}">Copy JSON</button></div><pre class="jsb">${X(jt)}</pre></div>`:''}</div>`};
 const sshAll=`Host: ${u.addr}\nUsername: ${u.name}\nPassword: ${u.pw||'-'}\nSSH: ${p.SSH_PORT}\nSSH SSL/TLS: ${AP(u,'SSL_PORT')}\nSSH WS: ${AP(u,'WS_PORT')}\nSSH WS TLS: ${AP(u,'WSTLS_PORT')}\nUDPGW: 127.0.0.1:${p.UDPGW_PORT}\nExpires: ${u.exp=='never'?'No expiry':u.exp}`;
 $('#dtb').innerHTML=`<div class="uh" style="margin-bottom:14px"><div class="av" style="background:hsl(${hue(u.name)} 55% 52%)">${n[0].toUpperCase()}</div><div style="min-width:0"><b style="font-size:18px">${n}</b>${tagT(u)}<small class="m" style="display:block">Created ${X(u.created||'-')}</small></div><span class="pill" style="color:${STC[u.st]}">${STN[u.st]}</span></div>
 <div class="card"><div class="ct"><div class="lab">Data usage</div><b>${lims(u.used,u.lim)}</b></div>${ubar(u.used,u.lim)}
@@ -4521,8 +4952,8 @@ ${u.note?`<div class="card"><div class="lab">Note</div><div class="note2">${X(u.
 ${usageCard(u.hist)}
 ${onlineCard(u)}
 ${hx||u.kind=='hy2'?'':`<div class="card"><div class="lab">User page</div><p class="note">Send this link to the user. ${u.kind=='dns'?'It shows their usage, expiry and the DNS tunnel details.':u.kind=='wg'?'It shows their usage, expiry, the WireGuard QR and the .conf file.':u.kind=='ovpn'?'It shows their usage, expiry and the OpenVPN file download.':'It shows their usage, expiry, SSH details and payloads.'}</p>${cbox('User page',u.sub,false)}<a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>`}
-${hx?`<div class="card"><div class="ct"><div class="lab">Subscription link</div><button class="btn sm" data-ua="newsub">${I('refresh',14)}New link</button></div><p class="note">Import into v2rayNG, NekoBox or Hiddify. It contains this user's V2Ray configs (the inbounds they have) and shows usage and expiry.</p>${cbox('Subscription',u.sub)}<a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>
-<div class="card"><div class="ct"><div class="lab">Xray configs</div><button class="btn sm" data-ua="newuuid">${I('refresh',14)}New UUID</button></div><p class="note">Tap a config to copy it. XHTTP needs a recent app (v2rayNG 1.9.30+, Hiddify, NekoBox with Xray core).</p>${u.links.map(l=>cbox(l.name+(l.alt?' · port '+(l.url.match(/:(\d+)\?/)||[])[1]+' (or '+l.alt+')':''),l.url)+(l.name=='VLESS XHTTP (no TLS)'&&!u.plaindomain?'<p class="note bad" style="margin-top:6px">New Xray apps refuse VLESS without TLS on an IP address. Set a domain (Settings → Server address, or a domain certificate) to use this config.</p>':'')).join('')}</div>
+${hx?`<div class="card"><div class="ct"><div class="lab">Subscription link</div><button class="btn sm" data-ua="newsub">${I('refresh',14)}New link</button></div><p class="note">Import into v2rayNG, NekoBox or Hiddify. It contains this user's V2Ray configs (the inbounds they have) and shows usage and expiry.</p>${cbox('Subscription',u.sub)}${u.jsub?cbox('JSON subscription (v2rayNG, fragment)',u.jsub):''}<a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>
+<div class="card"><div class="ct"><div class="lab">Xray configs</div><button class="btn sm" data-ua="newuuid">${I('refresh',14)}New UUID</button></div><p class="note">Tap a config to copy it. XHTTP needs a recent app (v2rayNG 1.9.30+, Hiddify, NekoBox with Xray core).</p>${u.links.map(l=>cbox(l.name+(l.alt?' · port '+(l.url.match(/:(\d+)\?/)||[])[1]+' (or '+l.alt+')':''),l.url,undefined,l.json)+(l.name=='VLESS XHTTP (no TLS)'&&!u.plaindomain?'<p class="note bad" style="margin-top:6px">New Xray apps refuse VLESS without TLS on an IP address. Set a domain (Settings → Server address, or a domain certificate) to use this config.</p>':'')).join('')}</div>
 `:''}
 ${hs?`<div class="card"><div class="ct"><div class="lab">SSH account</div><button class="btn sm" data-cp="${cp(sshAll)}">Copy all</button></div>
 ${row('Host',u.addr)}${row('Username',u.name)}${row('Password',u.pw||'Unknown (set a new one with Edit)')}${row('SSH',p.SSH_PORT)}${row('SSH SSL / TLS',AP(u,'SSL_PORT'))}${row('SSH WS',AP(u,'WS_PORT'))}${row('SSH WS TLS',AP(u,'WSTLS_PORT'))}${row('UDPGW','127.0.0.1:'+p.UDPGW_PORT)}</div>
@@ -4532,6 +4963,7 @@ ${hs?`<div class="card"><div class="lab">SSH WebSocket payloads</div><p class="n
 ${hs&&u.pays&&u.pays.length?`<div class="card"><div class="lab">Custom payloads</div><p class="note">Made in Settings → Payloads. The user sees these on their page too.</p>${u.pays.map(x=>cbox(x.name+' · '+(PAYM[x.mode]||x.mode)+' · port '+payPort(x.mode),x.text,false)+(x.note?`<p class="note" style="margin-top:4px">${X(x.note)}</p>`:'')).join('')}</div>`:''}
 ${u.ovpn?ovCard(u):''}${u.hy2?hyCard(u,cbox):''}${u.wg?wgCard(u,cbox):''}${u.dns?dnsCard(u,cbox):''}`}
 $('#dt').onclick=async e=>{if(e.target.id=='dt'||e.target.closest('#dx'))return $('#dt').hidden=true;
+const jb=e.target.closest('[data-jsn]');if(jb){const w=jb.closest('.cb').querySelector('.jsw');w.hidden=!w.hidden;jb.setAttribute('aria-expanded',!w.hidden);jb.textContent=w.hidden?'JSON':'Hide JSON';return}
 const q=e.target.closest('[data-qr]');if(q)return showQR(q.dataset.ql,CP[+q.dataset.qr]);
 const c=e.target.closest('[data-cp]');if(c)return copy(CP[+c.dataset.cp]);
 const b=e.target.closest('[data-ua]');if(!b)return;const a=b.dataset.ua,n=DT.name;
@@ -4600,24 +5032,27 @@ const x=t.closest('[data-ibx]');if(x){IBSEL.delete(x.dataset.ibx);ibsync();e.sto
 const o=t.closest('.ibo');if(o){IBSEL.has(o.dataset.v)?IBSEL.delete(o.dataset.v):IBSEL.add(o.dataset.v);ibsync();return}
 if(t.closest('#m_ibs')){ibdrop($('#ibdrop').hidden);return}ibdrop(false)});
 document.addEventListener('keydown',e=>{if(!$('#m_ibs'))return;const t=e.target;if((e.key=='Enter'||e.key==' ')&&(t.id=='m_ibs'||t.classList.contains('ibo'))){e.preventDefault();t.click()}else if(e.key=='Escape'&&!$('#ibdrop').hidden){e.stopPropagation();ibdrop(false);$('#m_ibs').focus()}},true);
-const SECN={none:'No TLS',tls:'TLS',reality:'Reality'},NETN=x=>(x.net.toUpperCase())+(x.cdn?' CDN':'');let IBH='';
+const QK=['q1','q2','q3','q4','q5','q6','q7'],SECN={none:'No TLS',tls:'TLS',reality:'Reality'},NETN=x=>({tcp:'TCP',xhttp:'XHTTP',ws:'WS',grpc:'gRPC',httpupgrade:'HTTPUpgrade'}[x.net]||x.net)+(x.cdn?' CDN':''),PRN={vless:'VLESS',vmess:'VMess',trojan:'Trojan'};let IBH='';
 const ikv=(k,v)=>`<div class="kv"><span>${k}</span><b>${X(v)}</b></div>`;
 function ibp(first){const L=D.ibs||[],h=JSON.stringify([L,D.h443&&D.h443.on]);if(!first&&h==IBH)return;IBH=h;
 const miss=['xhttp-tls','tcp-tls','trojan','reality','xhttp','cdn-tls','cdn'].some(b=>!L.some(x=>x.b==b)),tot=L.reduce((a,x)=>a+x.users,0);
 $('#pg').innerHTML=`<div class="card mb ibsc"><div class="ibs3"><div><span>Total inbounds</span><b>${L.length}</b></div><div><span>Turned on</span><b>${L.filter(x=>x.on).length}</b></div><div><span>Configs given to users</span><b>${tot}</b></div></div></div>
-<div class="card ibc"><div class="ibtop"><button class="btn pri" id="iba">${I('plus',15)}Add Inbound</button><input id="ibq" placeholder="Search" value="${X(IBQ)}" autocomplete="off"></div>
+<div class="card ibc"><div class="ibtop"><button class="btn pri" id="iba">${I('plus',15)}Add Inbound</button><input id="ibq" placeholder="Search" value="${X(IBQ)}" autocomplete="off"><span class="ibq1">${L.some(x=>x.qk)&&QK.every(k=>L.some(x=>x.qk==k))?'':`<button class="btn qk" id="ibqa" title="Adds 7 inbounds (VLESS / Trojan, TLS and Reality) on free ports">${I('bolt',15)}1-click all protocols</button>`}${L.some(x=>x.qk)?`<button class="btn qk on" id="ibqd" title="Removes only the inbounds made by 1-click">${I('del',15)}Remove 1-click (${L.filter(x=>x.qk).length})</button>`:''}</span></div>
 ${D.h443&&D.h443.on?`<p class="note ibnote">443 mode is on: TLS inbounds also work on 443, XHTTP without TLS also on 80 (when they use the main path).</p>`:''}
 <div class="ibtw"><table class="ibtab"><thead><tr><th>Inbound name</th><th>Protocol</th><th>Port</th><th>Transport</th><th>Users</th><th>On</th><th class="r">Actions</th></tr></thead><tbody>
 ${L.map((x,i)=>({x,i})).filter(o=>!IBQ||(o.x.name+' '+o.x.port+' '+o.x.proto+' '+NETN(o.x)+' '+o.x.sec).toLowerCase().includes(IBQ.toLowerCase())).map(({x})=>`<tr class="${x.on?'':'off'}">
-<td><b class="ibn">${X(x.name)}</b>${x.warn?`<div class="ibw">${X(x.warn)}</div>`:''}</td>
-<td><span class="ibp1">${x.proto=='vless'?'VLESS':'Trojan'}</span></td>
+<td><b class="ibn">${X(x.name)}</b>${x.qk?'<span class="ibqt">1-click</span>':''}${x.warn?`<div class="ibw">${X(x.warn)}</div>`:''}</td>
+<td><span class="ibp1">${PRN[x.proto]||x.proto}</span></td>
 <td><span class="mono">:${x.port}</span>${x.hp?`<div class="m">also :${x.hp}</div>`:''}</td>
-<td><span class="ibts">${NETN(x)} + ${x.sec=='none'?'None':x.sec=='tls'?'TLS':'Reality'}</span></td>
+<td><span class="ibts">${NETN(x)} + ${x.sec=='none'?'None':x.sec=='tls'?'TLS':'Reality'}${x.flow?' · Vision':''}${x.ech?' · ECH':''}</span>${(x.ext||[]).length?`<div class="m">+${x.ext.length} external</div>`:''}</td>
 <td><span class="ibu">${x.users}</span></td>
 <td><button class="sw${x.on?' on':''}" data-ib="tog" data-id="${x.id}" role="switch" aria-checked="${x.on}" aria-label="${X(x.name)} ${x.on?'on':'off'}" title="${x.on?'Turn off':'Turn on'}"><i></i></button></td>
-<td class="r"><span class="iba"><button data-ib="edit" data-id="${x.id}" aria-label="Edit ${X(x.name)}" title="Edit">${I('pen',15)}</button><button class="dng" data-ib="del" data-id="${x.id}" aria-label="Delete ${X(x.name)}" title="Delete">${I('del',15)}</button></span></td></tr>`).join('')||`<tr><td colspan="7" class="note" style="padding:18px">${L.length?'Nothing matches the search.':'No inbounds yet. Press Add Inbound to make your first V2Ray config. V2Ray users get their configs from the inbounds you make here.'}</td></tr>`}
+<td class="r"><span class="iba"><button data-ib="port" data-id="${x.id}" aria-label="Check port ${x.port}" title="Check if the port is open">${I('shield',15)}</button><button data-ib="edit" data-id="${x.id}" aria-label="Edit ${X(x.name)}" title="Edit">${I('pen',15)}</button><button class="dng" data-ib="del" data-id="${x.id}" aria-label="Delete ${X(x.name)}" title="Delete">${I('del',15)}</button></span></td></tr>`).join('')||`<tr><td colspan="7" class="note" style="padding:18px">${L.length?'Nothing matches the search.':'No inbounds yet. Press Add Inbound to make your first V2Ray config. V2Ray users get their configs from the inbounds you make here.'}</td></tr>`}
 </tbody></table></div></div>`;
 $('#iba').onclick=()=>ibmodal(null);
+if($('#ibqa'))$('#ibqa').onclick=async()=>{if(!confirm('Are you sure?\n\nThis adds 7 inbounds (VLESS / Trojan · TCP Vision, WS, HTTPUpgrade, XHTTP, Reality) on free ports from 20001. Your own inbounds are not changed.\n\nOpen ports 20001-20007 in your provider firewall too.'))return;const b=$('#ibqa');b.disabled=true;toast('Adding... (checks ports and the Reality target)');
+try{const r=await api('api/inbound/quick',{});IBH='';await load();alert((r.added.length?'Added:\n'+r.added.join('\n'):'Nothing added.')+(r.skipped.length?'\n\nSkipped:\n'+r.skipped.join('\n'):'')+'\n\nGive them to users in Edit user → Inbounds.')}catch(x){toast(x.message,1)}b.disabled=false};
+if($('#ibqd'))$('#ibqd').onclick=async()=>{const n=(D.ibs||[]).filter(x=>x.qk);if(!confirm('Are you sure to remove all 1-click inbounds?\n\n'+n.map(x=>'• '+x.name+' :'+x.port).join('\n')+'\n\nOnly these '+n.length+' are removed. Your own inbounds stay.'))return;try{const r=await api('api/inbound/quickdel',{});toast(r.removed+' inbound(s) removed');IBH='';load()}catch(x){toast(x.message,1)}};
 $('#ibq').oninput=e=>{IBQ=e.target.value;const p=e.target.selectionStart;IBH='';ibp(true);const q=$('#ibq');q.focus();q.setSelectionRange(p,p)}}
 let IBQ='';
 function ibmenu(b){const x=(D.ibs||[]).find(y=>y.id==b.dataset.ibm);if(!x)return;let m=$('#ibpop');if(m)m.remove();const i=(D.ibs||[]).indexOf(x);
@@ -4627,53 +5062,136 @@ document.body.append(m);const r=b.getBoundingClientRect();m.style.top=(window.sc
 document.addEventListener('click',e=>{const mb=e.target.closest('[data-ibm]');if(mb){e.stopPropagation();return ibmenu(mb)}const p=$('#ibpop');if(p&&!e.target.closest('#ibpop'))p.remove()},true);
 document.addEventListener('click',e=>{const b=e.target.closest('[data-ib]');if(!b||pg!='ib')return;if($('#ibpop'))$('#ibpop').remove();const x=(D.ibs||[]).find(y=>y.id==b.dataset.id);if(!x)return;const a=b.dataset.ib;
 if(a=='edit')return ibmodal(x);
+if(a=='port')return ibPort(x.id);
 if(a=='del'){if(!confirm('Delete the inbound "'+x.name+'"?\n\n'+x.users+' user(s) lose this config.'+(x.b?' You can add the default inbounds back later.':'')))return}
 if(a=='tog'&&x.on&&x.users&&!confirm('Turn off "'+x.name+'"? '+x.users+' user(s) lose this config until you turn it on again.'))return;
 api('api/inbound/'+({tog:'toggle',up:'move',down:'move'}[a]||a),{id:x.id,name:x.name,dir:a}).then(()=>{toast(a=='del'?'Inbound deleted':a=='tog'?(x.on?'Turned off':'Turned on'):'Saved');IBH='';load()}).catch(x=>toast(x.message,1))});
-function ibmodal(x){const ed=!!x,b=x&&x.b,h4=D.h443&&D.h443.on;let S=Object.assign({name:'',proto:'vless',port:'',net:'xhttp',cdn:false,sec:'tls',sni:'',target:'',addr:'',host:'',path:'',fp:'chrome',alpn:''},x?{fp:x.fp||'chrome',alpn:x.alpn||'',name:x.name,proto:x.proto,port:x.port,net:x.net,cdn:x.cdn,sec:x.sec,sni:x.b=='reality'?x.sni:(x.sni||''),target:x.target||'',addr:x.addr||'',host:x.host||'',path:x.path||'',on:x.on}:{}),tab=0,USED=null,BT=null;const f=$('#mf');f.className='card wide';
+async function ibPort(id){const x=(D.ibs||[]).find(y=>y.id==id);if(!x)return;const f=$('#mf');f.className='card ibx';
+const show=r=>{const L=(ok,t,h)=>`<div class="pck ${ok==null?'w':ok?'ok':'no'}"><b>${ok==null?'…':ok?'✓':'✕'}</b><div><span>${t}</span>${h?`<small>${h}</small>`:''}</div></div>`;
+f.innerHTML=`<div class="ixh"><h2>Port ${x.port} · ${X(x.name)}</h2><button type="button" class="ixc" id="pcx" aria-label="Close">×</button></div><div style="margin-top:14px">${r?
+L(r.listen,'Xray is listening on '+x.port,r.listen?'':'Turn the inbound on, or check Xray in the Overview page.')+
+L(r.fw=='closed'?false:true,'Server firewall (ufw): '+(r.fw=='off'?'off':r.fw),r.fw=='closed'?'Press Open below.':'')+
+(r.out.err?L(null,'From the internet: not checked',X(r.out.err)):L(r.out.ok>0,'From the internet: '+r.out.ok+' of '+r.out.n+' countries can connect',r.out.ok?'':'Open TCP '+x.port+' in your provider panel (for example DeluxHost → Anti-DDoS / Firewall). Use type TLS / HTTPS, not SSH or Game.'))
+:L(null,'Checking from 3 countries... about 10 seconds')}</div><div class="mr">${r&&r.fw=='closed'?`<button type="button" class="btn" id="pco">Open in ufw</button>`:''}${r?`<button type="button" class="btn" id="pcr">Check again</button>`:''}<button type="button" class="btn pri" id="pcc">OK</button></div>`;
+$('#pcx').onclick=$('#pcc').onclick=()=>$('#md').hidden=true;if($('#pcr'))$('#pcr').onclick=()=>ibPort(id);
+if($('#pco'))$('#pco').onclick=async()=>{try{await api('api/fw-open',{port:x.port,proto:'tcp'});ibPort(id)}catch(e){toast(e.message,1)}}};
+f.onsubmit=e=>e.preventDefault();show(null);$('#md').hidden=false;
+try{const r=await api('api/ib-portcheck',{id});if(!$('#md').hidden&&$('#pcx'))show(r)}catch(e){toast(e.message,1);$('#md').hidden=true}}
+function ibmodal(x){const ed=!!x,b=x&&x.b,h4=D.h443&&D.h443.on;
+const DEF={name:'',proto:'vless',port:'',net:'xhttp',cdn:false,sec:'tls',sni:'',target:'',addr:'',host:'',path:'',fp:'chrome',alpn:'',on:true,xmode:'auto',svc:'',multi:true,obfs:false,obhost:'',obpath:'/',hb:0,hdrs:[],tfo:false,frag:{},minv:'',maxv:'',rsni:false,ech:false,flow:'',sids:[],snix:[],spx:'',sniff:{on:false,dest:['http','tls'],ro:false},ext:[],cmode:'panel',cfile:'',kfile:'',ccrt:'',ckey:''};
+let S=JSON.parse(JSON.stringify(Object.assign({},DEF,x?Object.fromEntries(Object.keys(DEF).map(k=>[k,x[k]??DEF[k]])):{})));
+if(x&&x.b=='reality')S.sni=x.sni;S.fon=!!(S.frag&&S.frag.on);S.frag=Object.assign({packets:'tlshello',lengths:'100-200',delays:'10-20'},S.frag||{});if(x&&x.addr&&!S.ext.length)S.ext=[{addr:x.addr,port:'',remark:'Address'}];if(!['tcp','xhttp','ws','httpupgrade'].includes(S.net))S.net='xhttp';if(S.proto=='vmess')S.proto='vless';S.exon=S.ext.length>0;S.flowT=ed;
+let tab=0,USED=null,BT=null,SCAN=null,FIND=null;const f=$('#mf');f.className='card wide ibx';
 api('api/inbound/ports',{}).then(r=>{USED=r.used}).catch(()=>{});
-const ch=()=>S.cdn?(S.net=='ws'?'wscdn':'cdn'):S.net,mainp=()=>S.net=='ws'?(D.set.wspath||'/vws'):(D.set.path||'/vless'),p4=()=>+S.port==80||+S.port==443;
-function fix(){if((S.net=='ws'||S.cdn)&&S.sec=='reality')S.sec='tls'}
-function sq(g,v,t,s,dis){const on=(g=='proto'?S.proto:g=='net'?ch():S.sec)==v;return `<button type="button" class="sq${on?' on':''}" data-g="${g}" data-v="${v}"${dis?' disabled':''} aria-pressed="${on}" title="${X(s)}">${t}</button>`}
-const FPL=['chrome','firefox','safari','edge','ios','android','random','randomized','none'];
-function alD(){return S.net=='xhttp'?['h2','http/1.1']:S.net=='ws'?['http/1.1']:[]}
-function alC(){return S.alpn?S.alpn.split(','):S.alpnU?[]:alD()}
-function fpsel(){return `<label for="ib_fp">Fingerprint <span class="m">(uTLS, how the app's TLS looks)</span></label><select id="ib_fp">${FPL.filter(v=>S.sec!='reality'||v!='none').map(v=>`<option value="${v}"${S.fp==v?' selected':''}>${v=='none'?'none (Go default)':v}${v=='chrome'?' (best)':''}</option>`).join('')}</select>`}
-function alsel(){const a=alC(),thru=h4&&(p4()||(!S.cdn&&S.path===''&&S.proto=='vless'&&S.net!='tcp')||(!S.cdn&&S.net=='tcp'));return `<label>ALPN</label><div class="alpg">${['h2','http/1.1'].map(v=>`<label class="alpc"><input type="checkbox" data-alpn="${v}"${a.includes(v)?' checked':''}>${v}</label>`).join('')}</div><p class="note">Nothing ticked = automatic (${alD().join(', ')||'none'}).${S.net=='ws'?' WS needs http/1.1.':''}${h4?' Through 443 mode (HAProxy) the link uses http/1.1.':''}</p>`}
-function pnote(){const p=+S.port;if(S.cdn)return 'Cloudflare ports: '+(S.sec=='tls'?'443, 2053, 2083, 2087, 2096, 8443':'80, 8080, 8880, 2052, 2082, 2086, 2095');if(p==443||p==80)return h4?'Goes through 443 mode (HAProxy): TLS and no TLS both work here, next to SSH and the other configs.':'Ports 80 and 443 need 443 mode (Settings → Network ports).';return 'Any free port. 80 / 443 work when 443 mode is on.'}
-function inp(id,lab,val,ph,dis){return `<label for="ib_${id}">${lab}</label><input id="ib_${id}" value="${X(val)}" placeholder="${X(ph)}" autocomplete="off" autocapitalize="none" spellcheck="false"${dis?' disabled':''}>`}
-function draw(){fix();const T=['Basic','Protocol','Security'];let body='';
-if(tab==0)body=inp('name','Name',S.name,'Like: VLESS WS 443')+`<label>Protocol</label><div class="sqg two">${sq('proto','vless','VLESS','Light and fast')}${sq('proto','trojan','Trojan','Password based')}</div>`+inp('port','Port',S.port,'Like: 443, 80, 2053')+`<p class="note" id="ibpn">${pnote()}</p>`;
-if(tab==1){const dflt=S.cdn?((D.cdn&&(D.cdn.addr||D.cdn.dom))||'your CDN address'):(D.addr||'server address'),hd=S.cdn?((D.cdn&&D.cdn.dom)||'CDN domain'):(D.set.host||D.cert.domain||D.addr||'default');
-body=`<label>Transport</label><div class="sqg four">${sq('net','tcp','TCP','Simple, fast')}${sq('net','xhttp','XHTTP','Like web traffic')}${sq('net','ws','WS','WebSocket')}${sq('net','cdn','XHTTP CDN','Through Cloudflare')}${sq('net','wscdn','WS CDN','WebSocket via Cloudflare')}</div>`+
-(S.net=='tcp'?`<p class="note">Plain TCP: nothing more to set here.${S.proto=='vless'?' With Reality it uses XTLS Vision (fastest).':''}</p>`:
-inp('addr',(S.cdn?'Address (Cloudflare IP or host)':'Address')+` <span class="m">(empty = ${X(dflt)})</span>`,S.addr,S.cdn?'Like: www.visa.com or 104.16.0.1':'Like: vpn.example.com or a bug host')+
-inp('host',(S.cdn?'Host (your CDN domain)':'Host')+` <span class="m">(empty = ${X(hd)})</span>`,S.host,S.cdn?'Like: cdn.example.com':'Like: vpn.example.com')+
-inp('path',`Path <span class="m">(empty = ${X(mainp())})</span>`,p4()?'':S.path,mainp(),p4())+(p4()?`<p class="note">On port ${S.port} (443 mode) the main path ${X(mainp())} is used.</p>`:''))}
-if(tab==2)body=`<label>Security</label><div class="sqg">${sq('sec','none','None','No encryption layer')}${sq('sec','tls','TLS','Your certificate')}${sq('sec','reality','Reality','Looks like a big site',S.net=='ws'||S.cdn)}</div>
-${S.net=='ws'||S.cdn?`<p class="note">Reality works only with TCP and XHTTP (not WS or CDN).</p>`:''}
-${S.sec=='tls'?inp('sni',`SNI <span class="m">(empty = ${X(S.cdn?(D.cdn&&D.cdn.dom)||'CDN domain':D.set.sni||D.cert.domain||'auto')})</span>`,S.sni,S.cdn?'Like: cdn.example.com':'Like: '+(D.cert.domain||'vpn.example.com'))+`<div class="ibg2"><div>${fpsel()}</div><div>${alsel()}</div></div>`:''}
-${S.sec=='reality'?inp('target',`Target <span class="m">(empty = SNI:443)</span>`,S.target,'Like: www.microsoft.com:443')+inp('sni','SNI',S.sni,'Like: www.microsoft.com')+fpsel()+`<p class="note">A big site with TLS 1.3. Reality needs its own port (not 80 or 443).</p>`:''}
-${S.sec=='none'?`<p class="note">Not encrypted by this config. Use it only where TLS is blocked${S.cdn?', or with a Cloudflare TLS port':''}.</p>`:''}
-<div class="ibsum"><b>${X(S.name||'New inbound')}</b> · ${S.proto=='vless'?'VLESS':'Trojan'} · ${S.cdn?S.net.toUpperCase()+' CDN':S.net.toUpperCase()} · ${SECN[S.sec]}${S.sec!='none'?' · '+X(S.fp):''} · port ${X(S.port||'?')}${S.net!='tcp'?' · path '+X(p4()?mainp():S.path||mainp()):''}</div>`;
-f.innerHTML=`<h2>${ed?'Edit '+X(x.name):'Add inbound'}</h2>${b?`<p class="note" style="margin-top:6px">Default inbound. If you change its type or path it becomes a normal inbound.</p>`:''}<div id="ibban" aria-live="polite"></div>
-<div class="ibt" role="tablist">${T.map((t,i)=>`<button type="button" role="tab" class="${i==tab?'on':''}" aria-selected="${i==tab}" data-t="${i}">${i+1}. ${t}</button>`).join('')}</div>${body}
-<div class="err" id="me"></div><div class="mr"><button type="button" class="btn" id="mc">Cancel</button><button class="btn pri">${ed?'Save':'Create'}</button></div>`;
-$('#mc').onclick=()=>$('#md').hidden=true;
-f.querySelectorAll('[data-t]').forEach(z=>z.onclick=()=>{rd_();tab=+z.dataset.t;draw()});
-f.querySelectorAll('.sq').forEach(z=>z.onclick=()=>{rd_();const g=z.dataset.g,v=z.dataset.v;if(g=='proto')S.proto=v;else if(g=='net'){S.cdn=v=='cdn'||v=='wscdn';S.net=v=='cdn'?'xhttp':v=='wscdn'?'ws':v;S.alpn='';S.alpnU=false}else S.sec=v;draw()});
-if($('#ib_fp'))$('#ib_fp').onchange=()=>{rd_();draw()};f.querySelectorAll('[data-alpn]').forEach(z=>z.onchange=()=>{rd_();draw()});
-if($('#ib_port'))$('#ib_port').oninput=()=>{S.port=$('#ib_port').value.trim();$('#ibpn').textContent=pnote();clearTimeout(ibmodal.pt);ibmodal.pt=setTimeout(()=>{const u=pused();ban(u?u.t:'',u&&u.w)},350)};
-(f.querySelector('input:not([disabled])')||{focus(){}}).focus()}
-function rd_(){['name','port','sni','target','addr','host','path'].forEach(k=>{const z=$('#ib_'+k);if(z&&!z.disabled)S[k]=k=='name'?z.value:z.value.trim()});const fz=$('#ib_fp');if(fz)S.fp=fz.value;const ac=[...document.querySelectorAll('#mf [data-alpn]')];if(ac.length){const v=ac.filter(c=>c.checked).map(c=>c.dataset.alpn);S.alpnU=true;S.alpn=v.join(',')}}
+const mainp=()=>S.net=='ws'?(D.set.wspath||'/vws'):(D.set.path||'/vless'),p4=()=>+S.port==80||+S.port==443,canR=()=>!S.cdn&&!['ws','httpupgrade'].includes(S.net),canF=()=>S.proto=='vless'&&S.net=='tcp'&&!S.obfs&&S.sec!='none'&&!S.cdn;
+const NETL={tcp:'TCP',xhttp:'XHTTP',ws:'WebSocket',httpupgrade:'HTTPUpgrade'},PRL={vless:'VLESS',trojan:'Trojan'};
+function fix(){if(S.net=='tcp')S.cdn=false;if(S.sec=='reality'&&!canR())S.sec='tls';if(S.cdn)S.ech=false;if(!canF())S.flow='';else if(S.sec=='reality'&&!S.flowT)S.flow='vision';else if(!S.flowT)S.flow='';if(S.net!='tcp')S.obfs=false}
+const hlp=t=>t?` <span class="q" title="${X(t)}" tabindex="0" aria-label="${X(t)}">?</span>`:'';
+const row=(lab,ctl,h,id)=>`<div class="ir"><label${id?` for="${id}"`:''}>${lab}${hlp(h)}</label><div class="ic">${ctl}</div></div>`;
+const nt=t=>`<div class="ir"><span></span><p class="note">${t}</p></div>`;
+const sw=(k,on,dis)=>`<button type="button" class="sw${on?' on':''}" data-sw="${k}" role="switch" aria-checked="${!!on}"${dis?' disabled':''}><i></i></button>`;
+const inp=(k,v,ph,dis,cls)=>`<input id="ib_${k}" data-k="${k}" class="${cls||''}" value="${X(v??'')}" placeholder="${X(ph||'')}" autocomplete="off" autocapitalize="none" spellcheck="false"${dis?' disabled':''}>`;
+const sel=(k,opts,v)=>`<select id="ib_${k}" data-k="${k}">${opts.map(o=>{const[a,t]=Array.isArray(o)?o:[o,o];return `<option value="${X(a)}"${String(v)==String(a)?' selected':''}>${X(t)}</option>`}).join('')}</select>`;
+const seg=(k,opts,v)=>`<div class="iseg" role="radiogroup">${opts.map(([a,t,dis])=>`<button type="button" data-seg="${k}" data-v="${a}" class="${v==a?'on':''}" role="radio" aria-checked="${v==a}"${dis?' disabled':''}>${t}</button>`).join('')}</div>`;
+const chips=(k,L,ph,gen)=>`<div class="chips" data-ck="${k}">${L.map((v,i)=>`<span class="ichip">${X(v||'(empty)')}<button type="button" data-cdel="${k}" data-i="${i}" aria-label="Remove ${X(v)}">×</button></span>`).join('')}<input data-cadd="${k}" placeholder="${X(ph)}" autocomplete="off" autocapitalize="none" spellcheck="false">${gen?`<button type="button" class="cg" data-cgen="${k}" title="Make a new one" aria-label="Make a new one">↻</button>`:''}</div>`;
+const tog=(k,opts,cur)=>`<div class="tgs">${opts.map(([a,t])=>`<button type="button" data-tg="${k}" data-v="${a}" class="${cur.includes(a)?'on':''}" aria-pressed="${cur.includes(a)}">${t}</button>`).join('')}</div>`;
+const hex=n=>[...crypto.getRandomValues(new Uint8Array(n))].map(v=>v.toString(16).padStart(2,'0')).join('');
+const rnd=n=>{const a='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';return [...crypto.getRandomValues(new Uint8Array(n))].map(v=>a[v%a.length]).join('')};
+function alD(){return S.net=='xhttp'||S.net=='tcp'?['h2','http/1.1']:['http/1.1']}
+function alOK(){return h4&&p4()?['http/1.1']:['h2','http/1.1']}
+function alNeed(){return h4&&p4()||['ws','httpupgrade'].includes(S.net)?['http/1.1']:[]}
+function alCur(){const ok=alOK();let a=(S.alpn?S.alpn.split(','):alD()).filter(v=>ok.includes(v));alNeed().forEach(v=>{if(!a.includes(v))a.push(v)});if(!a.length)a=ok.slice();return ['h2','http/1.1'].filter(v=>a.includes(v))}
+function pnote(){const p=+S.port;if(S.cdn)return 'Cloudflare ports: '+(S.sec=='tls'?'443, 2053, 2083, 2087, 2096, 8443':'80, 8080, 8880, 2052, 2082, 2086, 2095');if(p==443||p==80)return h4?'Goes through 443 mode (HAProxy): only plain VLESS XHTTP / WS and VLESS / Trojan TCP+TLS work here.':'Ports 80 and 443 need 443 mode (Settings → Network ports).';return 'Any free port.'+(h4?' 80 / 443 work in 443 mode for plain configs.':'')}
+function tBasic(){return row('Enabled',sw('on',S.on))+row('Remark',inp('name',S.name,''),'',"ib_name")+
+row('Protocol',sel('proto',[['vless','vless'],['trojan','trojan']],S.proto),'','ib_proto')+
+row('Port',inp('port',S.port,'','','sm'),pnote(),'ib_port')}
+function tStream(){const hd=S.cdn?((D.cdn&&D.cdn.dom)||'CDN domain'):(D.set.host||D.cert.domain||D.addr||'default');let h=row('Transmission',sel('net',Object.entries(NETL),S.net),'','ib_net');
+if(S.net!='tcp')h+=row('Through CDN',sw('cdn',S.cdn),'Users connect to Cloudflare, Cloudflare connects to this server. Set the CDN domain in Settings → CDN.');
+const hp=(lab)=>row('Host',inp('host',S.host,'empty = '+hd),'','ib_host')+(S.net=='grpc'?'':row('Path',inp('path',p4()?'':S.path,mainp(),p4()),p4()?'On 80 / 443 (443 mode) the main path is used.':'Empty = '+mainp(),'ib_path'));
+if(S.net=='tcp'){h+=row('HTTP Obfuscation',sw('obfs',S.obfs,S.sec=='reality'),'Makes TCP look like plain HTTP requests. Not with Reality.');if(S.obfs)h+=row('Host',inp('obhost',S.obhost,'Like: m.facebook.com'),'','ib_obhost')+row('Path',inp('obpath',S.obpath,'/'),'','ib_obpath')}
+if(S.net=='xhttp')h+=hp()+row('Mode',sel('xmode',['auto','packet-up','stream-up','stream-one'],S.xmode),'auto is best. packet-up works through every CDN.','ib_xmode');
+if(S.net=='ws')h+=hp()+row('Heartbeat Period',inp('hb',S.hb||'','0','','sm'),'Keeps idle WebSocket open. 0 = off.','ib_hb')+hdrs();
+if(S.net=='httpupgrade')h+=hp()+hdrs();
+h+=row('TCP Fast Open',sw('tfo',S.tfo),'Saves one round trip when connecting. Linux turns it on for the server.')+
+row('Fragment',sw('fon',S.fon),'Splits the TLS hello into small pieces. Mostly a client setting: the JSON subscription has its own (Settings → Xray).');
+if(S.fon)h+=row('Packets',inp('f_packets',S.frag.packets,'tlshello'),'','ib_f_packets')+row('Lengths',inp('f_lengths',S.frag.lengths,'100-200'),'','ib_f_lengths')+row('Delays',inp('f_delays',S.frag.delays,'10-20'),'','ib_f_delays');
+return h}
+function hdrs(){return row('Headers',`<div class="kvl">${S.hdrs.map((v,i)=>`<div class="kvr"><input data-hk="${i}" value="${X(v[0])}" placeholder="Name" autocapitalize="none"><input data-hv="${i}" value="${X(v[1])}" placeholder="Value" autocapitalize="none"><button type="button" class="rm" data-hdel="${i}" aria-label="Remove header">${I('del',14)}</button></div>`).join('')}<button type="button" class="addb" id="ibhadd">${I('plus',13)}Add header</button></div>`,'Extra HTTP headers the server sends. Host goes in the Host box.')}
+function tSec(){const R=canR();let h=row('Security',seg('sec',[['none','None'],['tls','TLS'],['reality','Reality',!R]],S.sec));
+const flow=canF()?row('Flow',seg('flow',[['','None'],['vision','xtls-rprx-vision']],S.flow),'Vision: fastest for VLESS TCP. Needs its own port (not 80 / 443).'):'';
+const FPL=[['chrome','chrome (best)'],'firefox','safari','edge','ios','android','random','randomized'].concat(S.sec=='tls'?[['none','none (Go default)']]:[]);
+if(S.sec=='tls'){const a=alCur(),ok=alOK(),nd=alNeed();
+h+=row('SNI',inp('sni',S.sni,'empty = '+(S.cdn?(D.cdn&&D.cdn.dom)||'CDN domain':D.set.sni||D.cert.domain||'auto')),'','ib_sni')+
+row('Min / Max Version',`<div class="two">${sel('minv',[['','Min: auto'],'1.0','1.1','1.2','1.3'],S.minv)}${sel('maxv',[['','Max: auto'],'1.0','1.1','1.2','1.3'],S.maxv)}</div>`,'TLS versions the server accepts. Auto is fine.')+
+row('uTLS',sel('fp',FPL,S.fp),'How the app\'s TLS hello looks. chrome is best.','ib_fp')+
+row('ALPN',`<div class="tgs">${['h2','http/1.1'].map(v=>`<button type="button" data-tg="alpn" data-v="${v}" class="${a.includes(v)?'on':''}" aria-pressed="${a.includes(v)}"${!ok.includes(v)||nd.includes(v)&&a.includes(v)||a.length==1&&a[0]==v?' disabled':''}>${v}</button>`).join('')}</div>`,h4&&p4()?'Port '+S.port+' (443 mode) works with http/1.1.':['ws','httpupgrade'].includes(S.net)?'WebSocket and HTTPUpgrade need http/1.1.':'At least one is needed.')+flow+
+row('Reject Unknown SNI',sw('rsni',S.rsni),'Closes connections that ask for a name not on your certificate.')+
+certRows()+row('ECH',sw('ech',S.ech,S.cdn),'Encrypted Client Hello: hides the SNI. Needs TLS 1.3 and an app with ECH (new v2rayNG, Hiddify). Keys are made by the panel.')}
+if(S.sec=='reality'){const all=[S.sni,...S.snix].filter(v=>v);
+h+=row('uTLS',sel('fp',FPL,S.fp),'','ib_fp')+
+row('Target',`<div class="tgt">${inp('target',S.target,(S.sni||'www.microsoft.com')+':443')}<button type="button" class="btn sm" id="ibscan">${SCAN&&SCAN.run?'Scanning...':'Scan'}</button><button type="button" class="btn sm" id="ibfind">${I('search',13)}Find Targets</button></div>`,'A real big site with TLS 1.3. Scan checks it, Find Targets checks a list of sites.')+
+(SCAN&&!SCAN.run?`<div class="ir"><span></span>${scanBox()}</div>`:'')+
+row('SNI',chips('sni',all,all.length?'add name':'Like: www.microsoft.com'),'Names the apps can use. The first one goes in the links. Scan fills them from the site certificate.')+
+row('Short IDs',chips('sids',S.sids,S.sids.length?'':'empty = panel default',1),'Up to 8, hex, even length. The first one goes in the links.')+
+row('SpiderX',`<div class="tgt nw">${inp('spx',S.spx,'Like: /abc (optional)')}<button type="button" class="cg" id="ibspx" title="Make a new one" aria-label="Make a new SpiderX">↻</button></div>`,'Optional path the app crawls on the target site.')+flow}
+return h}
+function certRows(){if(S.cmode=='panel'){S.cmode='path';S.cfile=D.cpath[0];S.kfile=D.cpath[1]}const m=S.cmode;let h=row('Certificate',seg('cmode',[['path','File Path'],['content','File Content']],m),'Set Cert from Panel = your panel certificate (renews by itself). Another file only for another domain.');
+if(m=='path')h+=row('Public Key',inp('cfile',S.cfile,'/root/cert/fullchain.pem'),'','ib_cfile')+row('Private Key',inp('kfile',S.kfile,'/root/cert/privkey.pem'),'','ib_kfile');
+if(m=='content')h+=row('Public Key',`<textarea id="ib_ccrt" data-k="ccrt" class="ita" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----">${X(S.ccrt)}</textarea>`,'','ib_ccrt')+row('Private Key',`<textarea id="ib_ckey" data-k="ckey" class="ita" spellcheck="false" placeholder="${x&&x.ckey_set&&!S.ckey?'Saved (hidden). Paste a new key to change it.':'-----BEGIN PRIVATE KEY-----'}">${X(S.ckey)}</textarea>`,'','ib_ckey');
+return h+row('',`<div style="display:flex;gap:8px;flex-wrap:wrap"><button type="button" class="btn pri" id="ibcp" style="white-space:nowrap">Set Cert from Panel</button><button type="button" class="btn cdl" id="ibcc">Clear</button></div>`)}
+function scanBox(){const r=SCAN;if(!r.ok)return `<div class="scb bad"><b>✕ Not good for Reality</b><div><span>Target</span><span>${X(r.target||'')}</span></div><p>${X(r.err||'No answer')}</p></div>`;
+const kv=(k,v)=>v?`<div><span>${k}</span><span>${X(v)}</span></div>`:'';
+return `<div class="scb"><b>${I('check',14)} Works for Reality</b>${kv('SNI used',r.sni)}${kv('TLS',r.tls.replace('TLSv',''))}${kv('ALPN',r.alpn||'none')}${kv('Cipher',r.cipher)}${kv('Certificate',r.cn)}${kv('Issuer',r.issuer)}${kv('Expires',r.exp?(r.exp+' ('+r.days+' days)'):'')}${kv('Latency',r.ms+' ms')}${r.h2?'':'<p>No HTTP/2. It works, but a site with h2 looks more normal.</p>'}</div>`}
+function tSniff(){const sn=S.sniff;return row('Enabled',sw('sn_on',sn.on),'Reads the site name from the traffic, so routing (WARP, ad block) works by domain.')+
+(sn.on?row('Sniff',tog('sn',[['http','HTTP'],['tls','TLS'],['quic','QUIC'],['fakedns','FAKEDNS']],sn.dest))+row('Route only',sw('sn_ro',sn.ro),'Use the name only for routing, connect to the original IP. Safer for some apps.'):'')}
+function tAdv(){return row('External Proxy',sw('exon',S.exon),'Extra addresses for the same inbound, like Cloudflare IPs or another domain. Every line becomes its own link.')+
+(S.exon?`<div class="exl">${S.ext.map((e,i)=>`<div class="exr"><input data-ea="${i}" value="${X(e.addr)}" placeholder="Address (IP or domain)" autocapitalize="none" spellcheck="false" aria-label="Address"><input data-ep="${i}" value="${X(e.port||'')}" placeholder="${X(S.port||'port')}" inputmode="numeric" aria-label="Port"><input data-er="${i}" value="${X(e.remark||'')}" placeholder="Remark" aria-label="Remark"><button type="button" class="rm" data-edel="${i}" aria-label="Remove">${I('del',14)}</button></div>`).join('')}<button type="button" class="addb" id="ibeadd">${I('plus',13)}Add</button></div>`:'')}
+function draw(){fix();const T=['Basics','Stream','Security','Sniffing','Advanced'];const body=[tBasic,tStream,tSec,tSniff,tAdv][tab]();
+f.innerHTML=`<div class="ixh"><h2>${ed?'Edit '+X(x.name):'Add Inbound'}</h2><button type="button" class="ixc" id="mc2" aria-label="Close">×</button></div><div id="ibban" aria-live="polite"></div>
+<div class="ixt" role="tablist">${T.map((t,i)=>`<button type="button" role="tab" class="${i==tab?'on':''}" aria-selected="${i==tab}" data-t="${i}">${t}</button>`).join('')}</div><div class="ixb">${body}</div>
+<div class="err" id="me"></div><div class="mr"><button type="button" class="btn" id="mc">Close</button><button class="btn pri">${ed?'Save':'Create'}</button></div>${FIND?findPop():''}`;
+wire()}
+function findPop(){const F=FIND;return `<div class="fpo" role="dialog" aria-label="Reality Target Finder"><div class="fpc"><div class="ixh"><h2 style="font-size:16px">Reality Target Finder</h2><button type="button" class="ixc" id="fpx" aria-label="Close">×</button></div>
+<div class="tgt" style="margin:8px 0"><input id="fpe" placeholder="Extra domains (optional)" value="${X(F.extra||'')}" autocapitalize="none"><button type="button" class="btn sm pri" id="fps"${F.run?' disabled':''}>${F.run?'Checking...':'Scan'}</button></div>
+${F.run?'<p class="note">Checking...</p>':F.err?`<p class="err">${X(F.err)}</p>`:F.res?`<div class="fpt"><table><thead><tr><th>Target</th><th class="fst">Status</th><th>Latency</th><th></th></tr></thead><tbody>${F.res.map(r=>`<tr><td><b>${X(r.d)}</b><small class="m">${r.ok?'TLS 1.3 · '+(r.h2?'h2':'http/1.1'):X(r.err||'no TLS 1.3')}</small></td><td class="fst">${r.ok?'<span class="fok">Works</span>':'<span class="fno">No</span>'}</td><td>${r.ok?r.ms+' ms':'-'}</td><td>${r.ok?`<button type="button" class="btn sm pri" data-use="${X(r.d)}">Use</button>`:''}</td></tr>`).join('')}</tbody></table></div>`:''}</div></div>`}
+function wire(){const q=s=>f.querySelectorAll(s);
+$('#mc').onclick=$('#mc2').onclick=()=>$('#md').hidden=true;
+q('[data-t]').forEach(z=>z.onclick=()=>{rd_();tab=+z.dataset.t;draw()});
+q('[data-sw]').forEach(z=>z.onclick=()=>{rd_();const k=z.dataset.sw,v=!z.classList.contains('on');if(k=='sn_on')S.sniff.on=v;else if(k=='sn_ro')S.sniff.ro=v;else{S[k]=v;if(k=='exon'&&v&&!S.ext.length)S.ext.push({addr:'',port:'',remark:''})}draw()});
+q('[data-seg]').forEach(z=>z.onclick=()=>{rd_();const k=z.dataset.seg;S[k]=z.dataset.v;if(k=='flow')S.flowT=true;if(k=='sec'){SCAN=null;if(S.sec=='reality'&&!S.sni)S.sni=D.set.rsni||''}draw()});
+q('select[data-k]').forEach(z=>z.onchange=()=>{rd_();if(z.dataset.k=='net'){S.alpn='';SCAN=null}draw()});
+q('[data-tg]').forEach(z=>z.onclick=()=>{rd_();const k=z.dataset.tg,v=z.dataset.v;if(k=='alpn'){let a=alCur();a=a.includes(v)?a.filter(y=>y!=v):a.concat(v);if(!a.length)return;S.alpn=['h2','http/1.1'].filter(y=>a.includes(y)).join(',')}else{const d=S.sniff.dest;S.sniff.dest=d.includes(v)?d.filter(y=>y!=v):d.concat(v)}draw()});
+q('[data-cdel]').forEach(z=>z.onclick=()=>{rd_();const k=z.dataset.cdel,i=+z.dataset.i;if(k=='sids')S.sids.splice(i,1);else{const all=[S.sni,...S.snix].filter(v=>v);all.splice(i,1);S.sni=all[0]||'';S.snix=all.slice(1)}draw()});
+q('[data-cadd]').forEach(z=>{z.onkeydown=e=>{if(e.key=='Enter'||e.key==','||e.key==' '){e.preventDefault();rd_();addChip(z.dataset.cadd,z.value);draw();const n=f.querySelector(`[data-cadd="${z.dataset.cadd}"]`);n&&n.focus()}};z.onblur=()=>{if(z.value.trim()){rd_();addChip(z.dataset.cadd,z.value);draw()}}});
+q('[data-cgen]').forEach(z=>z.onclick=()=>{rd_();if(S.sids.length<8)S.sids.push(hex([1,2,3,4,8][Math.floor(Math.random()*5)]));draw()});
+if($('#ibspx'))$('#ibspx').onclick=()=>{rd_();S.spx='/'+rnd(12);draw()};
+q('[data-hdel]').forEach(z=>z.onclick=()=>{rd_();S.hdrs.splice(+z.dataset.hdel,1);draw()});if($('#ibhadd'))$('#ibhadd').onclick=()=>{rd_();S.hdrs.push(['','']);draw()};
+q('[data-edel]').forEach(z=>z.onclick=()=>{rd_();S.ext.splice(+z.dataset.edel,1);if(!S.ext.length)S.exon=false;draw()});if($('#ibeadd'))$('#ibeadd').onclick=()=>{rd_();S.ext.push({addr:'',port:'',remark:''});draw()};
+if($('#ibscan'))$('#ibscan').onclick=()=>{rd_();scan()};
+if($('#ibcp'))$('#ibcp').onclick=()=>{rd_();S.cmode='path';S.cfile=D.cpath[0];S.kfile=D.cpath[1];S.ccrt=S.ckey='';draw()};if($('#ibcc'))$('#ibcc').onclick=()=>{rd_();S.cfile=S.kfile=S.ccrt=S.ckey='';draw()};
+if($('#ibfind'))$('#ibfind').onclick=()=>{rd_();FIND=FIND||{};draw();if(!FIND.res&&!FIND.run)find()};
+if($('#fpx'))$('#fpx').onclick=()=>{FIND=null;draw()};if($('#fps'))$('#fps').onclick=()=>{FIND.extra=$('#fpe').value;find()};
+q('[data-use]').forEach(z=>z.onclick=()=>{const d=z.dataset.use;S.target=d+':443';S.sni=d;S.snix=[];FIND=null;scan()});
+if($('#ib_port'))$('#ib_port').oninput=()=>{S.port=$('#ib_port').value.trim();clearTimeout(ibmodal.pt);ibmodal.pt=setTimeout(()=>{const u=pused();ban(u?u.t:'',u&&u.w)},350)};
+const fz=f.querySelector('.ixb input:not([disabled]),.ixb select');if(tab==0&&!ed&&fz)fz.focus()}
+function addChip(k,v){const L=v.split(/[\s,]+/).map(y=>y.trim().toLowerCase()).filter(y=>y);if(k=='sids')L.forEach(y=>{if(!S.sids.includes(y)&&S.sids.length<8)S.sids.push(y)});else L.forEach(y=>{if(y!=S.sni&&!S.snix.includes(y)){if(!S.sni)S.sni=y;else S.snix.push(y)}})}
+async function scan(){const t=S.target||(S.sni?S.sni+':443':'');if(!t){ban('Write a target first, like www.microsoft.com:443');return}SCAN={run:1};draw();
+try{const r=await api('api/rscan',{target:t,sni:S.sni&&!S.target?S.sni:(S.sni||t.split(':')[0])});SCAN=r;if(r.ok){const h=t.split(':')[0];if(!S.target)S.target=r.target;if(S.sni!=h){S.sni=h;S.snix=[]}const nm=(r.names||[]).filter(n=>!n.includes('*')&&n!=S.sni&&!S.snix.includes(n));S.snix=S.snix.concat(nm).slice(0,4)}}catch(e){SCAN={ok:false,target:t,err:e.message}}draw()}
+async function find(){FIND={run:1,extra:FIND&&FIND.extra||''};draw();try{const r=await api('api/rtargets',{extra:FIND.extra});FIND=Object.assign(FIND,{run:0,res:r.res})}catch(e){FIND=Object.assign(FIND,{run:0,err:e.message})}if(FIND)draw()}
+function rd_(){f.querySelectorAll('input[data-k],select[data-k],textarea[data-k]').forEach(z=>{if(z.disabled)return;const k=z.dataset.k,v=k=='name'?z.value:z.value.trim();if(k.startsWith('f_'))S.frag[k.slice(2)]=v;else if(k=='hb')S.hb=+v||0;else S[k]=v});
+f.querySelectorAll('[data-hk]').forEach(z=>S.hdrs[+z.dataset.hk][0]=z.value.trim());f.querySelectorAll('[data-hv]').forEach(z=>S.hdrs[+z.dataset.hv][1]=z.value.trim());
+f.querySelectorAll('[data-ea]').forEach(z=>S.ext[+z.dataset.ea].addr=z.value.trim());f.querySelectorAll('[data-ep]').forEach(z=>S.ext[+z.dataset.ep].port=z.value.trim());f.querySelectorAll('[data-er]').forEach(z=>S.ext[+z.dataset.er].remark=z.value.trim());
+f.querySelectorAll('[data-cadd]').forEach(z=>{if(z.value.trim()){addChip(z.dataset.cadd,z.value);z.value=''}})}
 function ban(t,w){const el=$('#ibban');if(!el)return;clearTimeout(BT);el.innerHTML=t?`<div class="ibban${w?' w':''}">${X(t)}</div>`:'';if(t)BT=setTimeout(()=>{const d=el.firstChild;if(d){d.classList.add('hide');setTimeout(()=>{if(el.firstChild===d)el.innerHTML=''},450)}},3500)}
 function pused(){const p=String(+S.port);if(!USED||!/^\d+$/.test(String(S.port))||(ed&&+S.port==+x.port))return null;const o=USED[p];if(!o)return null;return o.startsWith('inbound: ')?{w:1,t:'Port '+p+' is used by the '+o+'. It works only if the new one has the same type.'}:{t:'Port '+p+' is already used by '+o+'. Pick another port.'}}
-f.onsubmit=async e=>{e.preventDefault();rd_();
+f.onsubmit=async e=>{e.preventDefault();if(FIND)return;rd_();
 const bad=!String(S.name).trim()?'Give the inbound a name':!/^\d+$/.test(String(S.port))?'Type a port number':(()=>{const u=pused();return u&&!u.w?u.t:''})();
 if(bad){if(tab!=0){tab=0;draw()}ban(bad);$('#me').textContent=bad;return}
-const bt=f.querySelector('.pri');bt.disabled=true;const nt=S.net!='tcp';
-const d={name:S.name.trim(),proto:S.proto,port:S.port,net:S.net,cdn:S.cdn,sec:S.sec,sni:S.sec=='none'?'':S.sni,target:S.sec=='reality'?S.target:'',fp:S.fp,alpn:S.sec=='tls'?S.alpn:'',addr:nt?S.addr:'',host:nt?S.host:'',path:nt&&!p4()?S.path:'',on:ed?S.on:true};
-try{await api('api/inbound/'+(ed?'edit':'add'),ed?Object.assign(d,{id:x.id}):d);$('#md').hidden=true;toast(ed?'Inbound saved':'Inbound created');IBH='';load()}catch(z){ban(z.message);$('#me').textContent=z.message}bt.disabled=false};
+const bt=f.querySelector('.pri');bt.disabled=true;const n=S.net,ph=!['tcp','grpc'].includes(n);
+const d={name:S.name.trim(),proto:S.proto,port:S.port,net:n,cdn:S.cdn,sec:S.sec,sni:S.sec=='none'?'':S.sni,target:S.sec=='reality'?S.target:'',fp:S.fp,alpn:S.sec=='tls'?alCur().join(','):'',addr:'',host:n!='tcp'?S.host:'',path:ph&&!p4()?S.path:'',on:S.on,
+xmode:S.xmode,svc:S.svc,multi:S.multi,obfs:S.obfs,obhost:S.obhost,obpath:S.obpath,hb:S.hb,hdrs:S.hdrs.filter(h=>h[0]||h[1]),tfo:S.tfo,frag:S.fon?Object.assign({on:true},S.frag):{},
+minv:S.minv,maxv:S.maxv,rsni:S.rsni,ech:S.ech,flow:S.flow,sids:S.sids,snix:S.snix,spx:S.spx,sniff:S.sniff,cmode:S.sec=='tls'?S.cmode:'panel',cfile:S.cfile,kfile:S.kfile,ccrt:S.ccrt,ckey:S.ckey,ext:S.exon?S.ext.filter(e=>e.addr):[]};
+try{const rr=await api('api/inbound/'+(ed?'edit':'add'),ed?Object.assign(d,{id:x.id}):d);$('#md').hidden=true;toast(ed?'Inbound saved':'Inbound created');IBH='';await load();if(!ed&&rr.id&&d.on&&+d.port!=80&&+d.port!=443)ibPort(rr.id)}catch(z){ban(z.message);$('#me').textContent=z.message}bt.disabled=false};
 $('#md').hidden=false;draw()}
 
 function showQR(t,v){$('#qrt').textContent=t;$('#qrn').textContent=/WireGuard/.test(t)?'Scan with the WireGuard app (+ → Scan from QR code)':'Scan with v2rayNG, NekoBox or Hiddify';try{$('#qrs').innerHTML=RXQR.svg(v,300)}catch(x){$('#qrs').innerHTML='<p class="note">'+X(x.message)+'</p>'}$('#qrm').hidden=false}
@@ -4713,6 +5231,13 @@ $('#pg').innerHTML=`<div class="stabs" role="tablist" aria-label="Settings secti
 <label for="xr">Default Reality target (a real website with TLS 1.3; each user can have their own in Add / Edit user)</label><input id="xr" value="${X(s.rsni)}" placeholder="www.microsoft.com" autocapitalize="none">
 <div class="kv" style="margin-top:8px"><span>Reality public key</span><b>${X(s.rpub||'Created when Xray starts')}</b></div><div class="kv"><span>Reality short ID</span><b>${X(s.rsid||'-')}</b></div>
 <div class="err" id="xe"></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn pri">Save</button><button type="button" class="btn" id="rk">${I('refresh',15)}New Reality keys</button></div></form>
+<form class="card" id="jsf"><div class="lab">${I('file',15)}JSON subscription</div><p class="note" style="margin-top:8px">A second subscription link with full configs for v2rayNG / v2rayN (Custom config). It can add TLS fragment and noise, so it works better where DPI blocks TLS.</p>
+<label class="ck"><input type="checkbox" id="jsu"${s.jsub!==false?' checked':''}> Give users a JSON link</label>
+<label class="ck"><input type="checkbox" id="jsfr"${s.jfrag?' checked':''}> Fragment (for TLS configs)</label>
+<div class="ibg2"><div><label for="jpk">Packets</label><input id="jpk" value="${X(s.jpk||'tlshello')}" placeholder="tlshello" autocapitalize="none"></div><div><label for="jln">Length</label><input id="jln" value="${X(s.jlen||'100-200')}" placeholder="100-200"></div></div>
+<label for="jin">Interval (ms)</label><input id="jin" value="${X(s.jint||'10-20')}" placeholder="10-20">
+<label class="ck"><input type="checkbox" id="jsn"${s.jnoise?' checked':''}> Noises (random UDP packets before QUIC / UDP)</label>
+<div class="err" id="jse"></div><button class="btn pri">Save</button></form>
 <form class="card" id="hysc"><div class="lab">${I('bolt',15)}UDP (Hysteria2)</div>${d.hy?`<p class="note" style="margin-top:8px">Hysteria2 runs on UDP ${X(d.ports.HY_PORT)}${d.ports.HY_HOP?' with port hopping on '+X(d.ports.HY_HOP):''}. It uses the same certificate as Xray. Each UDP user logs in with their own username and password.</p>
 ${D.svc.filter(x=>x.unit=='rexui-hy2').map(x=>kv(x.name+' · '+x.port,x.st=='RUNNING'?'Running':x.st=='FAILED'?'Failed':'Idle')).join('')}
 <label for="hybw">Max speed per UDP user (Mbps, 0 = no limit)</label><input id="hybw" type="number" min="0" max="10000" inputmode="numeric" value="${X(s.hy_bw||0)}">
@@ -4862,7 +5387,7 @@ ${d.h443.err&&!d.h443.on?`<p class="note bad" style="margin-top:8px">${X(d.h443.
 <div class="card" id="ppc"><div class="lab">${I('shield',15)}Panel and ports</div>${kv('URL',url)}${kv('Secret path','/'+d.path+'/')}
 ${[['Panel','PANEL_PORT'],['SSH','SSH_PORT'],['SSH SSL','SSL_PORT'],['SSH WS','WS_PORT'],['SSH WS TLS','WSTLS_PORT'],['UDPGW','UDPGW_PORT'],['VLESS XHTTP TLS','VWSTLS_PORT'],['VLESS TCP TLS','VTCP_PORT'],['Trojan TLS','TROJAN_PORT'],['VLESS Reality','REALITY_PORT'],['VLESS XHTTP','VWS_PORT']].map(x=>kv(x[0],p[x[1]]||'-')).join('')}
 <p class="note" style="margin-top:12px">To change a port, run <b style="color:var(--t)">menu</b> on the server and open Port change.</p></div></div>`;
-const TM={cf:'general',xf:'xray',rf:'general',fsc:'general',rfc:'xray',pf:'general',ovsf:'ovpn',hysc:'hy2',wgsc:'wg',dnsf:'dns',apf:'general',pwc:'general',ppc:'general',pac:'general',af:'telegram',spf:'sub',tf:'tools',xuc:'tools',ddc:'tools',mtc:'tools',bkc:'backup',lgc:'logs',cdnf:'cdn',payc:'pay',payf:'pay',prc:'ports',h4c:'ports',ckc:'check',pfc:'general'};
+const TM={cf:'general',xf:'xray',jsf:'xray',rf:'general',fsc:'general',rfc:'xray',pf:'general',ovsf:'ovpn',hysc:'hy2',wgsc:'wg',dnsf:'dns',apf:'general',pwc:'general',ppc:'general',pac:'general',af:'telegram',spf:'sub',tf:'tools',xuc:'tools',ddc:'tools',mtc:'tools',bkc:'backup',lgc:'logs',cdnf:'cdn',payc:'pay',payf:'pay',prc:'ports',h4c:'ports',ckc:'check',pfc:'general'};
 const stab=t=>{const x=ST.find(x=>x[0]==t)||ST[0];t=x[0];const g=x[2],one=SG.find(y=>y[0]==g)[2].length<2;LSG[g]=t;ls('rx-stab',t);document.querySelectorAll('[data-sg]').forEach(b=>{const on=b.dataset.sg==g;b.classList.toggle('on',on);b.setAttribute('aria-selected',on)});$('.ssub').hidden=one;document.querySelectorAll('[data-stab]').forEach(b=>{const on=b.dataset.stab==t;b.hidden=b.dataset.g!=g;b.classList.toggle('on',on);b.setAttribute('aria-selected',on)});
 Object.entries(TM).forEach(([id,tb])=>{const el=$('#'+id);if(el)el.classList.toggle('tabx',tb!=t||(t=='general'&&GSEL!=id))});$('#glc').classList.toggle('tabx',t!='general'||!!GSEL);$('#glb').classList.toggle('tabx',t!='general'||!GSEL);if(t=='tools')mload();if(t=='logs')lview();if(t=='ports')portsLoad();if(t=='check'&&!$('#ckr').innerHTML)checkRun()};window.STAB=stab;
 $('#fss').value=s.fsite;$('#fsc').onsubmit=async e=>{e.preventDefault();try{await api('api/fsite',{fsite:$('#fss').value,ftitle:$('#fst').value});$('#fse').textContent='';toast('Saved')}catch(x){$('#fse').textContent=x.message}};
@@ -4877,7 +5402,7 @@ $('#pae').innerHTML=`<span style="color:var(--t)">New address (save it):<br><b s
 $('#lvs').onchange=$('#lvn').onchange=$('#lvr').onclick=()=>lview();let lvq;$('#lvq').oninput=()=>{clearTimeout(lvq);lvq=setTimeout(lview,400)};
 document.querySelector('.gll').onclick=e=>{const b=e.target.closest('[data-gs]');if(b){GSEL=b.dataset.gs;stab('general');spush();window.scrollTo({top:0})}};$('#glback').onclick=()=>{GSEL=null;stab('general');spush();window.scrollTo({top:0})};
 document.querySelector('.stabs').onclick=e=>{const b=e.target.closest('[data-sg]');if(b){const g=SG.find(y=>y[0]==b.dataset.sg);if(b.dataset.sg=='general')GSEL=null;stab(LSG[g[0]]||g[2][0][0]);spush();b.scrollIntoView({block:'nearest',inline:'nearest'})}};document.querySelector('.ssub').onclick=e=>{const b=e.target.closest('[data-stab]');if(b){stab(b.dataset.stab);spush();b.scrollIntoView({block:'nearest',inline:'nearest'})}};
-$('#apth').value=ls('rx-theme')||'auto';$('#apth').onchange=()=>{const v=$('#apth').value;theme(v);if(v=='auto')try{localStorage.removeItem('rx-theme')}catch(e){}else{ls('rx-theme',v);if(v!='light')ls('rx-dark',v)}};
+$('#apth').value=ls('rx-theme')||'light';$('#apth').onchange=()=>{const v=$('#apth').value;theme(v);ls('rx-theme',v);if(v!='light'&&v!='auto')ls('rx-dark',v)};
 $('#pwab').hidden=!IP;$('#pwan').innerHTML=isApp()?'You are using the app now.':location.protocol!='https:'?'':`If there is no Install button: in Chrome open the ⋮ menu and tap <b style="color:var(--t)">Add to Home screen</b>. On iPhone, open the panel in Safari, tap Share and <b style="color:var(--t)">Add to Home Screen</b>.${D.cert.src=='self-signed'?' The app works best with your own domain certificate.':''}`;
 $('#pwab').onclick=async()=>{if(!IP)return;IP.prompt();await IP.userChoice.catch(()=>{});IP=null;$('#pwab').hidden=true};
 $('#clb').onclick=async()=>{const b=$('#clb');b.disabled=true;try{const r=await api('api/cleanup');toast('Freed '+fb(r.freed));mload()}catch(x){$('#mte').textContent=x.message}b.disabled=false};
@@ -4892,6 +5417,7 @@ try{const r=await api('api/restore',o);toast('Restored '+r.users+' users'+(r.ski
 $('#cf').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('.pri'),t=b.querySelector('span');b.disabled=true;t.textContent='Checking...';
 try{const r=await api('api/cert',{crt:$('#cc').value,key:$('#ck').value});const dm=r.cert.domain;toast('Certificate saved. Panel is restarting...');
 setTimeout(()=>location.href=`https://${dm||location.hostname}:${location.port}${location.pathname}`,6000)}catch(x){$('#ce').textContent=x.message}b.disabled=false;t.textContent='Save certificate'};
+$('#jsf').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('.pri');b.disabled=true;try{await api('api/jsub-set',{jsub:$('#jsu').checked,jfrag:$('#jsfr').checked,jnoise:$('#jsn').checked,jpk:$('#jpk').value,jlen:$('#jln').value,jint:$('#jin').value});$('#jse').textContent='';toast('Saved');await load()}catch(x){$('#jse').textContent=x.message}b.disabled=false};
 if($('#hybw'))$('#hysc').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('.pri');b.disabled=true;try{await api('api/hy-set',{hy_bw:$('#hybw').value});$('#hyse').textContent='';toast('Saved');await load()}catch(x){$('#hyse').textContent=x.message}b.disabled=false};
 if($('#dnsn'))$('#dnsf').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('.pri');b.disabled=true;try{await api('api/dns-set',{dns_ns:$('#dnsn').value});$('#dnse').textContent='';toast('Saved');await load();st()}catch(x){$('#dnse').textContent=x.message}b.disabled=false};
 if($('#ovdh'))$('#ovsf').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('.pri');b.disabled=true;try{await api('api/ovpn-set',{ovhost:$('#ovdh').value});$('#ovse').textContent='';toast('Saved');await load()}catch(x){$('#ovse').textContent=x.message}b.disabled=false};
@@ -5081,7 +5607,7 @@ document.getElementById('app').innerHTML=`<div class="top"><b>My account</b><b c
 <div class="big">${fb(U.used)} <span>of ${U.lim?U.lim+' GB':'unlimited'}</span></div>${U.lim?`<div class="bar"><i style="width:${pct}%;background:${pct>90?'var(--r)':pct>75?'var(--y)':'var(--a)'}"></i></div>`:''}
 ${row('Upload',fb(U.up))}${row('Download',fb(U.down))}${row('Expires',left)}${row('Devices allowed',U.dev||'Unlimited')}</div>
 ${H.length?`<div class="card"><div class="lab">Daily usage (30 days)</div><div class="uch" role="img" aria-label="Daily data usage">${H.map(x=>`<i title="${x[0]}: ${fb(x[1]+x[2])}"><b style="height:${(x[1]/HM*100).toFixed(1)}%"></b><u style="height:${(x[2]/HM*100).toFixed(1)}%"></u></i>`).join('')}</div><div class="uax"><span>${H[0][0].slice(5)}</span><span>Today ${fb(H[H.length-1][1]+H[H.length-1][2])}</span></div></div>`:''}
-${U.kind=="v2ray"||U.kind=="both"||U.kind=="hy2"?`<div class="card"><div class="lab">Subscription</div><p class="note">Add this link in v2rayNG, NekoBox or Hiddify (Subscription → Add). The app updates your configs automatically.${U.kind=="hy2"?" Your account uses Hysteria2 (UDP). If it does not connect, your network may block UDP.":""}</p>${cbox('Subscription link',U.sub,false)}<div class="qr">${RXQR.svg(U.sub,260)}</div></div>
+${U.kind=="v2ray"||U.kind=="both"||U.kind=="hy2"?`<div class="card"><div class="lab">Subscription</div><p class="note">Add this link in v2rayNG, NekoBox or Hiddify (Subscription → Add). The app updates your configs automatically.${U.kind=="hy2"?" Your account uses Hysteria2 (UDP). If it does not connect, your network may block UDP.":""}</p>${cbox('Subscription link',U.sub,false)}<div class="qr">${RXQR.svg(U.sub,260)}</div>${U.jsub?`<p class="note" style="margin-top:14px">JSON link: full configs with TLS fragment, for v2rayNG / v2rayN (Subscription → Add, it works like the normal link). Use it if the normal link is blocked.</p>${cbox('JSON subscription',U.jsub,false)}`:''}</div>
 <div class="card"><div class="lab">Get the app</div><p class="note">Install one of these apps, then add the subscription link above.</p><div class="apps">
 <a href="https://github.com/2dust/v2rayNG/releases/latest" target="_blank" rel="noopener">v2rayNG<small>Android</small></a><a href="https://github.com/MatsuriDayo/NekoBoxForAndroid/releases/latest" target="_blank" rel="noopener">NekoBox<small>Android</small></a><a href="https://github.com/hiddify/hiddify-app/releases/latest" target="_blank" rel="noopener">Hiddify<small>Android · iPhone · PC</small></a></div>
 <a class="wide" href="hiddify://import/${encodeURI(U.sub)}#${encodeURIComponent(U.brand||'ReXUI')}">Already have Hiddify? Tap to add your subscription</a></div>
@@ -5606,7 +6132,7 @@ status(){
   ram=$(free -m | awk '/^Mem:/{print $2-$7}')
   on=$(cat /run/rexui-online 2>/dev/null || echo -)
   local cc=$G; [ $cpu -ge 70 ] && cc=$Y; [ $cpu -ge 90 ] && cc=$R
-  echo -e "${W}ReXUI v1.8${N}  $(dot xray Xray) $(dot tunnel-panel Panel)$([ -f /etc/tunnel/h443.on ] && echo " $(dot haproxy HAProxy)")"
+  echo -e "${W}ReXUI v1.9${N}  $(dot xray Xray) $(dot tunnel-panel Panel)$([ -f /etc/tunnel/h443.on ] && echo " $(dot haproxy HAProxy)")"
   echo -e "${D}CPU${N} ${cc}${cpu}%${N}  ${D}RAM${N} ${ram}M  ${D}Online${N} ${W}${on}${N}"
 }
 lastline(){ journalctl -u "$1" --since "24 hours ago" --no-pager -o short-iso 2>/dev/null | grep -iE "$2" | grep -viE 'PROXY protocol|deprecated|please migrate' | tail -1 | sed -E 's/^[0-9-]+T([0-9:]{5})[^ ]* [^ ]+ [^:]+: /\1 /; s#[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9:.]+ ##' | cut -c1-70; }

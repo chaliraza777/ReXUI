@@ -1,5 +1,5 @@
 #!/bin/bash
-# ReXUI v1.7 installer
+# ReXUI v1.8 installer
 # Self-hosted SSH + Xray panel: SSH, SSL, SSH WebSocket (+TLS), UDPGW, Xray (VLESS XHTTP TLS / TCP TLS / Reality / XHTTP, Trojan), OpenVPN (TCP + HTTP proxy), Hysteria2 (UDP), WireGuard, DNS tunnel (dnstt) + V2Ray,
 # web panel with users, subscriptions, data and device limits, Telegram alerts, backups, 2FA, and a terminal menu.
 # Run as root on Ubuntu or Debian:  bash install.sh   (running it again updates ReXUI and keeps users and settings)
@@ -971,9 +971,9 @@ def _links(u):
     s=sload(); ci=certinfo(); a=pub_addr(s); cn=ci['name'] if ci['src']!='self-signed' else ''
     host=u.get('host') or s['host'] or ci['domain'] or a
     A='['+a+']' if ':' in a else a; pth=quote(s['path'],safe=''); fp=cert_fp()
-    def tlsq(sni):
+    def tlsq(sni,f='chrome'):
         ok=bool(cn) and bool(sni) and (sni==cn or (cn.startswith('*.') and sni.endswith(cn[1:])))
-        return 'security=tls'+('&sni='+quote(sni) if sni else '')+('' if ok else '&allowInsecure=1'+('&pcs='+fp if fp else ''))
+        return 'security=tls'+('&sni='+quote(sni) if sni else '')+('&fp='+f if f!='none' else '')+('' if ok else '&allowInsecure=1'+('&pcs='+fp if fp else ''))
     xh='&type=xhttp&host=%s&path=%s&mode=auto'%(quote(host),pth)
     pa=s['addr'] if s['addr'] and re.search('[a-z]',s['addr']) else ci['domain'] or a; PA='['+pa+']' if ':' in pa else pa
     out=[]
@@ -984,8 +984,8 @@ def _links(u):
         if b=='reality':
             if not s['rpub']: continue
             rt,rs=ureal(u,s)
-            out.append((x['name'],'vless://%s@%s:%d?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s'%(
-                u['uuid'],('['+x['addr']+']' if ':' in x['addr'] else x['addr']) if x.get('addr') else A,rport(rt,s),quote(rs),s['rpub'],s['rsid'],N))); continue
+            out.append((x['name'],'vless://%s@%s:%d?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=tcp#%s'%(
+                u['uuid'],('['+x['addr']+']' if ':' in x['addr'] else x['addr']) if x.get('addr') else A,rport(rt,s),quote(rs),ib_fp(x),s['rpub'],s['rsid'],N))); continue
         own=x['port']; main,alt=own,None
         if h_on() and ib_h(x) and own not in (80,443): main,alt=(443 if x['sec']=='tls' else 80),own
         bi=bool(b)   # default inbounds keep the old per-user SNI / Host
@@ -997,9 +997,10 @@ def _links(u):
         tq={'tcp':'&type=tcp','xhttp':'&type=xhttp&host=%s&path=%s&mode=auto'%(quote(hh),P_),'ws':'&type=ws&host=%s&path=%s'%(quote(hh),P_)}[x['net']]
         if x['sec']=='reality':
             if not s['rpub']: continue
-            sq='security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s'%(quote(x['sni']),s['rpub'],s['rsid'])+('&flow=xtls-rprx-vision' if x['proto']=='vless' and x['net']=='tcp' else '')
+            sq='security=reality&sni=%s&fp=%s&pbk=%s&sid=%s'%(quote(x['sni']),ib_fp(x),s['rpub'],s['rsid'])+('&flow=xtls-rprx-vision' if x['proto']=='vless' and x['net']=='tcp' else '')
         elif x['sec']=='tls':
-            sq=tlsq(sni)+({'xhttp':'&alpn=http%2F1.1' if main==443 and h_on() else '&alpn=h2%2Chttp%2F1.1','ws':'&alpn=http%2F1.1'}.get(x['net'],''))
+            al_=['http/1.1'] if main==443 and h_on() and own!=443 or own==443 else ib_alpn(x)   # 443 mode (HAProxy) speaks http/1.1
+            sq=tlsq(sni,ib_fp(x))+('&alpn='+quote(','.join(al_),safe='') if al_ else '')
         else: sq='security=none'
         if x['proto']=='trojan': url='trojan://%s@%s:%d?%s%s#%s'%(u['uuid'],A_,main,sq,tq,N)
         else: url='vless://%s@%s:%d?encryption=none&%s%s#%s'%(u['uuid'],A_,main,sq,tq,N)
@@ -1045,7 +1046,8 @@ def ib_load():
             L=[]; wjson(IBF,L,0o600); log('inbounds: empty list made (add inbounds in the panel)')
         for x in L:
             if x.get('b') in IBB: k,d=IBB[x['b']][4],IBB[x['b']][5]; x['port']=P(k,d)
-            for k in ('sni','addr','host','path','target','b'): x.setdefault(k,'')
+            for k in ('sni','addr','host','path','target','b','alpn'): x.setdefault(k,'')
+            x.setdefault('fp','chrome')
             x.setdefault('cdn',False); x.setdefault('on',True)
         return L
 def cfg_set(k,v):
@@ -1065,7 +1067,19 @@ def ib_hports():
     r.pop(0,None); return r
 def ib_main(net): return sload()['wspath' if net=='ws' else 'path']
 def ib_path(x): return x.get('path') or ib_main(x['net'])
-def ib_kind(x): return (x['proto'],x['net'],x['sec'],(x.get('target') or x['sni']) if x['sec']=='reality' else '',ib_path(x) if x['net'] in ('xhttp','ws') else '')
+FPS=('chrome','firefox','safari','edge','ios','android','random','randomized','none')
+ALPNS=('h2','http/1.1')
+def ib_fp(x):
+    v=x.get('fp') or 'chrome'
+    return 'chrome' if v not in FPS or (v=='none' and x.get('sec')=='reality') else v
+def ib_alpn(x,srv=False):
+    """ALPN list for a TLS inbound. Empty setting = the default for the transport."""
+    if x.get('sec')!='tls': return []
+    a=[v for v in ALPNS if v in str(x.get('alpn') or '').split(',')]
+    if not a: a={'xhttp':['h2','http/1.1'],'ws':['http/1.1']}.get(x['net'],[])
+    if srv and x['net']=='tcp' and sload()['fsite']!='off' and 'http/1.1' not in a: a=a+['http/1.1']
+    return a
+def ib_kind(x): return (x['proto'],x['net'],x['sec'],(x.get('target') or x['sni']) if x['sec']=='reality' else '',ib_path(x) if x['net'] in ('xhttp','ws') else '',','.join(ib_alpn(x)))
 def ib_h(x):
     """Which HAProxy route (443 mode) can carry this inbound: xhttp, vless, trojan or None."""
     if x['sec']=='reality': return None
@@ -1092,6 +1106,17 @@ def ib_check(x,L,old=None):
     if cdn and net not in ('xhttp','ws'): raise Err('CDN works only with XHTTP or WS')
     if path and path==ib_main(net): path=''
     if sec!='reality': tg=''
+    fp=str(x.get('fp') or 'chrome').lower()
+    if fp not in FPS: raise Err('Fingerprint must be one of: '+', '.join(FPS))
+    if sec=='reality' and fp=='none': raise Err('Reality needs a fingerprint (chrome is best)')
+    if sec=='none': fp='chrome'
+    al=x.get('alpn') or ''
+    if isinstance(al,list): al=','.join(map(str,al))
+    al=[v.strip().lower() for v in str(al).split(',') if v.strip()]
+    if any(v not in ALPNS for v in al): raise Err('ALPN can be h2 and / or http/1.1')
+    if sec!='tls': al=[]
+    if net=='ws' and al and 'http/1.1' not in al: raise Err('WS needs http/1.1 in ALPN (WebSocket does not work on h2 alone)')
+    al=','.join(v for v in ALPNS if v in al)
     if not sni and (old or {}).get('b')=='reality': sni=sload()['rsni']
     if sec=='reality':
         if net=='ws': raise Err('Reality does not work with WS. Use TLS, or pick TCP / XHTTP.')
@@ -1113,7 +1138,7 @@ def ib_check(x,L,old=None):
         if net=='tcp' and sec!='tls': raise Err('On port %d TCP needs TLS (TCP without TLS cannot share the port). Use XHTTP or WS, or another port.'%p)
         if pr=='trojan' and net!='tcp': raise Err('On port %d Trojan works only with TCP + TLS. Use VLESS for XHTTP / WS here.'%p)
         if path: raise Err('On port %d (443 mode) %s uses the main path %s. Leave Path empty.'%(p,net.upper(),ib_main(net)))
-    o=dict(x,name=n,proto=pr,net=net,sec=sec,cdn=cdn,port=p,sni=sni,host=host,addr=addr,path=path,target=tg,b=b,on=bool(x.get('on',True)))
+    o=dict(x,name=n,proto=pr,net=net,sec=sec,cdn=cdn,port=p,sni=sni,host=host,addr=addr,path=path,target=tg,b=b,fp=fp,alpn=al,on=bool(x.get('on',True)))
     if o['on'] and p not in (80,443):
         hp=ib_hports()
         if p in hp: raise Err('Port %d is used by %s. Pick another port.'%(p,hp[p]))
@@ -1165,7 +1190,7 @@ def ib_api(a,d):
             else:
                 if a=='toggle': d=dict(old,on=not old['on'])
                 else:
-                    d=dict(old,**{k:d[k] for k in ('name','port','sni','on','proto','net','sec','cdn','addr','host','path','target') if k in d})
+                    d=dict(old,**{k:d[k] for k in ('name','port','sni','on','proto','net','sec','cdn','addr','host','path','target','fp','alpn') if k in d})
                 x=ib_check(d,L,old); x['id']=old['id']
                 if x['sec']=='reality' and (x['sni'],x['target'])!=(old['sni'] or (sload()['rsni'] if old.get('b')=='reality' else ''),old.get('target','')): ib_tls13(x)
                 ib_apply_change(old,x)
@@ -1366,7 +1391,7 @@ def xray_apply(force=False):
         for p,g in grp.items():
             x=g['x']; mem=list(g['u'].values()); pr,net,sec=x['proto'],x['net'],x['sec']
             st={'network':net,'security':sec}
-            if sec=='tls': st['tlsSettings']=dict(cert,**({'alpn':['h2','http/1.1']} if net=='xhttp' else {'alpn':['http/1.1']} if fs or net=='ws' else {}))
+            if sec=='tls': al_=ib_alpn(x,True); st['tlsSettings']=dict(cert,**({'alpn':al_} if al_ else {}))
             if sec=='reality': st['realitySettings']={'target':x.get('target') or x['sni']+':443','serverNames':[x['sni']],'privateKey':s['rpriv'],'shortIds':[s['rsid']]}
             if net=='xhttp': st['xhttpSettings']={'path':ib_path(x),'mode':'auto'}
             if net=='ws': st['wsSettings']={'path':ib_path(x)}
@@ -1460,22 +1485,31 @@ def collect(flush=False):
     tr_proto('OpenVPN',sum(v['up'] for v in op.values()),sum(v['down'] for v in op.values()))
     for n,v in xs.items():
         if v['up'] or v['down']: XACT[n]=now
+    tick={}
     # add up usage in memory and write users.json at most every 30 s (many users = big file)
     for uid,v in list(PEND.items()):
         try: n=pwd.getpwuid(uid).pw_name
         except (KeyError,TypeError): continue
-        if v['up'] or v['down']: e=UACC.setdefault(n,[0,0]); e[0]+=v['up']; e[1]+=v['down']
+        if v['up'] or v['down']:
+            e=UACC.setdefault(n,[0,0]); e[0]+=v['up']; e[1]+=v['down']; t_=tick.setdefault(n,[0,0]); t_[0]+=v['up']; t_[1]+=v['down']
     PEND.clear()
     for src in (xs,op,hp_,wp_):
         for n,v in src.items():
-            if v and (v['up'] or v['down']): e=UACC.setdefault(n,[0,0]); e[0]+=v['up']; e[1]+=v['down']
+            if v and (v['up'] or v['down']):
+                e=UACC.setdefault(n,[0,0]); e[0]+=v['up']; e[1]+=v['down']; t_=tick.setdefault(n,[0,0]); t_[0]+=v['up']; t_[1]+=v['down']
+    # live speed per user (bytes per second over the last collect) and when traffic was last seen
+    dt=now-SPDT[0] if SPDT[0] else 0
+    if not SPDT[0] or dt>=3:
+        SPDT[0]=now; SPD.clear()
+        if dt<120: SPD.update({n:[int(v[0]/dt),int(v[1]/dt)] for n,v in tick.items()} if dt else {})
+    for n in tick: LSEEN[n]=int(now)
     if not UACC or (not flush and now-ULAST[0]<30): return
     with UL:
         acc=dict(UACC); UACC.clear(); ULAST[0]=now; us=uload(); ch=False
         for u in us:
             z=acc.get(u['name'])
             if not z: continue
-            u['up']+=z[0]; u['down']+=z[1]; ch=True
+            u['up']+=z[0]; u['down']+=z[1]; u['seen']=int(now); ch=True
             if u.get('fdays'):
                 u['exp']=(datetime.date.today()+datetime.timedelta(days=u['fdays'])).isoformat(); u['fdays']=0; setexp(u['name'],u['exp']); log('first use, expiry starts:',u['name'],u['exp'])
             h=u.setdefault('hist',{}); e=h.setdefault(today(),[0,0]); e[0]+=z[0]; e[1]+=z[1]
@@ -1507,6 +1541,7 @@ def enforce():
             wg_enforce(us)
         except Exception as e: log('wireguard enforce:',repr(e))
 # ---------- Xray access log: online IPs, device limit ----------
+SPD={}; SPDT=[0]; LSEEN={}
 IPSEEN={}; XOFF=[None]; WIN=60; BANS={}; BANSET=[None]; BANT=120
 LRE=re.compile(r'from (?:tcp:|udp:)?\[?([0-9A-Fa-f.:]+?)\]?:\d+ accepted .*?email: (\S+)')
 def xlog_read():
@@ -2237,7 +2272,9 @@ def cdn_link(u,s,x,N):
     if h_on() and ib_h(x) and own not in (80,443): main,alt=(443 if tls else 80),(own if own in ok else None)
     if main not in ok: return []
     pre=('trojan://%s@%s:%d?'%(u['uuid'],A,main)) if x['proto']=='trojan' else ('vless://%s@%s:%d?encryption=none&'%(u['uuid'],A,main))
-    if tls: url=pre+'security=tls&sni=%s&fp=chrome&alpn=%s'%(quote(dom),'http%2F1.1' if ws else 'h2%2Chttp%2F1.1')+xh+'#'+N
+    if tls:
+        al_=ib_alpn(x); f_=ib_fp(x)   # client ↔ Cloudflare
+        url=pre+'security=tls&sni=%s'%quote(dom)+('&fp='+f_ if f_!='none' else '')+('&alpn='+quote(','.join(al_),safe='') if al_ else '')+xh+'#'+N
     else: url=pre+'security=none'+xh+'#'+N
     return [(x['name'],url,alt)]
 def cdn_info():
@@ -2878,11 +2915,12 @@ def ustate_part(uh):
     L=users_list(); h=hashlib.sha1(json.dumps(L,sort_keys=True).encode()).hexdigest()[:16]
     return {'uh':h} if uh and uh==h else {'users':L,'uh':h}
 def users_list():
-    on=sessions(); now=time.time(); out=[]
+    on=sessions(); now=time.time(); out=[]; td=today()
     for u in uload():
         st=ustate(u); nip=len(IPSEEN.get(u['name'],{})); o=on.get(u['name'],0)+len(OVON.get(u['name'],[]))+HYON.get(u['name'],0)+(1 if u['name'] in WGON else 0)+((nip or 1) if now-XACT.get(u['name'],0)<XONW else 0)
         out.append({'name':u['name'],'exp':u['exp'],'lim':u['lim'],'used':u['up']+u['down'],'on':o,'dev':u.get('dev',0),'rday':u.get('rday',0),'note':u.get('note','')[:80],'created':u.get('created',''),'fdays':u.get('fdays',0),'trial':u.get('trial',False),'expts':u.get('expts',0),'kind':kind(u),
-                    'st':'online' if st=='active' and o else st})
+                    'st':'online' if st=='active' and o else st,'spd':SPD.get(u['name'],[0,0]) if o else [0,0],'seen':max(int(u.get('seen',0) or 0),LSEEN.get(u['name'],0)),
+                    'today':sum((u.get('hist') or {}).get(td,[0,0]))+sum(UACC.get(u['name'],[0,0]))})
     return out
 
 # ---------- services ----------
@@ -3011,7 +3049,11 @@ def monitor():
                 h_sync()
             if i%120==0: hm_save(); tr_save()
             if i%360==1: threading.Thread(target=ddns_update,daemon=True).start()
-            if i%2==0: collect(); enforce(); trial_cleanup(); xray_apply(); ssh_rules(); devices(); auto_backup()
+            if i%4320==24: threading.Thread(target=rx_check,daemon=True).start()
+            if i%2==0:
+                collect(); enforce(); trial_cleanup(); xray_apply(); ssh_rules(); devices(); auto_backup()
+                try: wtext('/run/rexui-online',str(sum(1 for u in users_list() if u['on'])),0o644)
+                except Exception: pass
         except Exception as e: log('monitor:',repr(e))
 def conn():
     c=lambda fs:sum(max(0,len(rd(f).splitlines())-1) for f in fs)
@@ -3043,7 +3085,7 @@ def state(uh=''):
     return {'info':dict(INFO,uptime=float(rd('/proc/uptime','0').split()[0]),puptime=time.time()-START),
             'cpu':S['cpu'],'ram':[m['MemTotal']-m['MemAvailable'],m['MemTotal']],'swap':[m.get('SwapTotal',0)-m.get('SwapFree',0),m.get('SwapTotal',0)],
             'disk':[du.used,du.total],'rx':S['rx'],'tx':S['tx'],'rxt':S['rxt'],'txt':S['txt'],'hist':H,'tcp':tc,'udp':uc,
-            'ip':IPS,'stats':stats(),'tools':TOOLS,'fs':FS['err'],'xup':XUP,'ddns':dict(DDNS,dom=sload()['ddns_dom']),'stime':time.strftime('%H:%M %Z'),'svc':services(),'xray':xinfo(),'proc':procinfo(),'online':online(),'ibs':ib_view(),'backups':sorted(os.listdir(BKD))[::-1] if os.path.isdir(BKD) else [],**ustate_part(uh),'cert':certinfo(),'set':dict({k:v for k,v in sload().items() if k not in ('rpriv','tgtoken','ddns_tok')},tgmask=mask(sload()['tgtoken']),ddmask=mask(sload()['ddns_tok'])),'tfa':bool(lread().get('totp')),'warp':warp_info(),'geo':geo_ok(),'addr':pub_addr(),'me':curuser(),'ov':ov_on(),'hy':hy_on(),'wg':wg_on(),'dns':dns_info(),'cdn':cdn_info(),'pays':pay_load(),'pvals':pay_vals(),'h443':h_info(),
+            'ip':IPS,'stats':stats(),'tools':TOOLS,'fs':FS['err'],'xup':XUP,'rxup':rx_info(),'ddns':dict(DDNS,dom=sload()['ddns_dom']),'stime':time.strftime('%H:%M %Z'),'svc':services(),'xray':xinfo(),'proc':procinfo(),'online':online(),'ibs':ib_view(),'backups':sorted(os.listdir(BKD))[::-1] if os.path.isdir(BKD) else [],**ustate_part(uh),'cert':certinfo(),'set':dict({k:v for k,v in sload().items() if k not in ('rpriv','tgtoken','ddns_tok')},tgmask=mask(sload()['tgtoken']),ddmask=mask(sload()['ddns_tok'])),'tfa':bool(lread().get('totp')),'warp':warp_info(),'geo':geo_ok(),'addr':pub_addr(),'me':curuser(),'ov':ov_on(),'hy':hy_on(),'wg':wg_on(),'dns':dns_info(),'cdn':cdn_info(),'pays':pay_load(),'pvals':pay_vals(),'h443':h_info(),
             'port':E.get('PANEL_PORT',''),'path':E.get('WEB_PATH',''),'ports':dict({k:v for k,v in E.items() if k.endswith('_PORT')},REALITY_PORT=str(P('REALITY_PORT',8444)),TROJAN_PORT=str(P('TROJAN_PORT',2096)),OVPN1_PORT=str(P('OVPN1_PORT',1194)),OVPN2_PORT=str(P('OVPN2_PORT',110)),SQUID_PORT=str(P('SQUID_PORT',3128)),HY_PORT=str(hyport()),WG_PORT=str(wgport()),HY_HOP='%d-%d'%hyhop() if hyhop() else '')}
 
 # ---------- stats: server traffic, protocols, top users ----------
@@ -3545,6 +3587,25 @@ def rdefault(d):
     if not h or not tls13(h): raise Err('%s did not answer with TLS 1.3'%h)
     s=sload(); s['rsni']=h; wjson(SETF,s,0o600); xray_apply(); return {'ok':1}
 
+# ---------- ReXUI new version check (GitHub, every 6 hours) ----------
+RXVER='1.8'; RXURL=os.environ.get('REXUI_UPURL','https://raw.githubusercontent.com/chaliraza777/ReXUI/main/install.sh'); RXUPF=T+'/rxup.json'; RXUP={'latest':'','t':0}
+def vtup(v): return tuple(int(x) for x in re.findall(r'\d+',v)[:3])
+def rx_check():
+    import urllib.request
+    try:
+        rq=urllib.request.Request(RXURL,headers={'User-Agent':'ReXUI','Range':'bytes=0-2047'})
+        with urllib.request.urlopen(rq,timeout=20) as r: head=r.read(4096).decode('utf-8','ignore')
+        m=re.search(r'ReXUI v([\d.]+) installer',head)
+        if not m: return
+        RXUP['latest'],RXUP['t']=m[1],int(time.time())
+        if vtup(m[1])>vtup(RXVER):
+            try: told=json.loads(rd(RXUPF) or '{}').get('told','')
+            except Exception: told=''
+            if told!=m[1]:
+                tg_send('🆕 ReXUI v%s is available (you have v%s). Update on the server: menu → 1 (Update) → 1.'%(m[1],RXVER)); wjson(RXUPF,{'told':m[1]})
+    except Exception as e: log('update check:',repr(e))
+def rx_info(): return {'cur':RXVER,'latest':RXUP['latest'],'new':bool(RXUP['latest'] and vtup(RXUP['latest'])>vtup(RXVER))}
+
 # ---------- Xray core update ----------
 XUP={'run':0,'msg':'','t':0,'latest':'','lt':0}
 def xver():
@@ -3846,6 +3907,29 @@ if __name__=='__main__':
         try: setlogin(a[1],a[2])
         except Err as e: print(e); sys.exit(1)
     elif a[0]=='user': print(curuser())
+    elif a[0]=='fwcheck':
+        G_,Y_,R_,D_,N_='\033[1;32m','\033[1;33m','\033[1;31m','\033[2m','\033[0m'
+        v=ports_view(); bad=[]; line=[]
+        for x in v['ports']:
+            if not isinstance(x['port'],int): continue
+            lab='%d%s'%(x['port'],'/udp' if x['proto']=='udp' else '')
+            if not x['listen']: line.append(Y_+'●'+lab+N_); bad.append((x,'not running'))
+            elif x['fw']=='closed': line.append(R_+'●'+lab+N_); bad.append((x,'ufw'))
+            else: line.append(G_+'●'+N_+lab)
+        print('FIREWALL  '+D_+('ufw on' if v['fw'] else 'ufw off')+N_)
+        print(' '.join(line))
+        nr=[x for x,why in bad if why=='not running']
+        if nr: print(Y_+'Not running: '+N_+', '.join('%s (%s)'%(x['port'],x['name']) for x in nr[:8])+(' +%d more'%(len(nr)-8) if len(nr)>8 else '')+D_+'  → check menu → 7 (Service restart)'+N_)
+        uf=[x for x,why in bad if why=='ufw']
+        if uf:
+            print(R_+', '.join('%s/%s'%(x['port'],x['proto']) for x in uf)+N_+' blocked by ufw on this server')
+            try: y=input('Open %s now? (y/N): '%('it' if len(uf)==1 else 'them')).strip().lower()
+            except EOFError: y=''
+            if y=='y':
+                for x in uf: fw_open({'port':x['port'],'proto':x['proto']}); print(G_+'✓'+N_+' %s/%s opened'%(x['port'],x['proto']))
+        elif not [1 for _,w in bad if w=='not running']: print(G_+'Server side OK.'+N_+' All ReXUI ports are listening'+(' and allowed in ufw.' if v['fw'] else '.'))
+        print(D_+'If phones still cannot connect to a port, open it in your VPS company\'s control panel (Firewall / Security group). The server cannot change that one.'+N_)
+        if v['clash']: print(Y_+'Two services on one port: '+'; '.join('%s/%s (%s)'%(c['port'],c['proto'],', '.join(c['names'])) for c in v['clash'])+N_)
     elif a[0]=='purge': purge(); ov_net_purge(); hy_purge(); wg_purge(); dns_purge()
     elif a[0]=='check':
         for x in server_check()['items']: print('%-5s %-18s %s'%({'ok':'OK','warn':'WARN','fail':'FAIL'}[x['st']],x['name'],x['msg']))
@@ -3918,7 +4002,7 @@ aside{position:fixed;inset:0 auto 0 0;width:232px;background:var(--side);border-
 .logo i{animation:lgs 7s linear infinite,lgx 6s ease-in-out infinite;padding:0 .02em}
 @keyframes lgs{to{background-position:300% 0}}@keyframes lgx{0%,84%,100%{transform:none}90%{transform:translateY(-.08em) scale(1.18) rotate(-8deg)}95%{transform:scale(1.05)}}
 @media(prefers-reduced-motion:reduce){.logo span,.logo i{animation:none}}
-.banner{display:flex;gap:10px;align-items:flex-start;border:1px solid;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:13.5px}.banner.w{color:var(--y);background:color-mix(in srgb,var(--y) 10%,var(--c))}.banner.e{color:var(--r);background:color-mix(in srgb,var(--r) 10%,var(--c))}.banner b{color:var(--t)}
+.banner{display:flex;gap:10px;align-items:flex-start;border:1px solid;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:13.5px}.banner.w{color:var(--y);background:color-mix(in srgb,var(--y) 10%,var(--c))}.banner.e{color:var(--r);background:color-mix(in srgb,var(--r) 10%,var(--c))}.banner.i{color:var(--a);background:color-mix(in srgb,var(--a) 9%,var(--c))}.banner.i div{color:var(--t)}.banner.i code{font-size:12px;padding:1px 5px;border-radius:4px;background:var(--c2)}.banner.i a{color:var(--a);font-weight:600}.banner b{color:var(--t)}
 .uch{display:flex;align-items:flex-end;gap:2px;height:120px;margin-top:10px}.uch i{flex:1;display:flex;flex-direction:column;justify-content:flex-end;height:100%;min-width:0}.uch i b{display:block;background:var(--a);border-radius:2px 2px 0 0}.uch i u{display:block;background:var(--l2);opacity:.6}
 .uax{display:flex;justify-content:space-between;font-size:11.5px;color:var(--m);margin-top:6px}
 .note2{white-space:pre-wrap;word-break:break-word;font-size:13.5px}
@@ -4016,7 +4100,12 @@ aside{display:none}#app #mt{display:flex}#app #bn{display:grid}.toast{bottom:cal
 .ut .av{width:30px;height:30px;border-radius:8px;font-size:13px}.ut .pill{margin:0}.ut .ubar{width:120px;margin-top:5px}
 .ut{font-size:12.5px;min-width:440px}.ut th button{padding:7px 10px;font-size:10.5px}.ut td{padding:5px 10px;line-height:1.25}
 .ut .av{width:24px;height:24px;border-radius:6px;font-size:11px}.ut .tu{gap:8px}.ut .tu b{font-size:13px}.ut .tu small{font-size:11px}.ut .pill{padding:2px 8px;font-size:11px}.ut .ubar{width:100px;margin-top:3px;height:4px}
-.ut .sw{width:32px;height:18px;border-radius:9px;vertical-align:middle}.ut .sw i{top:2px;left:2px;width:14px;height:14px}.ut .sw.on i{left:16px}.ut .sw:disabled{opacity:.5}.ut td{white-space:nowrap}.ut .tu small{white-space:normal}@media (max-width:640px){.ut .tag{display:none}.ut td,.ut th button{padding-left:8px;padding-right:8px}}
+.ut .sw{width:32px;height:18px;border-radius:9px;vertical-align:middle}.ut .sw i{top:2px;left:2px;width:14px;height:14px}.ut .sw.on i{left:16px}.ut .sw:disabled{opacity:.5}.avw{position:relative;display:inline-flex;flex:none}.udot{position:absolute;right:-3px;bottom:-3px;width:9px;height:9px;border-radius:50%;border:2px solid var(--c)}
+.udot.on{background:var(--g)}.udot.off{background:var(--r);opacity:.75}
+.ut .tu b{display:block}.ut td:first-child{white-space:normal}.ut .tu .tag{vertical-align:middle;margin:1px 4px 0 0;white-space:nowrap}.useen{display:inline-block;white-space:nowrap;margin-right:6px;font-size:10.5px;color:var(--m);line-height:1.3}.useen.on{color:var(--g);font-weight:600}
+.uspd{display:flex;gap:8px;font-size:10.5px;margin-top:2px;line-height:1.3;font-variant-numeric:tabular-nums;white-space:nowrap}.uspd .d{color:var(--a)}.uspd .u{color:#8b5cf6}.uspd .td{color:var(--m)}.uspd.idle .d,.uspd.idle .u{color:var(--m)}
+.ut td.exw{color:var(--y)}.ut td.exr{color:var(--r)}.ut td.exw small,.ut td.exr small{color:inherit;font-weight:600}
+.udev{display:inline-flex;align-items:center;gap:5px}.udev:before{content:"";width:6px;height:6px;border-radius:50%;background:var(--l)}.udev.on:before{background:var(--g)}.ut td{white-space:nowrap}.ut .tu small{white-space:normal}@media (max-width:640px){.ut .tag{display:none}.ut td,.ut th button{padding-left:8px;padding-right:8px}}
 .tu{display:flex;align-items:center;gap:10px;min-width:0;max-width:240px}.tu b{word-break:break-all}.tu small{display:block;color:var(--m);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:190px}
 .sw{display:flex;gap:10px;flex-wrap:wrap;margin-top:4px}.sw button{width:36px;height:36px;border-radius:50%;border:3px solid var(--c);background:var(--sw);box-shadow:0 0 0 1px var(--l);display:grid;place-items:center;color:#fff;padding:0}.sw button[aria-checked=true]{box-shadow:0 0 0 2px var(--sw)}
 .slab{display:block;font-size:13px;color:var(--m);font-weight:600;margin:14px 0 6px}
@@ -4103,6 +4192,7 @@ a.btn{text-decoration:none;color:var(--t)}a.btn.pri{color:#fff}
 .sq{border:1.5px solid var(--l);background:var(--c);border-radius:10px;padding:12px 6px;text-align:center;font-weight:700;font-size:13.5px;color:var(--t);min-height:66px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}
 .sq small{font-weight:500;font-size:11px;color:var(--m);line-height:1.25}.sq.on{border-color:var(--a);background:var(--a2);color:var(--a)}.sq.on small{color:var(--a)}.sq:disabled{opacity:.35;cursor:not-allowed}
 .ibp{border:1px solid var(--l);border-radius:8px;padding:4px 10px;max-height:190px;overflow:auto;margin:4px 0 10px}.ibp label.ck{display:flex;gap:8px;align-items:flex-start;padding:6px 0;margin:0;font-size:13px;border-bottom:1px solid var(--l)}.ibp label.ck:last-child{border:0}.ibp .m{color:var(--m);font-size:12px}
+.ibg2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}.ibg2>div{min-width:0}@media (max-width:560px){.ibg2{grid-template-columns:1fr}}.alpg{display:flex;gap:16px;flex-wrap:wrap;padding:6px 0 2px}.alpc{display:inline-flex;align-items:center;gap:6px;font-weight:500;margin:0;cursor:pointer}.alpc input{width:16px;height:16px;margin:0;accent-color:var(--a)}#ib_fp{width:100%}
 .ibsum{font-size:12.5px;background:var(--c2);border-radius:8px;padding:8px 10px;margin:6px 0 4px}
 .ibs3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.ibs3 span{display:block;font-size:12px;color:var(--m)}.ibs3 b{font-size:20px}
 .ibtop{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.ibtop input{flex:1;min-width:140px;max-width:260px;margin:0}
@@ -4154,9 +4244,9 @@ a.btn{text-decoration:none;color:var(--t)}a.btn.pri{color:#fff}
 <label for="lp">Password</label><div class="fi"><span data-i="lock"></span><input id="lp" type="password" autocomplete="current-password"><button type="button" class="ib" id="lpe" aria-label="Show password"></button></div>
 <div id="lcw" hidden><label for="lc">6-digit code from your authenticator app</label><div class="fi"><span data-i="shield"></span><input id="lc" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></div></div>
 <div id="capw" hidden><label for="lcap">Type the letters from the picture</label><div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><img id="capi" alt="Security check picture" width="200" height="64" style="border-radius:8px;max-width:100%"><button type="button" class="ib" id="capr" aria-label="Show a new picture"></button></div><div class="fi"><span data-i="shield"></span><input id="lcap" autocapitalize="characters" autocomplete="off" spellcheck="false" maxlength="8"></div></div>
-<div class="err" id="le" role="alert"></div><button class="btn pri lbtn">Log in</button><p class="lft">Protected panel · ReXUI v1.7</p></form></div>
-<div id="app" hidden><aside><div class="brand"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search" title="Search (/)" style="margin-left:auto"></button><button class="ib thb" id="th" aria-label="Switch theme"></button></div><nav id="nav"></nav><a class="pwr" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by <b>ReXUI</b> v1.7</a></aside>
-<main><div id="mt"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search"></button><button class="ib thb" aria-label="Switch theme"></button><button class="ib" id="lo2" aria-label="Log out"></button></div><div id="cbn"></div><div class="hdr"><span class="chip" id="xs"></span><span class="ver">ReXUI v1.7</span><small class="m" id="upd" style="margin-left:auto"></small></div><div id="pg"></div><a class="pwm" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by ReXUI v1.7</a></main><nav id="bn" aria-label="Main"></nav></div>
+<div class="err" id="le" role="alert"></div><button class="btn pri lbtn">Log in</button><p class="lft">Protected panel · ReXUI v1.8</p></form></div>
+<div id="app" hidden><aside><div class="brand"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search" title="Search (/)" style="margin-left:auto"></button><button class="ib thb" id="th" aria-label="Switch theme"></button></div><nav id="nav"></nav><a class="pwr" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by <b>ReXUI</b> v1.8</a></aside>
+<main><div id="mt"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search"></button><button class="ib thb" aria-label="Switch theme"></button><button class="ib" id="lo2" aria-label="Log out"></button></div><div id="cbn"></div><div class="hdr"><span class="chip" id="xs"></span><span class="ver">ReXUI v1.8</span><small class="m" id="upd" style="margin-left:auto"></small></div><div id="pg"></div><a class="pwm" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by ReXUI v1.8</a></main><nav id="bn" aria-label="Main"></nav></div>
 <div id="dt" hidden><div class="dts"><div class="dth"><b>User details</b><button class="btn sm" id="dx" aria-label="Close">Close</button></div><div id="dtb"></div></div></div>
 <div id="md" hidden><form class="card" id="mf"></form></div>
 <div id="sxo" hidden><div class="sxp" role="dialog" aria-label="Search"><div class="fi"><span data-i="search"></span><input id="sxi" placeholder="Search users, settings, tools..." autocomplete="off" spellcheck="false" aria-label="Search"><button type="button" class="btn sm" id="sxx">Esc</button></div><div id="sxr" role="listbox"></div></div></div>
@@ -4222,7 +4312,7 @@ window.addEventListener('popstate',e=>{const st=e.state;if(!st||!st.p)return;HNA
 const cur=pg=='us'?'us:'+UV.kind:pg;if(cur!=st.p)go(st.p);if(st.p=='st'&&window.STAB){GSEL=st.g||null;STAB(st.t||'general');window.scrollTo(0,0)}}finally{HNAV=false}});
 async function load(){try{const r=await fetch('api/state'+(D&&D.uh&&D.users?'?uh='+D.uh:''),{cache:'no-store'});if(r.status==401)return show(false);{const n=await r.json();if(!n.users&&D&&D.users)n.users=D.users;D=n}const sb=D.set;if(sb.brand!=BR.brand||sb.tagline!=BR.tagline||sb.accent!=SAC){SAC=sb.accent;applyBrand(sb)}
 if(pg=='ov'&&RG!='live'&&Date.now()-HMT>60000)await loadHist();if($('#app').hidden){show(true);go(pg)}else render();hdr();$('#upd').textContent='Live · '+new Date().toLocaleTimeString()}catch(e){$('#upd').textContent='Connection lost, retrying...'}}
-function hdr(){const c=D.cert;$('#cbn').innerHTML=c.days!=null&&c.days<=30?`<div class="banner ${c.days<0?'e':'w'}" role="status">${I('cert',17)}<div><b>${c.days<0?'Your SSL certificate has expired.':'Your SSL certificate expires in '+c.days+' day'+(c.days==1?'':'s')+'.'}</b> ${X(c.name)} · Renew it, then paste the new one in Settings or use menu → 7 on the server.</div></div>`:'';
+function hdr(){const c=D.cert,ru=D.rxup||{};$('#cbn').innerHTML=(ru.new?`<div class="banner i" role="status">${I('refresh',17)}<div><b>ReXUI v${X(ru.latest)} is available.</b> You have v${X(ru.cur)}. Update on the server: run <code>menu</code> → 1 (Update) → 1. Users and settings are kept. <a href="https://github.com/chaliraza777/ReXUI/releases" target="_blank" rel="noopener">What's new</a></div></div>`:'')+(c.days!=null&&c.days<=30?`<div class="banner ${c.days<0?'e':'w'}" role="status">${I('cert',17)}<div><b>${c.days<0?'Your SSL certificate has expired.':'Your SSL certificate expires in '+c.days+' day'+(c.days==1?'':'s')+'.'}</b> ${X(c.name)} · Renew it, then paste the new one in Settings or use menu → 8 (SSL certificate) on the server.</div></div>`:'');
 const x=D.svc.find(s=>s.unit=='xray'),on=x&&x.st=='RUNNING';$('#xs').innerHTML=`<span class="dot" style="background:${on?'var(--g)':'var(--r)'}"></span>Xray · ${on?'Running':'Stopped'} <span class="m">v${X(D.xray.ver||'?')}</span>`}
 function render(first){if(!D)return;if(pg=='ov'){ov();tipRestore()}else if(pg=='us')us(first);else if(pg=='on')onl();else if(pg=='sc')secp(first);else if(pg=='ib')ibp(first);else if(first)st();else stb()}
 const SC={RUNNING:'var(--g)',IDLE:'var(--a)',FAILED:'var(--r)','NOT INSTALLED':'var(--m)'};
@@ -4292,7 +4382,7 @@ const sk=e.target.closest('[data-sk]');if(sk){api('api/session-kill',{id:sk.data
 if(e.target.closest('#lgall')){if(!confirm('Log out every other device? You stay logged in here.'))return;api('api/session-kill',{all:1}).then(()=>{toast('Other devices logged out');secp(true)}).catch(x=>toast(x.message,1));return}
 const rg=e.target.closest('[data-rg]');if(rg){RG=rg.dataset.rg;ls('rx-range',RG);HOV=null;if(RG!='live'&&Date.now()-HMT>60000)loadHist().then(ov);return ov()}
 const ut=e.target.closest('[data-utg]');if(ut){e.stopPropagation();const n=ut.dataset.utg,on=ut.classList.contains('on');ut.disabled=true;api('api/user/toggle',{name:n}).then(()=>{toast(n+(on?' disabled':' enabled'));load()}).catch(x=>{ut.disabled=false;toast(x.message,1)});return}
-const vw=e.target.closest('.seg[aria-label="View"] [data-v]');if(vw){UV.v=vw.dataset.v;ls('rx-view2',UV.v);return us(true)}
+const vw=e.target.closest('.seg[aria-label="View"] [data-v]');if(vw){UV.v=vw.dataset.v;ls('rx-view3',UV.v);return us(true)}
 const so=e.target.closest('[data-sort]');if(so){const k=so.dataset.sort;UV.rev=UV.k==k?!UV.rev:false;UV.k=k;ls('rx-sort',k);return us(true)}
 const r=e.target.closest('[data-r]');if(r)return restartUnit(r.dataset.r,r.textContent.replace('Restart ','').trim());
 const s=e.target.closest('.sv');if(s&&!s.disabled)return restartUnit(s.dataset.u,s.dataset.n);
@@ -4306,8 +4396,9 @@ const STC={online:'var(--g)',active:'var(--a)',expired:'var(--r)',limit:'var(--r
 const ubar=(used,lim)=>{const p=lim?Math.min(100,used/(lim*1073741824)*100):0;return `<div class="ubar"><i style="width:${p}%;background:${p>90?'var(--r)':p>75?'var(--y)':'var(--a)'}"></i></div>`};
 const lims=(used,lim)=>`${fb(used)} / ${lim?lim+' GB':'Unlimited'}`,hue=n=>[...n].reduce((a,c)=>a*31+c.charCodeAt(0),7)%360;
 const SR={online:0,active:1,limit:2,expired:3,disabled:4},ek=u=>u.exp=='never'?9e15:Date.parse(u.exp);
-const SO={name:['Name',(a,b)=>a.name.localeCompare(b.name)],used:['Most used',(a,b)=>b.used-a.used],exp:['Expires first',(a,b)=>ek(a)-ek(b)],new:['Newest',(a,b)=>(b.created||'').localeCompare(a.created||'')||a.name.localeCompare(b.name)],st:['Status',(a,b)=>SR[a.st]-SR[b.st]||a.name.localeCompare(b.name)]};
-const UV={kind:['v2ray','ssh','ovpn','hy2','wg','dns'].includes(ls('rx-kind'))?ls('rx-kind'):'v2ray',v:ls('rx-view2')||'table',k:SO[ls('rx-sort')]?ls('rx-sort'):'name',rev:false,f:'all'};
+const SO={name:['Name',(a,b)=>a.name.localeCompare(b.name)],used:['Most used',(a,b)=>b.used-a.used],exp:['Expires first',(a,b)=>ek(a)-ek(b)],new:['Newest',(a,b)=>(b.created||'').localeCompare(a.created||'')||a.name.localeCompare(b.name)],st:['Status',(a,b)=>SR[a.st]-SR[b.st]||a.name.localeCompare(b.name)],onl:['Online first',(a,b)=>(b.on>0)-(a.on>0)||((b.spd||[0,0])[1]+(b.spd||[0,0])[0])-((a.spd||[0,0])[1]+(a.spd||[0,0])[0])||a.name.localeCompare(b.name)],spd:['Fastest now',(a,b)=>((b.spd||[0,0])[1]+(b.spd||[0,0])[0])-((a.spd||[0,0])[1]+(a.spd||[0,0])[0])||a.name.localeCompare(b.name)]};
+const fsp=b=>{const u=['B','KB','MB','GB'];let i=0;b=+b||0;while(b>=1024&&i<3){b/=1024;i++}return (i&&b<10?b.toFixed(1):b.toFixed(0))+' '+u[i]+'/s'},uon=u=>u.on>0&&u.st!='disabled',avd=u=>`<span class="avw">${av(u.name)}<i class="udot ${uon(u)?'on':'off'}" aria-hidden="true"></i></span>`,useen=u=>uon(u)?'<span class="useen on">Online</span>':`<span class="useen">${u.seen?'Seen '+tago(u.seen):'Never connected'}</span>`,uspd=u=>{const p=u.spd||[0,0],on=uon(u);return `<div class="uspd${on&&(p[0]||p[1])?'':' idle'}">${on?`<span class="d">↓ ${fsp(p[1])}</span><span class="u">↑ ${fsp(p[0])}</span>`:''}<span class="td">Today ${fb(u.today||0)}</span></div>`};
+const UV={kind:['v2ray','ssh','ovpn','hy2','wg','dns'].includes(ls('rx-kind'))?ls('rx-kind'):'v2ray',v:ls('rx-view3')||'table',k:SO[ls('rx-sort')]?ls('rx-sort'):'name',rev:false,f:'all'};
 const dnum=u=>u.exp=='never'?1e9:Math.ceil((Date.parse(u.exp+'T23:59:59')-Date.now())/864e5);
 const dleft=u=>{if(u.fdays)return 'starts on first use';if(u.expts){const h=Math.ceil((u.expts*1000-Date.now())/36e5);return h<=0?'ended':h+'h left'}if(u.exp=='never')return '';const d=dnum(u);return d<0?'ended':d==0?'today':d+'d left'};
 const expTxt=u=>u.fdays?`First use + ${u.fdays} day${u.fdays==1?'':'s'}`:u.exp=='never'?'No expiry':u.exp;
@@ -4340,10 +4431,10 @@ const el=$('#ul');el.classList.toggle('pick',!!UV.sel);if(!L.length){el.classNam
 if(UV.v=='table'){el.className='card tw';const th=(k,t)=>k?`<th scope="col"><button type="button" data-sort="${k}" class="${UV.k==k?'on':''}">${t}${UV.k==k?I(UV.rev?'up':'down',12):''}</button></th>`:`<th scope="col"><button type="button" tabindex="-1" style="cursor:default">${t}</button></th>`;
 const ck=u=>UV.sel?`<span class="sck${UV.sel.has(u.name)?' on':''}" aria-hidden="true">${I('check',13)}</span>`:'';
 el.innerHTML=`<table class="ut"><thead><tr>${th('name','User')}${th('used','Bandwidth')}${th('exp','Expiry')}${th('','Devices')}${th('','On')}</tr></thead><tbody>${LP.map(u=>{const n=X(u.name),dl=dleft(u);return `<tr data-open="${n}" class="${UV.sel&&UV.sel.has(u.name)?'sel':''}" tabindex="0" aria-label="Open ${n}">
-<td><div class="tu">${ck(u)}${av(u.name)}<div style="min-width:0"><b>${n}</b>${tagT(u)}${u.note?`<small>${X(u.note)}</small>`:''}</div></div></td>
-<td>${lims(u.used,u.lim)}${u.lim?ubar(u.used,u.lim):''}</td><td>${u.exp=='never'&&!u.fdays?'<span class="m">No expiry</span>':X(u.fdays?'First use + '+u.fdays+'d':u.exp)+(dl&&!u.fdays?`<small class="${dl=='ended'?'bad':expiring(u)?'':'m'}" style="display:block${expiring(u)?';color:var(--y)':''}">${dl}</small>`:'')}</td>
-<td>${u.on} / ${u.dev||'∞'}</td><td><button type="button" class="sw${u.st=='disabled'?'':' on'}" data-utg="${n}" role="switch" aria-checked="${u.st!='disabled'}" aria-label="${n} ${u.st=='disabled'?'disabled':'enabled'}" title="${u.st=='disabled'?'Enable':'Disable'}"><i></i></button></td></tr>`}).join('')}</tbody></table>`;return}
-el.className='ul'+(UV.sel?' pick':'');el.innerHTML=LP.map(u=>{const n=X(u.name),on=UV.sel&&UV.sel.has(u.name);return `<button class="card uc${on?' sel':''}" data-open="${n}" aria-label="${UV.sel?(on?'Unselect ':'Select ')+n:'Open '+n}"${UV.sel?` aria-pressed="${!!on}"`:''}><div class="uh">${UV.sel?`<span class="sck${on?' on':''}" aria-hidden="true">${I('check',13)}</span>`:''}${av(u.name)}<div style="min-width:0"><b>${n}</b>${tagT(u)}<small class="m" style="display:block">${lims(u.used,u.lim)}</small></div><span class="pill" style="color:${STC[u.st]}">${STN[u.st]}</span></div>
+<td><div class="tu">${ck(u)}${avd(u)}<div style="min-width:0"><b>${n}</b>${useen(u)}${tagT(u)}${u.note?`<small>${X(u.note)}</small>`:''}</div></div></td>
+<td>${lims(u.used,u.lim)}${u.lim?ubar(u.used,u.lim):''}${uspd(u)}</td><td class="${u.st=='ended'||(dl&&dnum(u)<=1&&u.exp!='never')?'exr':expiring(u)?'exw':''}">${u.exp=='never'&&!u.fdays?'<span class="m">No expiry</span>':X(u.fdays?'First use + '+u.fdays+'d':u.exp)+(dl&&!u.fdays?`<small style="display:block">${dl}</small>`:'')}</td>
+<td><span class="udev${uon(u)?' on':''}">${u.on} / ${u.dev||'∞'}</span></td><td><button type="button" class="sw${u.st=='disabled'?'':' on'}" data-utg="${n}" role="switch" aria-checked="${u.st!='disabled'}" aria-label="${n} ${u.st=='disabled'?'disabled':'enabled'}" title="${u.st=='disabled'?'Enable':'Disable'}"><i></i></button></td></tr>`}).join('')}</tbody></table>`;return}
+el.className='ul'+(UV.sel?' pick':'');el.innerHTML=LP.map(u=>{const n=X(u.name),on=UV.sel&&UV.sel.has(u.name);return `<button class="card uc${on?' sel':''}" data-open="${n}" aria-label="${UV.sel?(on?'Unselect ':'Select ')+n:'Open '+n}"${UV.sel?` aria-pressed="${!!on}"`:''}><div class="uh">${UV.sel?`<span class="sck${on?' on':''}" aria-hidden="true">${I('check',13)}</span>`:''}${avd(u)}<div style="min-width:0"><b>${n}</b>${tagT(u)}<small class="m" style="display:block">${lims(u.used,u.lim)}</small></div><span class="pill" style="color:${STC[u.st]}">${STN[u.st]}</span></div>
 ${u.note?`<small class="m" style="display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${X(u.note)}</small>`:''}${ubar(u.used,u.lim)}<div class="um"><span${expiring(u)?' style="color:var(--y)"':''}>${I('cal',14)}${X(expTxt(u))}${dleft(u)&&!u.fdays?' · '+dleft(u):''}</span><span>${I('dev',14)}${u.on} / ${u.dev||'∞'} devices</span>${u.rday?`<span>${I('refresh',14)}Resets day ${u.rday}</span>`:''}<span style="margin-left:auto" class="bl">Details ›</span></div></button>`}).join('')}
 const uaS=ua=>{ua=ua||'';const b=/Edg\//.test(ua)?'Edge':/OPR|Opera/.test(ua)?'Opera':/SamsungBrowser/.test(ua)?'Samsung Internet':/Firefox\//.test(ua)?'Firefox':/Chrome\//.test(ua)?'Chrome':/Safari\//.test(ua)?'Safari':/curl/i.test(ua)?'curl':ua?'Browser':'Unknown';
 const o=/Android/.test(ua)?'Android':/iPhone|iPad|iOS/.test(ua)?'iPhone / iPad':/Windows/.test(ua)?'Windows':/Mac OS X/.test(ua)?'Mac':/Linux/.test(ua)?'Linux':'';return o?b+' on '+o:b};
@@ -4539,11 +4630,16 @@ if(a=='edit')return ibmodal(x);
 if(a=='del'){if(!confirm('Delete the inbound "'+x.name+'"?\n\n'+x.users+' user(s) lose this config.'+(x.b?' You can add the default inbounds back later.':'')))return}
 if(a=='tog'&&x.on&&x.users&&!confirm('Turn off "'+x.name+'"? '+x.users+' user(s) lose this config until you turn it on again.'))return;
 api('api/inbound/'+({tog:'toggle',up:'move',down:'move'}[a]||a),{id:x.id,name:x.name,dir:a}).then(()=>{toast(a=='del'?'Inbound deleted':a=='tog'?(x.on?'Turned off':'Turned on'):'Saved');IBH='';load()}).catch(x=>toast(x.message,1))});
-function ibmodal(x){const ed=!!x,b=x&&x.b,h4=D.h443&&D.h443.on;let S=Object.assign({name:'',proto:'vless',port:'',net:'xhttp',cdn:false,sec:'tls',sni:'',target:'',addr:'',host:'',path:''},x?{name:x.name,proto:x.proto,port:x.port,net:x.net,cdn:x.cdn,sec:x.sec,sni:x.b=='reality'?x.sni:(x.sni||''),target:x.target||'',addr:x.addr||'',host:x.host||'',path:x.path||'',on:x.on}:{}),tab=0,USED=null,BT=null;const f=$('#mf');f.className='card wide';
+function ibmodal(x){const ed=!!x,b=x&&x.b,h4=D.h443&&D.h443.on;let S=Object.assign({name:'',proto:'vless',port:'',net:'xhttp',cdn:false,sec:'tls',sni:'',target:'',addr:'',host:'',path:'',fp:'chrome',alpn:''},x?{fp:x.fp||'chrome',alpn:x.alpn||'',name:x.name,proto:x.proto,port:x.port,net:x.net,cdn:x.cdn,sec:x.sec,sni:x.b=='reality'?x.sni:(x.sni||''),target:x.target||'',addr:x.addr||'',host:x.host||'',path:x.path||'',on:x.on}:{}),tab=0,USED=null,BT=null;const f=$('#mf');f.className='card wide';
 api('api/inbound/ports',{}).then(r=>{USED=r.used}).catch(()=>{});
 const ch=()=>S.cdn?(S.net=='ws'?'wscdn':'cdn'):S.net,mainp=()=>S.net=='ws'?(D.set.wspath||'/vws'):(D.set.path||'/vless'),p4=()=>+S.port==80||+S.port==443;
 function fix(){if((S.net=='ws'||S.cdn)&&S.sec=='reality')S.sec='tls'}
 function sq(g,v,t,s,dis){const on=(g=='proto'?S.proto:g=='net'?ch():S.sec)==v;return `<button type="button" class="sq${on?' on':''}" data-g="${g}" data-v="${v}"${dis?' disabled':''} aria-pressed="${on}" title="${X(s)}">${t}</button>`}
+const FPL=['chrome','firefox','safari','edge','ios','android','random','randomized','none'];
+function alD(){return S.net=='xhttp'?['h2','http/1.1']:S.net=='ws'?['http/1.1']:[]}
+function alC(){return S.alpn?S.alpn.split(','):S.alpnU?[]:alD()}
+function fpsel(){return `<label for="ib_fp">Fingerprint <span class="m">(uTLS, how the app's TLS looks)</span></label><select id="ib_fp">${FPL.filter(v=>S.sec!='reality'||v!='none').map(v=>`<option value="${v}"${S.fp==v?' selected':''}>${v=='none'?'none (Go default)':v}${v=='chrome'?' (best)':''}</option>`).join('')}</select>`}
+function alsel(){const a=alC(),thru=h4&&(p4()||(!S.cdn&&S.path===''&&S.proto=='vless'&&S.net!='tcp')||(!S.cdn&&S.net=='tcp'));return `<label>ALPN</label><div class="alpg">${['h2','http/1.1'].map(v=>`<label class="alpc"><input type="checkbox" data-alpn="${v}"${a.includes(v)?' checked':''}>${v}</label>`).join('')}</div><p class="note">Nothing ticked = automatic (${alD().join(', ')||'none'}).${S.net=='ws'?' WS needs http/1.1.':''}${h4?' Through 443 mode (HAProxy) the link uses http/1.1.':''}</p>`}
 function pnote(){const p=+S.port;if(S.cdn)return 'Cloudflare ports: '+(S.sec=='tls'?'443, 2053, 2083, 2087, 2096, 8443':'80, 8080, 8880, 2052, 2082, 2086, 2095');if(p==443||p==80)return h4?'Goes through 443 mode (HAProxy): TLS and no TLS both work here, next to SSH and the other configs.':'Ports 80 and 443 need 443 mode (Settings → Network ports).';return 'Any free port. 80 / 443 work when 443 mode is on.'}
 function inp(id,lab,val,ph,dis){return `<label for="ib_${id}">${lab}</label><input id="ib_${id}" value="${X(val)}" placeholder="${X(ph)}" autocomplete="off" autocapitalize="none" spellcheck="false"${dis?' disabled':''}>`}
 function draw(){fix();const T=['Basic','Protocol','Security'];let body='';
@@ -4556,26 +4652,27 @@ inp('host',(S.cdn?'Host (your CDN domain)':'Host')+` <span class="m">(empty = ${
 inp('path',`Path <span class="m">(empty = ${X(mainp())})</span>`,p4()?'':S.path,mainp(),p4())+(p4()?`<p class="note">On port ${S.port} (443 mode) the main path ${X(mainp())} is used.</p>`:''))}
 if(tab==2)body=`<label>Security</label><div class="sqg">${sq('sec','none','None','No encryption layer')}${sq('sec','tls','TLS','Your certificate')}${sq('sec','reality','Reality','Looks like a big site',S.net=='ws'||S.cdn)}</div>
 ${S.net=='ws'||S.cdn?`<p class="note">Reality works only with TCP and XHTTP (not WS or CDN).</p>`:''}
-${S.sec=='tls'?inp('sni',`SNI <span class="m">(empty = ${X(S.cdn?(D.cdn&&D.cdn.dom)||'CDN domain':D.set.sni||D.cert.domain||'auto')})</span>`,S.sni,S.cdn?'Like: cdn.example.com':'Like: '+(D.cert.domain||'vpn.example.com')):''}
-${S.sec=='reality'?inp('target',`Target <span class="m">(empty = SNI:443)</span>`,S.target,'Like: www.microsoft.com:443')+inp('sni','SNI',S.sni,'Like: www.microsoft.com')+`<p class="note">A big site with TLS 1.3. Reality needs its own port (not 80 or 443).</p>`:''}
+${S.sec=='tls'?inp('sni',`SNI <span class="m">(empty = ${X(S.cdn?(D.cdn&&D.cdn.dom)||'CDN domain':D.set.sni||D.cert.domain||'auto')})</span>`,S.sni,S.cdn?'Like: cdn.example.com':'Like: '+(D.cert.domain||'vpn.example.com'))+`<div class="ibg2"><div>${fpsel()}</div><div>${alsel()}</div></div>`:''}
+${S.sec=='reality'?inp('target',`Target <span class="m">(empty = SNI:443)</span>`,S.target,'Like: www.microsoft.com:443')+inp('sni','SNI',S.sni,'Like: www.microsoft.com')+fpsel()+`<p class="note">A big site with TLS 1.3. Reality needs its own port (not 80 or 443).</p>`:''}
 ${S.sec=='none'?`<p class="note">Not encrypted by this config. Use it only where TLS is blocked${S.cdn?', or with a Cloudflare TLS port':''}.</p>`:''}
-<div class="ibsum"><b>${X(S.name||'New inbound')}</b> · ${S.proto=='vless'?'VLESS':'Trojan'} · ${S.cdn?S.net.toUpperCase()+' CDN':S.net.toUpperCase()} · ${SECN[S.sec]} · port ${X(S.port||'?')}${S.net!='tcp'?' · path '+X(p4()?mainp():S.path||mainp()):''}</div>`;
+<div class="ibsum"><b>${X(S.name||'New inbound')}</b> · ${S.proto=='vless'?'VLESS':'Trojan'} · ${S.cdn?S.net.toUpperCase()+' CDN':S.net.toUpperCase()} · ${SECN[S.sec]}${S.sec!='none'?' · '+X(S.fp):''} · port ${X(S.port||'?')}${S.net!='tcp'?' · path '+X(p4()?mainp():S.path||mainp()):''}</div>`;
 f.innerHTML=`<h2>${ed?'Edit '+X(x.name):'Add inbound'}</h2>${b?`<p class="note" style="margin-top:6px">Default inbound. If you change its type or path it becomes a normal inbound.</p>`:''}<div id="ibban" aria-live="polite"></div>
 <div class="ibt" role="tablist">${T.map((t,i)=>`<button type="button" role="tab" class="${i==tab?'on':''}" aria-selected="${i==tab}" data-t="${i}">${i+1}. ${t}</button>`).join('')}</div>${body}
 <div class="err" id="me"></div><div class="mr"><button type="button" class="btn" id="mc">Cancel</button><button class="btn pri">${ed?'Save':'Create'}</button></div>`;
 $('#mc').onclick=()=>$('#md').hidden=true;
 f.querySelectorAll('[data-t]').forEach(z=>z.onclick=()=>{rd_();tab=+z.dataset.t;draw()});
-f.querySelectorAll('.sq').forEach(z=>z.onclick=()=>{rd_();const g=z.dataset.g,v=z.dataset.v;if(g=='proto')S.proto=v;else if(g=='net'){S.cdn=v=='cdn'||v=='wscdn';S.net=v=='cdn'?'xhttp':v=='wscdn'?'ws':v}else S.sec=v;draw()});
+f.querySelectorAll('.sq').forEach(z=>z.onclick=()=>{rd_();const g=z.dataset.g,v=z.dataset.v;if(g=='proto')S.proto=v;else if(g=='net'){S.cdn=v=='cdn'||v=='wscdn';S.net=v=='cdn'?'xhttp':v=='wscdn'?'ws':v;S.alpn='';S.alpnU=false}else S.sec=v;draw()});
+if($('#ib_fp'))$('#ib_fp').onchange=()=>{rd_();draw()};f.querySelectorAll('[data-alpn]').forEach(z=>z.onchange=()=>{rd_();draw()});
 if($('#ib_port'))$('#ib_port').oninput=()=>{S.port=$('#ib_port').value.trim();$('#ibpn').textContent=pnote();clearTimeout(ibmodal.pt);ibmodal.pt=setTimeout(()=>{const u=pused();ban(u?u.t:'',u&&u.w)},350)};
 (f.querySelector('input:not([disabled])')||{focus(){}}).focus()}
-function rd_(){['name','port','sni','target','addr','host','path'].forEach(k=>{const z=$('#ib_'+k);if(z&&!z.disabled)S[k]=k=='name'?z.value:z.value.trim()})}
+function rd_(){['name','port','sni','target','addr','host','path'].forEach(k=>{const z=$('#ib_'+k);if(z&&!z.disabled)S[k]=k=='name'?z.value:z.value.trim()});const fz=$('#ib_fp');if(fz)S.fp=fz.value;const ac=[...document.querySelectorAll('#mf [data-alpn]')];if(ac.length){const v=ac.filter(c=>c.checked).map(c=>c.dataset.alpn);S.alpnU=true;S.alpn=v.join(',')}}
 function ban(t,w){const el=$('#ibban');if(!el)return;clearTimeout(BT);el.innerHTML=t?`<div class="ibban${w?' w':''}">${X(t)}</div>`:'';if(t)BT=setTimeout(()=>{const d=el.firstChild;if(d){d.classList.add('hide');setTimeout(()=>{if(el.firstChild===d)el.innerHTML=''},450)}},3500)}
 function pused(){const p=String(+S.port);if(!USED||!/^\d+$/.test(String(S.port))||(ed&&+S.port==+x.port))return null;const o=USED[p];if(!o)return null;return o.startsWith('inbound: ')?{w:1,t:'Port '+p+' is used by the '+o+'. It works only if the new one has the same type.'}:{t:'Port '+p+' is already used by '+o+'. Pick another port.'}}
 f.onsubmit=async e=>{e.preventDefault();rd_();
 const bad=!String(S.name).trim()?'Give the inbound a name':!/^\d+$/.test(String(S.port))?'Type a port number':(()=>{const u=pused();return u&&!u.w?u.t:''})();
 if(bad){if(tab!=0){tab=0;draw()}ban(bad);$('#me').textContent=bad;return}
 const bt=f.querySelector('.pri');bt.disabled=true;const nt=S.net!='tcp';
-const d={name:S.name.trim(),proto:S.proto,port:S.port,net:S.net,cdn:S.cdn,sec:S.sec,sni:S.sec=='none'?'':S.sni,target:S.sec=='reality'?S.target:'',addr:nt?S.addr:'',host:nt?S.host:'',path:nt&&!p4()?S.path:'',on:ed?S.on:true};
+const d={name:S.name.trim(),proto:S.proto,port:S.port,net:S.net,cdn:S.cdn,sec:S.sec,sni:S.sec=='none'?'':S.sni,target:S.sec=='reality'?S.target:'',fp:S.fp,alpn:S.sec=='tls'?S.alpn:'',addr:nt?S.addr:'',host:nt?S.host:'',path:nt&&!p4()?S.path:'',on:ed?S.on:true};
 try{await api('api/inbound/'+(ed?'edit':'add'),ed?Object.assign(d,{id:x.id}):d);$('#md').hidden=true;toast(ed?'Inbound saved':'Inbound created');IBH='';load()}catch(z){ban(z.message);$('#me').textContent=z.message}bt.disabled=false};
 $('#md').hidden=false;draw()}
 
@@ -4642,7 +4739,7 @@ ${D.svc.filter(x=>x.unit.startsWith('rexui-ovpn')||x.unit=='squid').map(x=>kv(x.
 <label for="pn">New password</label><input id="pn" type="password" autocomplete="new-password">
 <div class="err" id="pe"></div><button class="btn pri">Change login</button>
 <div class="kv" style="margin-top:16px"><span>Two-factor login (2FA)</span><b class="${d.tfa?'ok':''}">${d.tfa?'On':'Off'}</b></div>
-<p class="note">With 2FA on, login also asks for a 6-digit code from Google Authenticator or Aegis on your phone. Lost the phone? Run menu → 3 on the server to reset the login and turn 2FA off.</p>
+<p class="note">With 2FA on, login also asks for a 6-digit code from Google Authenticator or Aegis on your phone. Lost the phone? Run menu → 4 (Panel login reset) on the server to reset the login and turn 2FA off.</p>
 <button type="button" class="btn ${d.tfa?'dng':''}" id="tfa">${I('shield',15)}${d.tfa?'Turn off 2FA':'Turn on 2FA'}</button></form>
 <form class="card" id="apf"><div class="lab">${I('palette',15)}Appearance</div><p class="note" style="margin-top:8px">Your brand is shown on the login page, in the panel and on your users' page.</p>
 <label for="apb">Brand name (empty = ReXUI)</label><input id="apb" value="${X(s.brand)}" maxlength="24" placeholder="ReXUI">
@@ -5240,7 +5337,7 @@ cat > /usr/local/bin/menu <<'MAINM'
 [ "$EUID" -ne 0 ] && { echo "Please run as root"; exit 1; }
 CF=/etc/tunnel/config; LIB=/usr/local/lib/tunnel; PY=/opt/tunnel-panel/panel.py
 UPDATE_URL="https://raw.githubusercontent.com/chaliraza777/ReXUI/main/install.sh"
-G='\033[1;32m'; Y='\033[1;33m'; C='\033[1;36m'; N='\033[0m'
+G='\033[1;32m'; Y='\033[1;33m'; C='\033[1;36m'; R='\033[1;31m'; D='\033[2m'; W='\033[1;37m'; N='\033[0m'
 . $CF
 myip(){ curl -4 -s --max-time 5 ifconfig.me || hostname -I | awk '{print $1}'; }
 url(){ local H; H=$(myip); if [ -f /etc/tunnel/cert/info ]; then NAME=; . /etc/tunnel/cert/info; [[ $NAME =~ [a-z] && $NAME != \** ]] && H=$NAME; fi; echo "https://$H:$PANEL_PORT/$WEB_PATH/"; }
@@ -5248,9 +5345,9 @@ on(){ systemctl is-active --quiet "$1" && echo -e "${G}ON${N}" || echo -e "${Y}O
 fw(){ if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then ufw allow "$1"/tcp >/dev/null; fi; }
 fwu(){ if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then ufw allow "$1"/udp >/dev/null; fi; }
 info(){
-  . $CF; echo
+  . $CF; echo -e "${W}PANEL INFO${N}"
   echo -e "Panel URL  : ${C}$(url)${N}"
-  echo    "Panel user : $(python3 $PY user)  (password is stored as a hash, use option 3 to set a new one)"
+  echo    "Panel user : $(python3 $PY user)  (password is stored as a hash, use option 4 to set a new one)"
   echo -e "Services   : Panel $(on tunnel-panel)$([ -x /usr/local/bin/hysteria ] && echo " | Hysteria2 $(on rexui-hy2)")$(command -v wg >/dev/null && echo " | WireGuard $(on rexui-wg)")$([ -x /usr/local/bin/dnstt-server ] && echo " | DNS $(on rexui-dns)") | Xray $(on xray) | stunnel $(on stunnel4) | WS $(on ws-ssh) | UDPGW $(on badudp)$([ -f /etc/systemd/system/rexui-ovpn@.service ] && echo " | OpenVPN $(on rexui-ovpn@rx1194) | Squid $(on squid)")"
   R=$(timeout 4 bash -c "exec 3<>/dev/tcp/127.0.0.1/$WS_PORT; printf 'GET / HTTP/1.1\\r\\nHost: x\\r\\nUpgrade: websocket\\r\\n\\r\\n' >&3; head -c 12 <&3" 2>/dev/null)
   if [ "$R" = "HTTP/1.1 101" ]; then echo -e "SSH WS test : ${G}OK on this server${N} (if phones still cannot connect to $WS_PORT, open it in your provider firewall)"; else echo -e "SSH WS test : ${Y}FAILED${N} (try: systemctl restart ws-ssh)"; fi
@@ -5340,7 +5437,7 @@ T
     2) systemctl restart ssh 2>/dev/null || systemctl restart sshd;;
     3) systemctl restart stunnel4;; 4) systemctl restart ws-ssh;; 5) systemctl restart badudp;;
     6) systemctl restart xray;; 7) systemctl restart tunnel-panel;; 8) systemctl restart fail2ban;; 9) systemctl restart 'rexui-ovpn@*' squid;; 10) systemctl restart rexui-hy2;; 11) systemctl restart rexui-dns;; 12) systemctl restart rexui-wg;;
-    *) return;;
+    *) BACK=1; return;;
   esac
   echo -e "${G}Restarted${N}"
 }
@@ -5363,6 +5460,7 @@ T
        [ -f "$f" ] || { echo "File not found"; return; }
        read -rp "Restore users from $f? Other users are kept. (y/N): " y; [ "$y" = y ] || { echo "Cancelled"; return; }
        if python3 $PY restore "$f"; then systemctl restart tunnel-panel; echo -e "${G}Restore done${N}"; fi;;
+    *) BACK=1;;
   esac
 }
 xarch(){ case $(uname -m) in x86_64|amd64) echo 64;; aarch64|arm64) echo arm64-v8a;; *) echo "";; esac; }
@@ -5423,7 +5521,7 @@ updm(){
 0) Back
 T
   read -rp "Option: " o
-  case $o in 1) upd;; 2) xupd;; 3) gupd;; 4) xback;; esac
+  case $o in 1) upd;; 2) xupd;; 3) gupd;; 4) xback;; *) BACK=1;; esac
 }
 upd(){
   local f=/root/install.sh
@@ -5443,6 +5541,20 @@ upd(){
   python3 $PY backup "$b" >/dev/null 2>&1 && chmod 600 "$b" && echo "Backup saved: $b"
   bash "$f"; exit 0
 }
+spdt(){
+  local d=$LIB/ookla a v=1.2.0
+  if [ ! -x $d/speedtest ]; then
+    case $(uname -m) in x86_64|amd64) a=x86_64;; aarch64|arm64) a=aarch64;; armv7l) a=armhf;; *) echo "This CPU ($(uname -m)) is not supported"; return;; esac
+    echo "Downloading Ookla Speedtest CLI (first time only)..."
+    mkdir -p $d; local t; t=$(mktemp -d)
+    if curl -fsSL --max-time 60 -o $t/s.tgz "https://install.speedtest.net/app/cli/ookla-speedtest-$v-linux-$a.tgz" && tar -xzf $t/s.tgz -C $t speedtest 2>/dev/null && [ -s $t/speedtest ]; then
+      install -m 755 $t/speedtest $d/speedtest; rm -rf $t
+    else rm -rf $t; echo -e "${Y}Download failed.${N} Check the server's internet and try again."; return; fi
+  fi
+  echo -e "${C}Testing... (about 30 seconds)${N}"
+  $d/speedtest --accept-license --accept-gdpr -p no 2>&1 | grep -vE '^\s*$|^==|Speedtest by Ookla' || echo -e "${Y}The test did not finish. Try again in a minute.${N}"
+  echo "Tip: to test one server, run:  $d/speedtest -L  then  $d/speedtest -s ID"
+}
 perfm(){
   echo "Now: $(python3 $PY perf | sed 's/Performance mode: //')"
   cat <<T
@@ -5452,7 +5564,7 @@ perfm(){
 0) Back
 T
   read -rp "Option: " o
-  case $o in 1) m=latency;; 2) m=balanced;; 3) m=throughput;; *) return;; esac
+  case $o in 1) m=latency;; 2) m=balanced;; 3) m=throughput;; *) BACK=1; return;; esac
   python3 $PY perf $m && echo -e "${G}Done.${N} Nobody was disconnected."
 }
 h443m(){
@@ -5463,7 +5575,7 @@ h443m(){
 0) Back
 T
   read -rp "Option: " o
-  case $o in 1) python3 $PY h443 on;; 2) python3 $PY h443 off;; esac
+  case $o in 1) python3 $PY h443 on;; 2) python3 $PY h443 off;; *) BACK=1;; esac
 }
 uninst(){
   echo -e "${Y}This removes the panel, Xray, OpenVPN, Hysteria2, WireGuard, the DNS tunnel, the SSH WS/SSL tunnels and all panel users.${N}"
@@ -5484,42 +5596,74 @@ uninst(){
   echo -e "${G}Uninstalled.${N} SSH (port 22), BBR and fail2ban were kept."
   exit 0
 }
-while true; do
-  cat <<T
-
-===== ReXUI v1.7 MENU =====
-   github.com/chaliraza777/ReXUI
-1) Uninstall
-2) Panel info
-3) Panel login reset (also turns off 2FA)
-4) Panel restart
-5) Port change (panel + protocols)
-6) Service restart
-7) SSL certificate (your domain)
-8) Backup / Restore
-9) Update
-10) Server check (find problems)
-11) Performance mode
-12) 443 mode (all protocols on 443 and 80)
-0) Exit
-T
+dot(){ systemctl is-active --quiet "$1" && printf "${G}●${N}%s" "$2" || printf "${R}●%s${N}" "$2"; }
+status(){
+  local a b c d cpu ram on
+  read -r _ a b c d _ < /proc/stat; local t1=$((a+b+c+d)) i1=$d
+  sleep 0.3
+  read -r _ a b c d _ < /proc/stat; local t2=$((a+b+c+d)) i2=$d
+  cpu=$(( t2>t1 ? 100*((t2-t1)-(i2-i1))/(t2-t1) : 0 ))
+  ram=$(free -m | awk '/^Mem:/{print $2-$7}')
+  on=$(cat /run/rexui-online 2>/dev/null || echo -)
+  local cc=$G; [ $cpu -ge 70 ] && cc=$Y; [ $cpu -ge 90 ] && cc=$R
+  echo -e "${W}ReXUI v1.8${N}  $(dot xray Xray) $(dot tunnel-panel Panel)$([ -f /etc/tunnel/h443.on ] && echo " $(dot haproxy HAProxy)")"
+  echo -e "${D}CPU${N} ${cc}${cpu}%${N}  ${D}RAM${N} ${ram}M  ${D}Online${N} ${W}${on}${N}"
+}
+lastline(){ journalctl -u "$1" --since "24 hours ago" --no-pager -o short-iso 2>/dev/null | grep -iE "$2" | grep -viE 'PROXY protocol|deprecated|please migrate' | tail -1 | sed -E 's/^[0-9-]+T([0-9:]{5})[^ ]* [^ ]+ [^:]+: /\1 /; s#[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9:.]+ ##' | cut -c1-70; }
+logs(){
+  echo -e "${W}LOGS${N} ${D}(last problem in 24h)${N}"
+  local x
+  x=$(lastline xray '\[(Warning|Error)\]|failed|panic'); printf "${C}%-8s${N}%s\n" Xray "${x:-$(echo -e "${G}no errors${N}")}"
+  x=$(lastline tunnel-panel 'error|fail|traceback|refused'); printf "${C}%-8s${N}%s\n" Panel "${x:-$(echo -e "${G}no errors${N}")}"
+  if [ -f /etc/tunnel/h443.on ]; then x=$(lastline haproxy 'alert|emerg|err|warn|fail'); printf "${C}%-8s${N}%s\n" HAProxy "${x:-$(echo -e "${G}no errors${N}")}"; fi
+  x=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
+  [ -n "$x" ] && echo -e "${R}Stopped:${N} $x"
+  echo; echo "1) Xray log   2) Panel log   3) HAProxy log   4) Live (Ctrl+C stops)   0) Back"
   read -rp "Option: " o
   case $o in
-    1) uninst;;
-    2) info;;
-    3) read -rp "New username: " u; read -rsp "New password: " p; echo
+    1) journalctl -u xray -n 40 --no-pager -o short;;
+    2) journalctl -u tunnel-panel -n 40 --no-pager -o short;;
+    3) journalctl -u haproxy -n 40 --no-pager -o short;;
+    4) trap ':' INT; journalctl -f -n 10 -u xray -u tunnel-panel -u haproxy -o short; trap - INT;;
+    *) BACK=1;;
+  esac
+}
+pause(){ echo; read -n1 -s -r -p "$(echo -e "${C} Press any key to go back to the menu ${N}")"; echo; }
+while true; do
+  clear; status
+  cat <<T
+
+1) Update        9) Backup/Restore
+2) Uninstall     10) Server check
+3) Panel info    11) Performance
+4) Login reset   12) 443 mode
+5) Panel restart 13) Speed test
+6) Port change   14) Logs
+7) Service rest. 15) Firewall check
+8) SSL cert      0) Exit
+T
+  BACK=; read -rp "$(echo -e "${G}Option:${N} ")" o; clear
+  case $o in
+    1) updm;;
+    2) uninst;;
+    3) info;;
+    4) read -rp "New username: " u; read -rsp "New password: " p; echo
        python3 $PY setlogin "$u" "$p" && systemctl restart tunnel-panel && echo -e "${G}Login changed${N}";;
-    4) systemctl restart tunnel-panel && echo -e "${G}Panel restarted${N}";;
-    5) ports;;
-    6) srv;;
-    7) $LIB/cert.sh;;
-    8) bkp;;
-    9) updm;;
+    5) systemctl restart tunnel-panel && echo -e "${G}Panel restarted${N}";;
+    6) ports; BACK=1;;
+    7) srv;;
+    8) $LIB/cert.sh;;
+    9) bkp;;
     10) python3 $PY check;;
     11) perfm;;
     12) h443m;;
+    13) spdt;;
+    14) logs;;
+    15) python3 $PY fwcheck;;
     0) exit 0;;
+    *) BACK=1;;
   esac
+  [ -z "$BACK" ] && pause
 done
 MAINM
 chmod +x $LIB/*.sh /usr/local/bin/menu

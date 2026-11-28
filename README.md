@@ -6,25 +6,32 @@
 
 SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP, WS, HTTPUpgrade · TLS, Reality, ECH · CDN) · OpenVPN (TCP + HTTP proxy) · Hysteria2 (UDP) · WireGuard · DNS tunnel + V2Ray · 443 mode (HAProxy)
 
-![version](https://img.shields.io/badge/version-2.0.1-1677ff) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
+![version](https://img.shields.io/badge/version-2.0.2-1677ff) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
 
 </div>
 
 ---
 
-<p align="center"><img src="screenshots/dashboard-dark.png" alt="ReXUI dashboard (dark)" width="100%"></p>
+## What's new in 2.0.2
 
-## What's new in 2.0
+- **Inbound status:** every inbound shows 🟢 OK with ping (ms) from the internet, or 🔴 Down with the reason (Xray stopped, firewall, blocked by the provider, certificate expired). Checked every 10 minutes from 3 countries, or press **Check now**. Tap a status for details and a fix button. Telegram alert when an inbound stops or works again
+- **Everything on 443:** in 443 mode VLESS and Trojan with WS, HTTPUpgrade, XHTTP and TCP+TLS all work on port 443 (and without TLS on 80), next to SSH and OpenVPN
+- **Paths set by the panel:** VLESS WS `/vws`, VLESS XHTTP `/vless`, VLESS HTTPUpgrade `/vhu`, Trojan WS `/tws`, Trojan HTTPUpgrade `/thu`, Trojan XHTTP `/txh`. Nothing to type, old inbounds keep their path
+- **UUID by hand:** paste the UUID from 3X-UI in Edit user, the old configs keep working
+- **New inbound defaults:** a free random port (↻ New for another), TLS 1.2 – 1.3, Pinned Peer Cert SHA-256 (Auto / Custom / Off)
+- **ECH details:** ECH config list, Get New ECH Cert and Clear
+- **SSH users online:** tunnel apps (HTTP Custom, HTTP Injector, NPV) now show online, with devices, live speed and the Online page
+- **New Online page:** world map on top, compact cards below (2 per row on phones) with live speed, connections per protocol, city and network, today's usage, devices and Kick
+- **Terminal menu like 3X-UI:** boxed groups, options 1–15 in order, Panel / Xray state at the bottom, View Current Settings with the access URL at the end
+- **Update notice:** the panel tells you (and Telegram) when a new ReXUI version is on GitHub
 
-- **Quick renew:** +7 / +30 / +90 days and +10 / +50 / +100 GB buttons in Edit user, one tap and saved
-- **Online map:** a world map on the Online page shows where users connect from (city, country, network). Lines when one account is used from two places far apart (**sharing alert**, also on Telegram if you turn it on)
-- **VLESS Encryption (post-quantum):** X25519 or ML-KEM-768 on any VLESS inbound, keys made by the panel, works even without TLS
-- **Reality Watch:** the panel checks your Reality target every 10 minutes. After 3 fails in a row it moves to a spare target that passes and tells you on Telegram
-- **Clone inbound:** copy any inbound with one button (new port, same settings)
-- **Limit Fallback (Reality):** slows down probes and scanners that are not your users
-- **Users page:** Add V2Ray user comes first, then Trial, Inbounds, Payload, DNS, Bulk and Select. Configs in a 2-column grid with scrollable boxes, QR opens the user details at the subscription
-- **Terminal menu like 3X-UI:** boxed menu in groups (Install & Update, Panel, Services, Tools), Panel state / Xray state / Start on boot / CPU / RAM / users online at the bottom, and **View Current Settings** with all details and the access URL at the end
-- **Safe upgrade:** old users and inbounds are updated by themselves, links stay the same
+<details>
+<summary><b>What was new in 2.0</b></summary>
+
+- Quick renew (+7 / +30 / +90 days, +10 / +50 / +100 GB), online map with sharing alerts, VLESS Encryption (X25519 / ML-KEM-768), Reality Watch, Clone inbound, Limit Fallback (Reality)
+- Users page: configs in a grid with scrollable boxes, QR opens the user details, safe upgrade of old data
+
+</details>
 
 <details>
 <summary><b>What was new in 1.9</b></summary>
@@ -78,42 +85,6 @@ SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP
 
 </details>
 
-## Screenshots
-
-| Inbounds | Add inbound |
-|---|---|
-| <img src="screenshots/inbounds.png" alt="Inbounds"> | <img src="screenshots/add-inbound.png" alt="Add inbound: TLS"> |
-| **Reality scan** | **VLESS Encryption** |
-| <img src="screenshots/inbound-reality.png" alt="Reality scan"> | <img src="screenshots/vless-encryption.png" alt="VLESS Encryption"> |
-| **Reality Watch** | **Online map** |
-| <img src="screenshots/reality-watch.png" alt="Reality Watch"> | <img src="screenshots/online-map.png" alt="Online map"> |
-| **V2Ray users (live speed, online dot)** | **Quick renew** |
-| <img src="screenshots/users.png" alt="V2Ray users"> | <img src="screenshots/quick-renew.png" alt="Quick renew"> |
-| **Add V2Ray user (attach inbounds)** | **User details** |
-| <img src="screenshots/add-v2ray-user.png" alt="Add V2Ray user"> | <img src="screenshots/user-details.png" alt="User details"> |
-| **User QR and configs** | **SSH users** |
-| <img src="screenshots/user-qr.png" alt="User QR"> | <img src="screenshots/ssh-users.png" alt="SSH users"> |
-| **UDP users (Hysteria2)** | **OpenVPN user (.ovpn + bug host)** |
-| <img src="screenshots/udp-users.png" alt="UDP users"> | <img src="screenshots/openvpn-user.png" alt="OpenVPN user"> |
-| **WireGuard user (QR + .conf)** | **DNS tunnel settings** |
-| <img src="screenshots/wireguard-user.png" alt="WireGuard user"> | <img src="screenshots/dns-settings.png" alt="DNS settings"> |
-| **CDN mode (Cloudflare)** | **Payload builder** |
-| <img src="screenshots/cdn.png" alt="CDN mode"> | <img src="screenshots/payloads.png" alt="Payload builder"> |
-| **Server check** | **Ports and 443 mode** |
-| <img src="screenshots/server-check.png" alt="Server check"> | <img src="screenshots/ports.png" alt="Port manager"> |
-
-**Terminal menu and View Current Settings**
-
-<img src="screenshots/terminal-menu.png" alt="Terminal menu" width="100%">
-
-| Phone: dashboard | Phone: users | User's own page |
-|---|---|---|
-| <img src="screenshots/mobile-dashboard.png" alt="Phone dashboard"> | <img src="screenshots/mobile-users.png" alt="Phone users"> | <img src="screenshots/mobile-user-page.png" alt="User page"> |
-
-<sub>Screenshots use demo data.</sub>
-
----
-
 ## Install
 
 Run as **root** on a fresh Ubuntu 20.04+ or Debian 11+ VPS (KVM recommended):
@@ -151,12 +122,15 @@ After install, open **Inbounds** in the panel, make your V2Ray inbounds, then at
 - TLS min / max, Reject Unknown SNI, ECH, own certificate, uTLS fingerprint and ALPN
 - Reality with several SNIs and Short IDs, SpiderX, Scan and Find Targets
 - Sniffing per inbound, External Proxy (one link per address), port check from the internet
+- **Status per inbound** (OK + ping / Down + reason), checked every 10 minutes, Telegram alerts
+- Random free port, Pinned Peer Cert SHA-256, ECH keys you can renew
 - 1-click all protocols, and remove them in one tap
 - JSON subscription with fragment and noise
 - Attach inbounds to each user, select all / clear all
 
 **443 mode (HAProxy)**
-- TLS protocols on **443** (SSH SSL, WS TLS, V2Ray TLS inbounds, OpenVPN), plain WebSocket and V2Ray XHTTP / WS without TLS on **80**
+- TLS protocols on **443** (SSH SSL, SSH WS TLS, VLESS / Trojan with WS, HTTPUpgrade, XHTTP and TCP+TLS, OpenVPN), plain WebSocket and VLESS / Trojan WS, HTTPUpgrade, XHTTP without TLS on **80**
+- Not on 443 (they need their own port): Reality, Vision, VLESS Encryption, ECH, an own certificate file, fragment, TCP Fast Open
 - Works with any SNI, the old ports stay open as a second choice, users see both
 - Checks itself on start, rolls back if a check fails, watchdog restarts it or turns it off and tells you on Telegram
 - One button in **Settings → Network ports**, or `menu` → 443 mode
@@ -222,7 +196,7 @@ After install, open **Inbounds** in the panel, make your V2Ray inbounds, then at
 
 Open these ports in your VPS provider's firewall (TCP and the UDP ones), plus the port of every inbound you make. Ports can be changed from `menu`.
 
-On 443 mode an inbound also works on 443 / 80 when it uses the main path (`/vless` for XHTTP, `/vws` for WS).
+In 443 mode every inbound on port 443 / 80 gets its path from the panel: VLESS WS `/vws`, VLESS XHTTP `/vless`, VLESS HTTPUpgrade `/vhu`, Trojan WS `/tws`, Trojan HTTPUpgrade `/thu`, Trojan XHTTP `/txh`.
 
 > **Works on the server but not from outside?** Many providers have **Anti-DDoS rules per port**. A rule that expects **SSH** on a web port (80, 8080, 8880) lets only SSH through and silently drops WebSocket and XHTTP. Set those rules to **HTTP**, or delete them.
 
@@ -274,7 +248,7 @@ Keep the panel record and the DNS tunnel records **grey**.
 menu
 ```
 
-A boxed menu, with the state of the panel and Xray at the bottom:
+A boxed menu like 3X-UI, with the state of the panel and Xray at the bottom:
 
 | Group | Options |
 |---|---|
@@ -284,15 +258,6 @@ A boxed menu, with the state of the panel and Xray at the bottom:
 | Tools | 12 Backup & Restore · 13 Performance · 14 443 Mode · 15 Speed Test |
 
 **View Current Settings** shows the panel user, port, path, certificate, every service (ON / OFF), every port and inbound, and the **access URL** at the end. Every action waits for a key before the menu comes back. Inside a sub menu, 0 goes back.
-
----|---|---|
-| 1 Update (ReXUI, Xray, geo files, roll back) | 6 Port change (all protocols) | 11 Performance mode |
-| 2 Uninstall | 7 Service restart | 12 443 mode on / off |
-| 3 Panel info | 8 SSL certificate | 13 Speed test (Ookla) |
-| 4 Login reset (also turns off 2FA) | 9 Backup / Restore | 14 Logs (last errors, live) |
-| 5 Panel restart | 10 Server check | 15 Firewall check |
-
-Every action waits for a key before the menu comes back. Inside a sub menu, 0 goes back.
 
 ---
 

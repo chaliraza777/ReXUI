@@ -248,7 +248,7 @@ Keep the panel record and the DNS tunnel records **grey**.
 menu
 ```
 
-A boxed menu like 3X-UI, with the state of the panel and Xray at the bottom:
+A boxed menu, with the state of the panel and Xray at the bottom:
 
 | Group | Options |
 |---|---|

@@ -6,7 +6,7 @@
 
 SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP, WS, HTTPUpgrade · TLS, Reality, ECH · CDN) · OpenVPN (TCP + HTTP proxy) · Hysteria2 (UDP) · WireGuard · DNS tunnel + V2Ray · 443 mode (HAProxy)
 
-![version](https://img.shields.io/badge/version-2.0-1677ff) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
+![version](https://img.shields.io/badge/version-2.0.1-1677ff) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
 
 </div>
 
@@ -274,7 +274,7 @@ Keep the panel record and the DNS tunnel records **grey**.
 menu
 ```
 
-A boxed menu, with the state of the panel and Xray at the bottom:
+A boxed menu like 3X-UI, with the state of the panel and Xray at the bottom:
 
 | Group | Options |
 |---|---|

@@ -1,5 +1,5 @@
 #!/bin/bash
-# ReXUI v2.0 installer
+# ReXUI v2.0.1 installer
 # Self-hosted SSH + Xray panel: SSH, SSL, SSH WebSocket (+TLS), UDPGW, Xray (VLESS XHTTP TLS / TCP TLS / Reality / XHTTP, Trojan), OpenVPN (TCP + HTTP proxy), Hysteria2 (UDP), WireGuard, DNS tunnel (dnstt) + V2Ray,
 # web panel with users, subscriptions, data and device limits, Telegram alerts, backups, 2FA, and a terminal menu.
 # Run as root on Ubuntu or Debian:  bash install.sh   (running it again updates ReXUI and keeps users and settings)
@@ -772,12 +772,21 @@ def sessions_full():
     for l in run('ps','-eo','pid=,etimes=,args=').stdout.splitlines():
         p=l.split(None,2)
         if len(p)<3: continue
-        m=re.match(r'sshd(?:-session)?: ([^@\s]+)@',p[2])
+        # 'sshd: ali@notty' (shell open) or just 'sshd: ali' (tunnel apps that only forward, ssh -N). Skip '[priv]', '[net]', the listener.
+        m=re.match(r'sshd(?:-session)?: ([^@\s\[/]+)(?:@\S+)?$',p[2].strip())
         if m:
             try: s.setdefault(m[1],[]).append((int(p[1]),int(p[0])))
             except ValueError: pass
     return s
 def sessions(): return {k:len(v) for k,v in sessions_full().items()}
+SACT={}
+def ssh_on():
+    """Open SSH sessions per user. A user whose SSH traffic was counted in the last 35 s is online too,
+    even if the sshd process name was not recognised."""
+    s=sessions(); now=time.time()
+    for n,t in SACT.items():
+        if now-t<35 and not s.get(n): s[n]=1
+    return s
 WSMAP='/run/rexui-ws'
 def ssh_ips():
     """{user: [ip, ...]} for open SSH sessions. Users who came through the WS proxy or HAProxy show their real IP
@@ -951,7 +960,7 @@ def uapi(a,d):
             if r.returncode: raise Err('Could not rename: '+r.stderr.strip()[-120:])
             run('groupmod','-n',nn,n)
             u['name']=nn
-            for D_ in (IPSEEN,SPD,LSEEN,UACC,XACT,HYON,WGON):
+            for D_ in (IPSEEN,SPD,LSEEN,UACC,XACT,HYON,WGON,SACT):
                 if n in D_: D_[nn]=D_.pop(n)
             usave(us); res={'ok':1,'name':nn}
             enforce(); xray_apply(); ssh_rules(True); return res
@@ -1134,7 +1143,7 @@ def detail(n):
     return {'name':u['name'],'pw':u['pw'],'uuid':u['uuid'],'exp':u['exp'],'lim':u['lim'],'used':u['up']+u['down'],'up':u['up'],'down':u['down'],
             'sni':u['sni'],'host':u['host'],'rtarget':u.get('rtarget',''),'rsni_u':u.get('rsni',''),'cdn':u.get('cdn',''),'rt':ureal(u,s)[0],'rport':rport(ureal(u,s)[0],s),'ibs':u.get('ibs'),'st':ustate(u),'created':u.get('created',''),'dev':u.get('dev',0),'rday':u.get('rday',0),
             'note':u.get('note',''),'hist':hist30(u),'fdays':u.get('fdays',0),'trial':u.get('trial',False),'expts':u.get('expts',0),'reason':u.get('reason',''),'kind':kind(u),
-            'ssh':sessions().get(u['name'],0),'sips':ssh_ips().get(u['name'],[]),'ips':xips_on(u['name']),'ovpn':ov_info(u),'hy2':hy_info(u),'wg':wg_info(u),'dns':dns_info(u),'pays':[{'name':p['name'],'mode':p['mode'],'note':p.get('note',''),'text':pay_render(p)} for p in pay_load() if p.get('show') and hassh(u)],'sub':sub_url(u),'jsub':sub_url(u)+'/json' if hasx(u) and sload().get('jsub',True) else '','links':[dict({'name':l[0],'url':l[1]},**({'alt':l[2]} if len(l)>2 and l[2] else {}),**({'json':json_cfg(l[1])} if l[1].startswith(('vless://','trojan://','vmess://')) else {})) for l in links(u)],
+            'ssh':ssh_on().get(u['name'],0),'sips':ssh_ips().get(u['name'],[]),'ips':xips_on(u['name']),'ovpn':ov_info(u),'hy2':hy_info(u),'wg':wg_info(u),'dns':dns_info(u),'pays':[{'name':p['name'],'mode':p['mode'],'note':p.get('note',''),'text':pay_render(p)} for p in pay_load() if p.get('show') and hassh(u)],'sub':sub_url(u),'jsub':sub_url(u)+'/json' if hasx(u) and sload().get('jsub',True) else '','links':[dict({'name':l[0],'url':l[1]},**({'alt':l[2]} if len(l)>2 and l[2] else {}),**({'json':json_cfg(l[1])} if l[1].startswith(('vless://','trojan://','vmess://')) else {})) for l in links(u)],
             'addr':a,'whost':u['host'] or s['host'] or ci['domain'] or a,'path':s['path'],'rsni':s['rsni'],
             'plaindomain':bool((s['addr'] and re.search('[a-z]',s['addr'])) or ci['domain']),
             'ports':dict({k:str(P(k,d)) for k,d in (('SSH_PORT',22),('UDPGW_PORT',7300))},**{k:str(v) for k,v in h_uports(u)[0].items()}),
@@ -1888,6 +1897,7 @@ def collect(flush=False):
         try: n=pwd.getpwuid(uid).pw_name
         except (KeyError,TypeError): continue
         if v['up'] or v['down']:
+            SACT[n]=now
             e=UACC.setdefault(n,[0,0]); e[0]+=v['up']; e[1]+=v['down']; t_=tick.setdefault(n,[0,0]); t_[0]+=v['up']; t_[1]+=v['down']
     PEND.clear()
     for src in (xs,op,hp_,wp_):
@@ -1999,7 +2009,7 @@ def devices():
     try: ov_devices(uload())
     except Exception as e: log('openvpn devices:',repr(e))
 def online():
-    ss=sessions(); si=ssh_ips(); out=[]
+    ss=ssh_on(); si=ssh_ips(); out=[]
     for u in uload():
         n=u['name']; ips=xips_on(n); s=ss.get(n,0); ov=[{'ip':c['ip'],'since':c['since']} for c in OVON.get(n,[])]; hy=HYON.get(n,0); wg=WGON.get(n)
         if s or ips or ov or hy or wg: out.append({'name':n,'ssh':s,'sips':si.get(n,[]),'ips':ips,'ov':ov,'hy':hy,'wg':wg['ip'] if wg else '','dev':u.get('dev',0),'kind':kind(u)})
@@ -3398,7 +3408,7 @@ def ustate_part(uh):
     L=users_list(); h=hashlib.sha1(json.dumps(L,sort_keys=True).encode()).hexdigest()[:16]
     return {'uh':h} if uh and uh==h else {'users':L,'uh':h}
 def users_list():
-    on=sessions(); now=time.time(); out=[]; td=today()
+    on=ssh_on(); now=time.time(); out=[]; td=today()
     for u in uload():
         st=ustate(u); nip=len(IPSEEN.get(u['name'],{})); o=on.get(u['name'],0)+len(OVON.get(u['name'],[]))+HYON.get(u['name'],0)+(1 if u['name'] in WGON else 0)+((nip or 1) if now-XACT.get(u['name'],0)<XONW else 0)
         out.append({'name':u['name'],'exp':u['exp'],'lim':u['lim'],'used':u['up']+u['down'],'on':o,'dev':u.get('dev',0),'rday':u.get('rday',0),'note':u.get('note','')[:80],'created':u.get('created',''),'fdays':u.get('fdays',0),'trial':u.get('trial',False),'expts':u.get('expts',0),'kind':kind(u),
@@ -4159,7 +4169,7 @@ def rdefault(d):
     s=sload(); s['rsni']=h; wjson(SETF,s,0o600); xray_apply(); return {'ok':1}
 
 # ---------- ReXUI new version check (GitHub, every 6 hours) ----------
-RXVER='2.0'; RXURL=os.environ.get('REXUI_UPURL','https://raw.githubusercontent.com/chaliraza777/ReXUI/main/install.sh'); RXUPF=T+'/rxup.json'; RXUP={'latest':'','t':0}
+RXVER='2.0.1'; RXURL=os.environ.get('REXUI_UPURL','https://raw.githubusercontent.com/chaliraza777/ReXUI/main/install.sh'); RXUPF=T+'/rxup.json'; RXUP={'latest':'','t':0}
 def vtup(v): return tuple(int(x) for x in re.findall(r'\d+',v)[:3])
 def rx_check():
     import urllib.request
@@ -4875,15 +4885,31 @@ a.btn{text-decoration:none;color:var(--t)}a.btn.pri{color:#fff}
 .sq{min-height:0;padding:7px 15px;border-radius:0;border:1px solid var(--l);margin-left:-1px;font-size:13px;font-weight:600;flex:none;display:inline-block}.sq:first-child{border-radius:7px 0 0 7px;margin-left:0}.sq:last-child{border-radius:0 7px 7px 0}
 .sq.on{position:relative;z-index:1;border-color:var(--a);background:var(--a);color:#fff}.sq:not(.on):not(:disabled):hover{color:var(--a)}
 @media (max-width:640px){.sq{padding:6px 10px;font-size:12.5px}}
+.ongr{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}
+.onc{background:var(--c);border:1px solid var(--l);border-radius:14px;padding:12px 12px 10px;position:relative;cursor:pointer;min-width:0;transition:border-color .15s}.onc:hover{border-color:var(--a)}
+.onh{display:flex;align-items:center;gap:9px}.onh b{font-size:14px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.onc .av{width:32px;height:32px;border-radius:10px;font-size:14px;position:relative;flex:none;display:grid;place-items:center;color:#fff;font-weight:700}
+.onc .av:after{content:'';position:absolute;right:-2px;bottom:-2px;width:10px;height:10px;border-radius:50%;background:var(--g);border:2px solid var(--c)}.onc.idle .av:after{background:#f59e0b}
+.onk{display:block;font-size:11px;color:var(--m);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.onx{margin-left:auto;border:1px solid var(--l);background:transparent;color:#dc2626;border-radius:8px;font-size:11.5px;padding:4px 8px;font-weight:600;cursor:pointer;flex:none}.onx:hover{background:#dc26261a}
+.ons{display:flex;gap:12px;margin:10px 0 6px;font-variant-numeric:tabular-nums}.ons span{font-size:13px;font-weight:700}.ons .d,.onsd{color:#0d9488}.ons .u,.onsu{color:#7c3aed}.ons .i{color:#f59e0b;font-size:11.5px;font-weight:600}
+.onb{height:4px;border-radius:4px;background:var(--l);overflow:hidden;margin-bottom:8px}.onb i{display:block;height:100%;background:linear-gradient(90deg,#0d9488,#7c3aed)}
+.onch{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:7px}.onch span{font-size:11px;padding:2px 7px;border-radius:20px;background:color-mix(in srgb,var(--a) 12%,transparent);color:var(--a);font-weight:600}
+.onf{display:flex;justify-content:space-between;font-size:11.5px;color:var(--m);gap:8px}.onf span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.onf span:last-child{flex:none}
+.onsum{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.onsum span{border:1px solid var(--l);border-radius:20px;padding:4px 11px;font-size:12px;color:var(--m)}.onsum b{color:var(--t,inherit)}.onsum b.onsd{color:#0d9488}.onsum b.onsu{color:#7c3aed}
+.onnote{margin-top:10px}.onnote summary{cursor:pointer;font-size:12px;color:var(--m)}
+@media(max-width:600px){.ongr{grid-template-columns:1fr 1fr;gap:8px}.onc{padding:10px 9px 8px;border-radius:12px}.onc .av{width:28px;height:28px;font-size:12px}.onh b{font-size:13px}
+.onx{position:absolute;top:8px;right:8px;padding:2px 6px;font-size:10.5px}.onh{padding-right:36px}.ons{flex-direction:column;gap:1px;margin:8px 0 5px}.ons span{font-size:12px}
+.onf{flex-direction:column;gap:1px;font-size:10.5px}.onch span{font-size:10px;padding:1px 6px}}
 </style><style id="acs"></style></head><body>
 <div id="lg" hidden><div class="lbg" aria-hidden="true"><i></i><i></i><i></i></div><form class="lcard" id="lf"><div class="lhead"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><p id="ltg">Sign in to the panel</p></div>
 <label for="lu">Username</label><div class="fi"><span data-i="user"></span><input id="lu" autocomplete="username" autocapitalize="none" spellcheck="false"></div>
 <label for="lp">Password</label><div class="fi"><span data-i="lock"></span><input id="lp" type="password" autocomplete="current-password"><button type="button" class="ib" id="lpe" aria-label="Show password"></button></div>
 <div id="lcw" hidden><label for="lc">6-digit code from your authenticator app</label><div class="fi"><span data-i="shield"></span><input id="lc" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></div></div>
 <div id="capw" hidden><label for="lcap">Type the letters from the picture</label><div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><img id="capi" alt="Security check picture" width="200" height="64" style="border-radius:8px;max-width:100%"><button type="button" class="ib" id="capr" aria-label="Show a new picture"></button></div><div class="fi"><span data-i="shield"></span><input id="lcap" autocapitalize="characters" autocomplete="off" spellcheck="false" maxlength="8"></div></div>
-<div class="err" id="le" role="alert"></div><button class="btn pri lbtn">Log in</button><p class="lft">Protected panel · ReXUI v2.0</p></form></div>
-<div id="app" hidden><aside><div class="brand"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search" title="Search (/)" style="margin-left:auto"></button><button class="ib thb" id="th" aria-label="Switch theme"></button></div><nav id="nav"></nav><a class="pwr" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by <b>ReXUI</b> v2.0</a></aside>
-<main><div id="mt"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search"></button><button class="ib thb" aria-label="Switch theme"></button><button class="ib" id="lo2" aria-label="Log out"></button></div><div id="cbn"></div><div class="hdr"><span class="chip" id="xs"></span><span class="ver">ReXUI v2.0</span><small class="m" id="upd" style="margin-left:auto"></small></div><div id="pg"></div><a class="pwm" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by ReXUI v2.0</a></main><nav id="bn" aria-label="Main"></nav></div>
+<div class="err" id="le" role="alert"></div><button class="btn pri lbtn">Log in</button><p class="lft">Protected panel · ReXUI v2.0.1</p></form></div>
+<div id="app" hidden><aside><div class="brand"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search" title="Search (/)" style="margin-left:auto"></button><button class="ib thb" id="th" aria-label="Switch theme"></button></div><nav id="nav"></nav><a class="pwr" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by <b>ReXUI</b> v2.0.1</a></aside>
+<main><div id="mt"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search"></button><button class="ib thb" aria-label="Switch theme"></button><button class="ib" id="lo2" aria-label="Log out"></button></div><div id="cbn"></div><div class="hdr"><span class="chip" id="xs"></span><span class="ver">ReXUI v2.0.1</span><small class="m" id="upd" style="margin-left:auto"></small></div><div id="pg"></div><a class="pwm" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by ReXUI v2.0.1</a></main><nav id="bn" aria-label="Main"></nav></div>
 <div id="dt" hidden><div class="dts"><div class="dth"><b>User details</b><button class="btn sm" id="dx" aria-label="Close">Close</button></div><div id="dtb"></div></div></div>
 <div id="md" hidden><form class="card" id="mf"></form></div>
 <div id="sxo" hidden><div class="sxp" role="dialog" aria-label="Search"><div class="fi"><span data-i="search"></span><input id="sxi" placeholder="Search users, settings, tools..." autocomplete="off" spellcheck="false" aria-label="Search"><button type="button" class="btn sm" id="sxx">Esc</button></div><div id="sxr" role="listbox"></div></div></div>
@@ -5027,8 +5053,8 @@ const r=e.target.closest('[data-r]');if(r)return restartUnit(r.dataset.r,r.textC
 const s=e.target.closest('.sv');if(s&&!s.disabled)return restartUnit(s.dataset.u,s.dataset.n);
 if(e.target.closest('#add'))return pg=='us'?umodal():kpick(k=>umodal(null,null,k));
 if(e.target.closest('#blk'))return bulkm();
-const c=e.target.closest('[data-open]');if(c)return openU(c.dataset.open);
 const k=e.target.closest('[data-kick]');if(k){const n=k.dataset.kick;if(!confirm('Disconnect '+n+' from all devices now?'))return;api('api/user/kick',{name:n}).then(()=>{toast(n+' disconnected');load()}).catch(x=>toast(x.message,1));return}
+const c=e.target.closest('[data-open]');if(c)return openU(c.dataset.open);
 if(e.target.closest('#bk')){location.href='api/backup';return}
 if(e.target.closest('#rsb'))return $('#rsf').click()};
 const STC={online:'var(--g)',active:'var(--a)',expired:'var(--r)',limit:'var(--r)',disabled:'var(--y)'},STN={online:'online',active:'active',expired:'expired',limit:'limit reached',disabled:'disabled'};
@@ -5098,19 +5124,31 @@ const B=Object.values(by).map(b=>Object.assign(b,{x:(b.c.lon+180)/360*1000,y:(84
 let vx=0,vy=0,vw=1000,vh=460;if(B.length){const xs=B.map(b=>b.x),ys=B.map(b=>b.y);vw=Math.min(1000,Math.max(320,Math.max(...xs)-Math.min(...xs)+220));vh=vw*.46;
 vx=Math.max(0,Math.min(1000-vw,(Math.min(...xs)+Math.max(...xs))/2-vw/2));vy=Math.max(0,Math.min(460-vh,(Math.min(...ys)+Math.max(...ys))/2-vh/2))}
 const fs=vw/1000*(innerWidth<560?30:15),cw=fs*.58;B.sort((a,b)=>a.y-b.y);const placed=[];
-const pts=B.map(b=>{const w=b.t.length*cw;let ly=b.y-fs*.95;for(const p of placed)if(Math.abs(p.x-b.x)<(w+p.w)/2&&Math.abs(p.ly-ly)<fs*1.1)ly=b.y+fs*1.75;placed.push({x:b.x,ly,w});
-return `<g class="gd${b.share?' w':''}"><circle cx="${b.x.toFixed(1)}" cy="${b.y.toFixed(1)}" r="${(fs*.45).toFixed(1)}" style="stroke-width:${(fs*.13).toFixed(2)}"/><text x="${b.x.toFixed(1)}" y="${ly.toFixed(1)}" style="font-size:${fs.toFixed(1)}px;stroke-width:${(fs*.3).toFixed(1)}px">${X(b.t)}</text></g>`}).join('');
+const dots=B.map(b=>({x:b.x,ly:b.y+fs*.35,w:fs}));
+const pts=B.map(b=>{const w=b.t.length*cw,hit=(x,ly)=>[...placed,...dots.filter(d=>d.x!=b.x||d.ly!=b.y+fs*.35)].some(p=>Math.abs(p.x-x)<(w+p.w)/2+fs*.15&&Math.abs(p.ly-ly)<fs*1.05);
+const tries=[[b.x,b.y-fs*.95],[b.x,b.y+fs*1.75],[b.x+w/2+fs*.7,b.y+fs*.35],[b.x-w/2-fs*.7,b.y+fs*.35],[b.x,b.y-fs*2],[b.x,b.y+fs*2.8]];const ok=tries.find(([x,ly])=>!hit(x,ly));if(ok)placed.push({x:ok[0],ly:ok[1],w});
+return `<g class="gd${b.share?' w':''}"><title>${X(b.t)}</title><circle cx="${b.x.toFixed(1)}" cy="${b.y.toFixed(1)}" r="${(fs*.45).toFixed(1)}" style="stroke-width:${(fs*.13).toFixed(2)}"/>${ok?`<text x="${ok[0].toFixed(1)}" y="${ok[1].toFixed(1)}" style="font-size:${fs.toFixed(1)}px;stroke-width:${(fs*.3).toFixed(1)}px">${X(b.t)}</text>`:''}</g>`}).join('');
 const isp={};pl.forEach(c=>{if(c.isp)isp[c.isp]=(isp[c.isp]||0)+1});const top=Object.entries(isp).sort((a,b)=>b[1]-a[1])[0];
 const st=(k,v,cl)=>`<div><span>${k}</span><b${cl?` style="color:${cl}"`:''}>${v}</b></div>`;
 return `${G.alerts.map(a=>`<div class="banner e gal" role="alert">${I('warn',17)}<div><b>Sharing?</b> <b>${X(a.name)}</b> is connected from ${a.places.map(X).join(' and ')} at the same time (${a.km} km apart). <button class="btn sm dng" data-kick="${X(a.name)}">${I('kick',14)}Kick</button> <button class="btn sm" data-open="${X(a.name)}">Open user</button></div></div>`).join('')}
 <div class="card mb"><div class="ct"><div class="lab">${I('globe',15)}Where users connect from</div><span class="m">${G.pending?'locating new IPs…':'Live'}</span></div>
 <div class="gmap"><svg viewBox="${vx.toFixed(0)} ${vy.toFixed(0)} ${vw.toFixed(0)} ${vh.toFixed(0)}" role="img" aria-label="World map of online users"><path d="${WORLD}" class="gland"/>${pts}</svg></div>
 <div class="gst">${st('Countries',new Set(pl.map(c=>c.cc)).size)}${st('Cities',Object.keys(by).length)}${st('Top network',top?X(top[0]):'-')}${st('Sharing alerts',G.alerts.length,G.alerts.length?'var(--r)':'')}</div></div>`}
-function onl(){const L=D.online;if(!GEOV||Date.now()-GEOT>20000)geoGet().then(()=>{if(pg=='on')onl()});const tot=L.reduce((a,x)=>a+x.ssh+x.ips.length+(x.ov||[]).length+(x.hy||0)+(x.wg?1:0),0);
-$('#pg').innerHTML=geoMap()+`<div class="card mb"><div class="ct"><div class="lab">${I('wifi',15)}Online users</div><span class="m">${L.length} users · ${tot} connections</span></div>
-<p class="note">SSH shows active sessions. V2Ray and DNS users show while they use data (offline about 30 seconds after they stop). OpenVPN, UDP (Hysteria2) and WireGuard show connected devices ("via proxy" when OpenVPN uses the HTTP proxy). Kick disconnects the user and blocks their current Xray IPs for 1 minute. An IP shared with another user (common on mobile data) is never blocked.</p></div>
-${L.length?`<div class="ul">${L.map(x=>{const n=X(x.name),over=x.dev&&(x.ssh>x.dev||x.ips.length>x.dev||(x.ov||[]).length>x.dev||(x.hy||0)>x.dev);return `<div class="card"><div class="uh"><div class="av" style="background:hsl(${hue(x.name)} 55% 52%)">${n[0].toUpperCase()}</div><div style="min-width:0"><b>${n}</b><small class="m" style="display:block">Device limit ${x.dev||'Unlimited'}${over?' · <span class="bad">over limit</span>':''}${GEOV&&(GEOV.users.find(g=>g.name==x.name)||{}).share?' · <span class="bad">⚠️ far apart</span>':''}</small></div><button class="btn sm dng" data-kick="${n}" style="margin-left:auto">${I('kick',14)}Kick</button></div>
-<div style="margin-top:10px">${HS(x.kind)?`<div class="kv"><span>SSH sessions</span><b>${x.ssh}</b></div>`:''}${(x.sips||[]).map(ip=>`<div class="kv"><span>SSH ${X(ip)}<small class="gl">${glab(gloc(ip))}</small></span><b>connected</b></div>`).join('')}${x.hy?`<div class="kv"><span>Hysteria2 devices</span><b>${x.hy}</b></div>`:''}${x.wg?`<div class="kv"><span>WireGuard ${X(x.wg)}<small class="gl">${glab(gloc(x.wg))}</small></span><b>connected</b></div>`:''}${(x.ov||[]).map(o=>`<div class="kv"><span>OpenVPN ${X(o.ip=='127.0.0.1'?'via proxy':o.ip)}${o.ip=='127.0.0.1'?'':`<small class="gl">${glab(gloc(o.ip))}</small>`}</span><b>for ${ago(o.since)}</b></div>`).join('')}</div>${x.ips.map(i=>`<div class="kv"><span>Xray ${X(i.ip)}<small class="gl">${glab(gloc(i.ip))}</small></span><b>${i.ban?'<span class="bad">Blocked '+i.ban+'s</span>':i.ago+'s ago'+(i.shared?' · shared IP':'')}</b></div>`).join('')}<button class="btn sm" data-open="${n}" style="margin-top:10px">Details</button></div>`}).join('')}</div>`:'<div class="empty card">No one is connected right now.</div>'}`}
+function onl(){const L=D.online;if(!GEOV||Date.now()-GEOT>20000)geoGet().then(()=>{if(pg=='on')onl()});
+const UM={};(D.users||[]).forEach(u=>UM[u.name]=u);const tot={};let all=0,dn=0,upl=0;
+const R=L.map(x=>{const u=UM[x.name]||{},p=u.spd||[0,0],c=[];if(x.ssh)c.push(['SSH',x.ssh]);if(x.ips.length)c.push([x.kind=='dns'?'DNS':'V2Ray',x.ips.length]);if((x.ov||[]).length)c.push(['OpenVPN',x.ov.length]);if(x.hy)c.push(['Hysteria2',x.hy]);if(x.wg)c.push(['WireGuard',1]);
+c.forEach(([k,n])=>{tot[k]=(tot[k]||0)+n;all+=n});dn+=p[1];upl+=p[0];
+const ips=[...(x.sips||[]).filter(i=>i!='SSL'),...x.ips.map(i=>i.ip),...(x.ov||[]).map(o=>o.ip).filter(i=>i!='127.0.0.1'),...(x.wg?[x.wg]:[])],cn=Math.max(x.ssh,x.ips.length,(x.ov||[]).length,x.hy||0,x.wg?1:0);
+return {x,u,p,c,ips,cn,s:p[0]+p[1],ban:x.ips.some(i=>i.ban),over:x.dev&&cn>x.dev,far:GEOV&&(GEOV.users.find(g=>g.name==x.name)||{}).share}});
+const mx=Math.max(1,...R.map(r=>r.s));
+$('#pg').innerHTML=geoMap()+`<div class="card mb"><div class="ct"><div class="lab">${I('wifi',15)}Online users</div><span class="m">${L.length} users · ${all} connections</span></div>
+${all?`<div class="onsum"><span><b class="onsd">↓ ${fsp(dn)}</b> <b class="onsu">↑ ${fsp(upl)}</b></span>${Object.entries(tot).map(([k,n])=>`<span>${k} <b>${n}</b></span>`).join('')}</div>`:''}
+<details class="onnote"><summary>How online works</summary><p class="note">SSH shows open sessions (and anyone whose SSH data moved in the last 35 seconds). V2Ray and DNS users show while they use data (offline about 30 seconds after they stop). OpenVPN, UDP (Hysteria2) and WireGuard show connected devices. Kick disconnects the user and blocks their current Xray IPs for 1 minute. An IP shared with another user (common on mobile data) is never blocked.</p></details></div>
+${L.length?`<div class="ongr">${R.sort((a,b)=>b.s-a.s).map(r=>{const x=r.x,n=X(x.name),idle=!r.s,g=r.ips.length?gloc(r.ips[0]):null,loc=r.ips.length?(glab(g)||'locating…')+(r.ips.length>1?' +'+(r.ips.length-1):''):(x.sips||[]).includes('SSL')?'via SSL (IP hidden)':x.hy?'UDP':'—';
+return `<div class="onc${idle?' idle':''}" data-open="${n}"><div class="onh"><div class="av" style="background:hsl(${hue(x.name)} 55% 52%)">${n[0].toUpperCase()}</div><div style="min-width:0"><b>${n}</b><span class="onk">${KN[x.kind]||x.kind}${r.over?' · <span class="bad">over limit</span>':''}${r.far?' · <span class="bad">⚠️ far apart</span>':''}${r.ban?' · <span class="bad">blocked</span>':''}</span></div><button class="onx" data-kick="${n}" title="Disconnect">Kick</button></div>
+<div class="ons"><span class="d">↓ ${fsp(r.p[1])}</span><span class="u">↑ ${fsp(r.p[0])}</span>${idle?'<span class="i">idle</span>':''}</div><div class="onb"><i style="width:${Math.max(2,r.s/mx*100)}%"></i></div>
+<div class="onch">${r.c.map(([k,v])=>`<span>${k} ${v}</span>`).join('')}</div>
+<div class="onf"><span>${loc}</span><span>Today ${fb(r.u.today||0)} · ${r.cn}/${x.dev||'∞'}</span></div></div>`}).join('')}</div>`:'<div class="empty card">No one is connected right now.</div>'}`}
 function bulkm(){modal('Bulk actions: '+KN[UV.kind]+' users',[['action','Action','select','','days',[['days','Add days to expiry'],['dev','Set device limit'],['reset','Reset data usage to 0']]],['days','Days to add (for "Add days")','number','',1],['dev','Device limit (for "Set device limit", 2 recommended)','number','',2],['scope','Apply to','select','','active',[['active','Active users only'],['all','All users']]]],
 async d=>{d.kind=UV.kind;const KU=D.users.filter(u=>inK(u,UV.kind)),n=d.scope=='all'?KU.length:KU.filter(u=>['active','online'].includes(u.st)).length;if(!confirm((d.action=='days'?'Add '+d.days+' days to ':d.action=='dev'?'Set device limit '+d.dev+' for ':'Reset data usage of ')+n+' user(s)?'))throw Error('Cancelled');const r=await api('api/bulk',d);toast('Done for '+r.count+' user(s)')},
 `Users without expiry are skipped when adding days.<span style="display:block;border-top:1px solid var(--l);margin-top:12px;padding-top:12px"><b style="color:var(--t)">CSV file</b> (Excel / Google Sheets): export all users, or import new ones. Columns: name, password, expiry (YYYY-MM-DD, days, never or first-use+30), data_limit_gb, devices, reset_day, sni, host, note. Export once to see the format.</span><span style="display:flex;gap:8px;margin-top:10px"><button type="button" class="btn sm" id="cxe">${I('save',14)}Export CSV</button><button type="button" class="btn sm" id="cxi">${I('upl',14)}Import CSV</button><input type="file" id="cxf" accept=".csv,text/csv" hidden></span>`);csvUI()}
@@ -6126,7 +6164,7 @@ hr(){ echo -e "${D}  ───────────────────�
 info(){
   . $CF; local U H
   U=$(url)
-  echo -e "${W}  ReXUI v2.0 · Current Settings${N}"; hr
+  echo -e "${W}  ReXUI v2.0.1 · Current Settings${N}"; hr
   kv "Panel user" "$(python3 $PY user) ${D}(hash only, option 4 sets a new one)${N}"
   kv "Panel port" "$PANEL_PORT"
   kv "Web path" "/$WEB_PATH/"
@@ -6436,7 +6474,7 @@ ms(){ echo -e "${B}├───────────────────�
 while true; do
   clear
   echo -e "${B}╔══════════════════════════════════════════════════╗${N}"
-  printf "${B}║${N}  ${W}%-30s${N}${D}%18s${N}${B}║${N}\n" "ReXUI Panel Management Script" "v2.0 "
+  printf "${B}║${N}  ${W}%-30s${N}${D}%18s${N}${B}║${N}\n" "ReXUI Panel Management Script" "v2.0.1 "
   echo -e "${B}╚══════════════════════════════════════════════════╝${N}"
   echo -e "${B}┌──────────────────────────────────────────────────┐${N}"
   mi 0 "Exit Script"; ms

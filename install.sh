@@ -1,5 +1,5 @@
 #!/bin/bash
-# ReXUI v1.9 installer
+# ReXUI v2.0 installer
 # Self-hosted SSH + Xray panel: SSH, SSL, SSH WebSocket (+TLS), UDPGW, Xray (VLESS XHTTP TLS / TCP TLS / Reality / XHTTP, Trojan), OpenVPN (TCP + HTTP proxy), Hysteria2 (UDP), WireGuard, DNS tunnel (dnstt) + V2Ray,
 # web panel with users, subscriptions, data and device limits, Telegram alerts, backups, 2FA, and a terminal menu.
 # Run as root on Ubuntu or Debian:  bash install.sh   (running it again updates ReXUI and keeps users and settings)
@@ -439,7 +439,7 @@ def sload():
        'btorrent':True,'bads':False,'warp':'off','wsites':'geosite:google,geosite:openai,geosite:netflix',
        'b25':True,'autodel':0,'tgtoken':'','tgchat':'','brand':'','tagline':'','accent':'teal',
        'health':True,'report':False,'rhour':9,'tgbackup':False,'reboot':'off','rbday':0,'rbtime':'04:00','announce':'','cname':'{user}-{proto}','flag':'','autoclean':True,'rports':{},'fsite':'off','ftitle':'','xauto':False,'ddns_dom':'','ddns_tok':'','ovhost':'','dns_ns':'','hy_bw':0,'cdn_dom':'','cdn_addr':'','perf':'balanced','h443':True,
-       'jsub':True,'jfrag':True,'jpk':'tlshello','jlen':'100-200','jint':'10-20','jnoise':False}
+       'tgshare':False,'jsub':True,'jfrag':True,'jpk':'tlshello','jlen':'100-200','jint':'10-20','jnoise':False}
     try: s.update({k:v for k,v in json.loads(rd(SETF)).items() if k in s})
     except Exception: pass
     return s
@@ -597,6 +597,7 @@ def automation_save(d):
     if c and not re.fullmatch(r'-?\d{3,20}',c): raise Err('Chat ID must be a number')
     s['tgtoken'],s['tgchat']=t,c
     s['health'],s['report'],s['tgbackup']=bool(d.get('health',s['health'])),bool(d.get('report',s['report'])),bool(d.get('tgbackup',s['tgbackup']))
+    s['tgshare']=bool(d.get('tgshare',s.get('tgshare',False)))
     s['rhour']=ival(d,'rhour',0,23,s['rhour']); wjson(SETF,s,0o600); return {'ok':1}
 ACCENTS=('blue','teal','green','purple','pink','orange','indigo')
 def textval(v,n,what):
@@ -737,6 +738,13 @@ def migrate():
             u,e=l.strip().split(':',1)
             if u and NAME.fullmatch(u): us.append(newu(u,'',e or 'never'))
     usave(us)
+def upgrade():
+    """Bring data from older ReXUI versions to the current format (runs at every start, does nothing when already done)."""
+    try:
+        L=ib_load()
+        if os.path.exists(IBF): ib_save(L)              # old inbounds get the new fields (flow, sniffing, cert, ...)
+        ib_freeze(L)                                     # old V2Ray users ("all inbounds") get a real list, so Edit shows and changes it
+    except Exception as e: print('upgrade:',e,flush=True)
 def ustate(u,t=None):
     if not u.get('en',True): return 'disabled'
     if u.get('expts') and time.time()>u['expts']: return 'expired'
@@ -927,6 +935,26 @@ def uapi(a,d):
             u['lim'],u['sni'],u['host'],u['dev'],u['rday']=lim,sni,host,dev,rday
             if 'note' in d: u['note']=noteval(d)
             usave(us)
+        elif a=='rename':
+            nn=str(d.get('new','')).strip()
+            if nn==n: return {'ok':1,'name':n}
+            if hassh(u) or hasov(u): raise Err('SSH and OpenVPN users keep their name (it is their login). Make a new user instead.')
+            if not NAME.fullmatch(nn) or nn.isdigit(): raise Err('Username can use letters, numbers, _ . - (max 32, no spaces)')
+            if any(x['name']==nn for x in us): raise Err('This user already exists')
+            try:
+                pwd.getpwnam(nn); raise Err('This name is already used by the system')
+            except KeyError: pass
+            collect(True)   # save the usage counted so far under the old name
+            us=uload(); u=next(x for x in us if x['name']==n)
+            hy_kick(n); run('pkill','-KILL','-u',n); time.sleep(.2)
+            r=run('usermod','-l',nn,'-d','/home/'+nn,'-m',n)
+            if r.returncode: raise Err('Could not rename: '+r.stderr.strip()[-120:])
+            run('groupmod','-n',nn,n)
+            u['name']=nn
+            for D_ in (IPSEEN,SPD,LSEEN,UACC,XACT,HYON,WGON):
+                if n in D_: D_[nn]=D_.pop(n)
+            usave(us); res={'ok':1,'name':nn}
+            enforce(); xray_apply(); ssh_rules(True); return res
         elif a=='newsub': u['sub']=secrets.token_hex(16); usave(us)
         elif a=='newuuid': u['uuid']=str(uuid.uuid4()); usave(us)
         elif a=='newwg':
@@ -981,7 +1009,7 @@ def ib_tq(x,hh,cdn=False):
 def ib_url(x,u,A_,port,q,N):
     """Build the final share link. q = security + transport query (no leading &)."""
     if x['proto']=='trojan': return 'trojan://%s@%s:%d?%s#%s'%(u['uuid'],A_,port,q,N)
-    if x['proto']=='vless': return 'vless://%s@%s:%d?encryption=none&%s#%s'%(u['uuid'],A_,port,q,N)
+    if x['proto']=='vless': return 'vless://%s@%s:%d?encryption=%s&%s#%s'%(u['uuid'],A_,port,quote(x.get('vencc') or 'none',safe=''),q,N)
     p={k:v[0] for k,v in parse_qs(q,keep_blank_values=True).items()}; nt=p.get('type','tcp')
     j={'v':'2','ps':unquote(N),'add':A_.strip('[]'),'port':str(port),'id':u['uuid'],'aid':'0','scy':'auto','net':nt,
        'type':p.get('headerType','none') if nt=='tcp' else ('multi' if p.get('mode')=='multi' else 'gun') if nt=='grpc' else p.get('mode','') if nt=='xhttp' else 'none',
@@ -1055,7 +1083,7 @@ def link_ob(url):
     if pr=='trojan': st_={'servers':[{'address':host,'port':port,'password':uid,'level':8}]}
     else:
         us={'id':uid,'level':8}
-        if pr=='vless': us['encryption']='none'; us.update({'flow':q['flow']} if q.get('flow') else {})
+        if pr=='vless': us['encryption']=q.get('encryption') or 'none'; us.update({'flow':q['flow']} if q.get('flow') else {})
         else: us.update(alterId=0,security='auto')
         st_={'vnext':[{'address':host,'port':port,'users':[us]}]}
     ss={'network':nt,'security':sec}
@@ -1142,7 +1170,7 @@ def ib_load():
             x.setdefault('fp','chrome'); x.setdefault('xmode','auto'); x.setdefault('multi',True); x.setdefault('obfs',False); x.setdefault('obpath','/')
             x.setdefault('hb',0); x.setdefault('hdrs',[]); x.setdefault('tfo',False); x.setdefault('frag',{}); x.setdefault('rsni',False); x.setdefault('ech',False)
             x.setdefault('flow','vision' if x.get('sec')=='reality' and x.get('proto')=='vless' and x.get('net')=='tcp' else '')
-            x.setdefault('sids',[]); x.setdefault('snix',[]); x.setdefault('ext',[]); x.setdefault('sniff',{'on':True,'dest':['http','tls'],'ro':False}); x.setdefault('cmode','panel')
+            x.setdefault('sids',[]); x.setdefault('snix',[]); x.setdefault('ext',[]); x.setdefault('sniff',{'on':True,'dest':['http','tls'],'ro':False}); x.setdefault('cmode','panel'); x.setdefault('venc',''); x.setdefault('vdec',''); x.setdefault('vencc',''); x.setdefault('lfb',{}); x.setdefault('rw',{})
             for k in ('cfile','kfile','ccrt','ckey'): x.setdefault(k,'')
             x.setdefault('cdn',False); x.setdefault('on',True)
         return L
@@ -1197,7 +1225,12 @@ def ib_stream(x,cert=None):
         if x.get('rsni'): t['rejectUnknownSni']=True
         if x.get('ech') and x.get('echkey'): t['echServerKeys']=x['echkey']
         st['tlsSettings']=t
-    if sec=='reality': st['realitySettings']={'target':x.get('target') or x['sni']+':443','serverNames':ib_snis(x),'privateKey':sload()['rpriv'],'shortIds':ib_sids(x)}
+    if sec=='reality':
+        st['realitySettings']={'target':x.get('target') or x['sni']+':443','serverNames':ib_snis(x),'privateKey':sload()['rpriv'],'shortIds':ib_sids(x)}
+        lf=x.get('lfb') or {}
+        if lf.get('on'):
+            v_={'afterBytes':int(lf['after'])*1024,'bytesPerSec':int(lf['rate'])*1024,'burstBytesPerSec':int(lf['rate'])*1024}
+            st['realitySettings'].update(limitFallbackUpload=v_,limitFallbackDownload=dict(v_))
     if net=='xhttp': st['xhttpSettings']={'path':ib_path(x),'mode':x.get('xmode') or 'auto'}
     if net=='ws':
         w={'path':ib_path(x)}
@@ -1224,10 +1257,10 @@ def ib_sniff(x):
 def ib_kind(x):
     st=ib_stream(x); st.pop('realitySettings',None)
     return (x['proto'],x['sec'],(x.get('target') or x['sni']) if x['sec']=='reality' else '',json.dumps(st,sort_keys=True),ib_vision(x),json.dumps(ib_sniff(x),sort_keys=True),
-            json.dumps([ib_snis(x),ib_sids(x)]) if x['sec']=='reality' else '')
+            json.dumps([ib_snis(x),ib_sids(x)]) if x['sec']=='reality' else '',x.get('vdec') or '')
 def ib_h(x):
     """Which HAProxy route (443 mode) can carry this inbound: xhttp, vless, trojan or None."""
-    if x['sec']=='reality' or x['proto']=='vmess' or x['net'] in ('grpc','httpupgrade') or x.get('obfs') or x.get('ech') or ib_vision(x): return None
+    if x.get('venc') or x['sec']=='reality' or x['proto']=='vmess' or x['net'] in ('grpc','httpupgrade') or x.get('obfs') or x.get('ech') or ib_vision(x): return None
     if x.get('cmode') in ('path','content') or x.get('frag',{}).get('on') or x.get('tfo') or x.get('minv') or x.get('maxv') or x.get('rsni'): return None
     if x['net'] in ('xhttp','ws') and x['proto']=='vless': return x['net'] if ib_path(x)==ib_main(x['net']) and (x.get('xmode') or 'auto')=='auto' and not x.get('hb') and not x.get('hdrs') else None
     if x['net']=='tcp' and x['sec']=='tls': return 'vless' if x['proto']=='vless' else 'trojan'
@@ -1304,7 +1337,7 @@ def ib_check(x,L,old=None):
             if g and g not in ('xray','?'): raise Err('Port %d is already used by %s on this server. Pick another port.'%(p,g))
     return o
 IBKEYS=('name','port','sni','on','proto','net','sec','cdn','addr','host','path','target','fp','alpn','xmode','svc','multi','obfs','obhost','obpath','hb','hdrs','tfo','frag',
-        'minv','maxv','rsni','ech','flow','sids','snix','spx','sniff','ext','cmode','cfile','kfile','ccrt','ckey')
+        'minv','maxv','rsni','ech','flow','sids','snix','spx','sniff','ext','cmode','cfile','kfile','ccrt','ckey','venc','lfb','rw')
 def ib_why(x):
     w=[]
     if x['proto']=='vmess': w.append('VMess')
@@ -1314,6 +1347,7 @@ def ib_why(x):
         if x.get(k): w.append(t)
     if x.get('minv') or x.get('maxv'): w.append('TLS version')
     if x.get('cmode') in ('path','content'): w.append('Own certificate')
+    if x.get('venc'): w.append('VLESS Encryption')
     if (x.get('frag') or {}).get('on'): w.append('fragment')
     if x['net']=='xhttp' and (x.get('xmode') or 'auto')!='auto': w.append('XHTTP mode')
     return ', '.join(w) or 'custom path'
@@ -1326,6 +1360,14 @@ def cert_paths(all_=False):
     L=[(CD+'/xray.crt',CD+'/xray.key'),(XSC,XSK),(XD+'/cert.crt',XD+'/key.key')]
     if all_: return L
     return next(((c,k) for c,k in L[:2] if os.path.exists(c) and os.path.exists(k)),L[1])
+def vless_enc(mode):
+    """(server decryption, client encryption) strings from `xray vlessenc` (mode x25519 or mlkem)."""
+    out=run(XBIN,'vlessenc',t=20).stdout or ''; blocks=out.split('Authentication:')[1:]
+    for b in blocks:
+        if ('ML-KEM' in b.split('\n')[0])==(mode=='mlkem'):
+            d=re.search(r'"decryption":\s*"([^"]+)"',b); e=re.search(r'"encryption":\s*"([^"]+)"',b)
+            if d and e: return d[1],e[1]
+    raise Err('Could not make VLESS Encryption keys (xray vlessenc failed). Update Xray and try again.')
 def ib_extra(x,pr,net,sec,cdn,p,sni,old):
     """Check and clean the advanced settings of an inbound."""
     old=old or {}; o={}
@@ -1395,7 +1437,7 @@ def ib_extra(x,pr,net,sec,cdn,p,sni,old):
                 if not v.startswith('/') or not os.path.isfile(v): raise Err(t+' file not found on the server: '+(v or 'empty'))
             ct,kt=rd(cf),rd(kf); o['cfile'],o['kfile']=cf,kf
         else:
-            ct=str(x.get('ccrt') or '').strip(); kt=str(x.get('ckey') or '').strip() or (old.get('ckey','') if old.get('cmode')=='content' else '')
+            ct=str(x.get('ccrt') or '').strip(); kt=str(x.get('ckey') or '').strip() or (old.get('ckey','') if old.get('cmode')=='content' else '') or str(x.get('_srckey') or '')
             if 'BEGIN CERTIFICATE' not in ct: raise Err('Paste the certificate (-----BEGIN CERTIFICATE-----)')
             if 'PRIVATE KEY' not in kt: raise Err('Paste the private key (-----BEGIN PRIVATE KEY-----)')
             o['ccrt'],o['ckey']=ct,kt
@@ -1403,6 +1445,26 @@ def ib_extra(x,pr,net,sec,cdn,p,sni,old):
             open(td+'/c','w').write(ct); open(td+'/k','w').write(kt)
             try: ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(td+'/c',td+'/k')
             except Exception: raise Err('The certificate and private key do not match, or one of them is broken')
+    ve=str(x.get('venc') or '')
+    if ve not in ('','x25519','mlkem'): raise Err('VLESS Encryption must be None, X25519 or ML-KEM-768')
+    if pr!='vless' or old.get('b')=='reality': ve=''
+    if ve and old.get('venc')==ve and old.get('vdec') and old.get('vencc'): o['venc'],o['vdec'],o['vencc']=ve,old['vdec'],old['vencc']
+    elif ve: o['venc']=ve; o['vdec'],o['vencc']=vless_enc(ve)
+    else: o['venc']=o['vdec']=o['vencc']=''
+    lf=x.get('lfb') if isinstance(x.get('lfb'),dict) else {}
+    if sec=='reality' and lf.get('on'):
+        try: la,lr=int(float(lf.get('after') or 0)),int(float(lf.get('rate') or 0))
+        except (TypeError,ValueError): raise Err('Limit fallback: numbers only')
+        if not 0<=la<=1048576: raise Err('Limit fallback: "After" must be 0-1048576 KB')
+        if not 1<=lr<=1048576: raise Err('Limit fallback: speed must be 1-1048576 KB/s')
+        o['lfb']={'on':True,'after':la,'rate':lr}
+    else: o['lfb']={}
+    rw=x.get('rw') if isinstance(x.get('rw'),dict) else {}
+    sp=rw.get('spares') or []
+    if isinstance(sp,str): sp=[v for v in re.split(r'[\s,]+',sp) if v]
+    sp=[v for v in dict.fromkeys(hostok(v,'Spare target') for v in sp[:10]) if v and v!=sni]
+    o['rw']={'on':bool(rw.get('on')),'spares':sp} if sec=='reality' else {}
+    if o['rw'].get('on') and not sp: raise Err('Reality Watch needs at least one spare target (a big site with TLS 1.3, like www.samsung.com)')
     fl=str(x.get('flow','vision' if sec=='reality' else '') or '')
     if fl not in ('','vision'): raise Err('Flow must be empty or xtls-rprx-vision')
     o['flow']=fl if pr=='vless' and net=='tcp' and sec in ('tls','reality') and not o['obfs'] else ''
@@ -1484,9 +1546,13 @@ def ib_api(a,d):
                 if y['port'] not in (80,443): u.setdefault(str(y['port']),'inbound: '+y['name'])
             return {'ok':1,'used':u}
         if a=='add':
-            x=ib_check(dict(d,b=''),L); x['id']='i'+secrets.token_hex(4); x['b']=''
+            dd={k:d[k] for k in IBKEYS if k in d}
+            src=next((y for y in L if y['id']==d.get('from')),None) if d.get('from') else None
+            if src and src.get('cmode')=='content' and not dd.get('ckey'): dd['_srckey']=src.get('ckey','')   # clone keeps the private key
+            x=ib_check(dict(dd,b=''),L); x.pop('_srckey',None); x['id']='i'+secrets.token_hex(4); x['b']=''
             if x['sec']=='reality': ib_tls13(x)
             ib_freeze(L); L.append(x); ib_save(L); ib_apply_change(None,x); res={'ok':1,'id':x['id']}
+            if (x.get('rw') or {}).get('on'): threading.Thread(target=lambda i_=x['id']:(time.sleep(2),rw_check(i_)),daemon=True).start()
         elif a in ('edit','toggle','del'):
             i=next((k for k,y in enumerate(L) if y['id']==d.get('id')),None)
             if i is None: raise Err('Inbound not found')
@@ -1505,6 +1571,7 @@ def ib_api(a,d):
                 x=ib_check(d,L,old); x['id']=old['id']
                 if x['sec']=='reality' and (x['sni'],x['target'])!=(old['sni'] or (sload()['rsni'] if old.get('b')=='reality' else ''),old.get('target','')): ib_tls13(x)
                 ib_apply_change(old,x)
+                if (x.get('rw') or {}).get('on') and a=='edit': threading.Thread(target=lambda i_=x['id']:(time.sleep(2),rw_check(i_)),daemon=True).start()
                 if x['b']=='reality': x['sni']=''
                 L[i]=x; ib_save(L); res={'ok':1}
         elif a=='restore':
@@ -1546,7 +1613,7 @@ def ib_view(L=None):
         warn=''
         if x['port'] in (80,443) and not h_on(): warn='Needs 443 mode: turn it on in Settings → Network ports.'
         elif x['cdn'] and not s.get('cdn_dom'): warn='Set your CDN domain in Settings → CDN, or users get no link for this inbound.'
-        x=dict({k:v for k,v in x.items() if k not in ('echkey','ckey')},ckey_set=bool(x.get('ckey')))
+        x=dict({k:v for k,v in x.items() if k not in ('echkey','ckey','vdec')},ckey_set=bool(x.get('ckey')))
         out.append(dict(x,sni=sni,users=sum(1 for u in us if uhas_ib(u,x)),run=ib_ok(x),warn=warn,
                         hp=(443 if x['sec']=='tls' else 80) if h_on() and ib_h(x) and x['port'] not in (80,443) else 0))
     return out
@@ -1720,8 +1787,8 @@ def xray_apply(force=False):
             x=g['x']; mem=list(g['u'].values()); pr,net,sec=x['proto'],x['net'],x['sec']
             st=ib_stream(x,cert)
             vs={'clients':[cli(u,pr,ib_vision(x)) for u in mem]}
-            if pr=='vless': vs['decryption']='none'
-            if net=='tcp' and sec=='tls' and fs and not x.get('obfs'): vs['fallbacks']=[{'dest':FBP}]
+            if pr=='vless': vs['decryption']=x.get('vdec') or 'none'
+            if net=='tcp' and sec=='tls' and fs and not x.get('obfs') and not x.get('vdec'): vs['fallbacks']=[{'dest':FBP}]   # Xray: fallbacks cannot be used with decryption
             ibs.append({'tag':IBB[x['b']][6] if x.get('b') in IBB else 'ib-%d'%p,'listen':'0.0.0.0','port':p,'protocol':pr,'settings':vs,'streamSettings':st,'sniffing':ib_sniff(x)})
         if dns_on():
             dl=[u for u in uload() if hasdns(u) and ustate(u)=='active']
@@ -1736,6 +1803,10 @@ def xray_apply(force=False):
                 rst={'network':'tcp','security':'reality','realitySettings':{'target':t,'serverNames':names,'privateKey':s['rpriv'],'shortIds':ib_sids(rx)}}
                 for k_,v_ in ib_stream(dict(rx,sec='none',net='tcp',flow='')).items():
                     if k_ in ('sockopt','finalmask'): rst[k_]=v_
+                lf_=rx.get('lfb') or {}
+                if lf_.get('on'):
+                    v_={'afterBytes':int(lf_['after'])*1024,'bytesPerSec':int(lf_['rate'])*1024,'burstBytesPerSec':int(lf_['rate'])*1024}
+                    rst['realitySettings'].update(limitFallbackUpload=v_,limitFallbackDownload=dict(v_))
                 ibs.append({'tag':'vless-reality' if t==dt else 'vless-reality-%d'%pt,'listen':'0.0.0.0','port':pt,'protocol':'vless',
                             'settings':{'clients':[{'id':u['uuid'],'email':u['name'],'level':0,'flow':'xtls-rprx-vision'} for u,_ in L],'decryption':'none'},
                             'streamSettings':rst,'sniffing':ib_sniff(rx) if rx else sn})
@@ -1934,6 +2005,73 @@ def online():
         if s or ips or ov or hy or wg: out.append({'name':n,'ssh':s,'sips':si.get(n,[]),'ips':ips,'ov':ov,'hy':hy,'wg':wg['ip'] if wg else '','dev':u.get('dev',0),'kind':kind(u)})
     return out
 
+# ---------- Where online users connect from (map on the Online page) ----------
+GEOF=T+'/geo.json'; GEO={}; GEOAPI=os.environ.get('REXUI_GEOAPI','http://ip-api.com/batch'); GEOL=threading.Lock(); SHAREAL={}
+def geo_pub(ip):
+    import ipaddress
+    try: return ipaddress.ip_address(ip).is_global
+    except ValueError: return False
+def geo_conns():
+    """[(user, kind, ip, how)] for everyone online now."""
+    out=[]
+    for x in online():
+        n=x['name']
+        for ip in x.get('sips') or []: out.append((n,x['kind'],ip,'SSH'))
+        for i in x.get('ips') or []: out.append((n,x['kind'],i['ip'],'V2Ray'))
+        for o in x.get('ov') or []: out.append((n,x['kind'],o['ip'],'OpenVPN'))
+        if x.get('wg'): out.append((n,x['kind'],x['wg'],'WireGuard'))
+        if x.get('hy') and not any(c[0]==n for c in out): out.append((n,x['kind'],'','UDP'))
+    return out
+def geo_fetch():
+    """Look up new IPs (ip-api.com, up to 100 per call). Results are kept 7 days."""
+    if not GEOL.acquire(blocking=False): return
+    try:
+        if not GEO:
+            try: GEO.update(json.loads(rd(GEOF) or '{}'))
+            except Exception: pass
+        now=time.time(); want=[ip for ip in {c[2] for c in geo_conns()} if geo_pub(ip) and now-GEO.get(ip,{}).get('t',0)>7*86400][:100]
+        if not want: return
+        rq=urllib.request.Request(GEOAPI+'?fields=status,country,countryCode,city,lat,lon,isp,org,query',data=json.dumps(want).encode(),headers={'Content-Type':'application/json','User-Agent':'ReXUI'})
+        with urllib.request.urlopen(rq,timeout=15) as r: res=json.loads(r.read())
+        for g in res:
+            if g.get('status')=='success':
+                GEO[g['query']]={'cc':g.get('countryCode',''),'country':g.get('country',''),'city':g.get('city',''),'lat':g.get('lat'),'lon':g.get('lon'),
+                                 'isp':(g.get('isp') or g.get('org') or '')[:40],'cdn':'cloudflare' in ((g.get('isp') or '')+(g.get('org') or '')).lower(),'t':int(now)}
+        for ip in [k for k,v in GEO.items() if now-v.get('t',0)>30*86400]: GEO.pop(ip,None)
+        wjson(GEOF,GEO,0o600)
+    except Exception as e: log('geo:',str(e)[:100])
+    finally: GEOL.release()
+def geo_km(a,b):
+    import math
+    p1,p2=math.radians(a['lat']),math.radians(b['lat']); dl=math.radians(b['lon']-a['lon'])
+    return 6371*math.acos(max(-1,min(1,math.sin(p1)*math.sin(p2)+math.cos(p1)*math.cos(p2)*math.cos(dl))))
+def geo_view():
+    if not GEO:
+        try: GEO.update(json.loads(rd(GEOF) or '{}'))
+        except Exception: pass
+    us={}; miss=False
+    for n,k,ip,how in geo_conns():
+        g=GEO.get(ip) if ip else None
+        if ip and geo_pub(ip) and not g: miss=True
+        e=us.setdefault(n,{'name':n,'kind':k,'conns':[]})
+        e['conns'].append(dict({'ip':ip,'how':how,'local':bool(ip) and not geo_pub(ip)},**({k_:g[k_] for k_ in ('cc','country','city','lat','lon','isp','cdn')} if g else {})))
+    al=[]
+    for e in us.values():
+        L=[c for c in e['conns'] if c.get('lat') is not None and not c.get('cdn')]; far=0
+        for i in range(len(L)):
+            for j in range(i+1,len(L)): far=max(far,geo_km(L[i],L[j]))
+        if far>150:
+            cs=sorted({c['city'] or c['country'] for c in L}); e['share']=int(far); al.append({'name':e['name'],'places':cs,'km':int(far)})
+    if miss: threading.Thread(target=geo_fetch,daemon=True).start()
+    return {'ok':1,'users':list(us.values()),'alerts':al,'pending':miss}
+def geo_alerts():
+    """Telegram message when one account is used from places far apart (at most once in 6 hours per user)."""
+    s=sload()
+    if not s.get('tgshare'): return
+    now=time.time()
+    for a in geo_view()['alerts']:
+        if now-SHAREAL.get(a['name'],0)>6*3600:
+            SHAREAL[a['name']]=now; tg_send('⚠️ Sharing? "%s" is connected from %s at the same time (%d km apart).'%(a['name'],' and '.join(a['places'][:3]),a['km']),s)
 # ---------- OpenVPN (TCP, two ports) + Squid HTTP proxy ----------
 OVD=T+'/ovpn'; OVCL=OVD+'/clients'; OVBIN='/usr/sbin/openvpn'; SQC='/etc/squid/squid.conf'
 OVNET='10.8.0.0/15'; OVL=threading.Lock(); OVPREV={}; OVPEND={}; OVON={}; OVINIT=set(); OVVER=[None]
@@ -3395,6 +3533,8 @@ def monitor():
             if i%120==0: hm_save(); tr_save()
             if i%360==1: threading.Thread(target=ddns_update,daemon=True).start()
             if i%4320==24: threading.Thread(target=rx_check,daemon=True).start()
+            if i%120==60: threading.Thread(target=rw_check,daemon=True).start()   # Reality Watch every 10 minutes
+            if i%12==3: threading.Thread(target=lambda:(geo_fetch(),geo_alerts()),daemon=True).start()
             if i%2==0:
                 collect(); enforce(); trial_cleanup(); xray_apply(); ssh_rules(); devices(); auto_backup()
                 try: wtext('/run/rexui-online',str(sum(1 for u in users_list() if u['on'])),0o644)
@@ -3430,7 +3570,7 @@ def state(uh=''):
     return {'info':dict(INFO,uptime=float(rd('/proc/uptime','0').split()[0]),puptime=time.time()-START),
             'cpu':S['cpu'],'ram':[m['MemTotal']-m['MemAvailable'],m['MemTotal']],'swap':[m.get('SwapTotal',0)-m.get('SwapFree',0),m.get('SwapTotal',0)],
             'disk':[du.used,du.total],'rx':S['rx'],'tx':S['tx'],'rxt':S['rxt'],'txt':S['txt'],'hist':H,'tcp':tc,'udp':uc,
-            'ip':IPS,'stats':stats(),'tools':TOOLS,'fs':FS['err'],'xup':XUP,'rxup':rx_info(),'ddns':dict(DDNS,dom=sload()['ddns_dom']),'stime':time.strftime('%H:%M %Z'),'svc':services(),'xray':xinfo(),'proc':procinfo(),'online':online(),'ibs':ib_view(),'cpath':cert_paths(),'backups':sorted(os.listdir(BKD))[::-1] if os.path.isdir(BKD) else [],**ustate_part(uh),'cert':certinfo(),'set':dict({k:v for k,v in sload().items() if k not in ('rpriv','tgtoken','ddns_tok')},tgmask=mask(sload()['tgtoken']),ddmask=mask(sload()['ddns_tok'])),'tfa':bool(lread().get('totp')),'warp':warp_info(),'geo':geo_ok(),'addr':pub_addr(),'me':curuser(),'ov':ov_on(),'hy':hy_on(),'wg':wg_on(),'dns':dns_info(),'cdn':cdn_info(),'pays':pay_load(),'pvals':pay_vals(),'h443':h_info(),
+            'ip':IPS,'stats':stats(),'tools':TOOLS,'fs':FS['err'],'xup':XUP,'rxup':rx_info(),'ddns':dict(DDNS,dom=sload()['ddns_dom']),'stime':time.strftime('%H:%M %Z'),'svc':services(),'xray':xinfo(),'proc':procinfo(),'online':online(),'ibs':ib_view(),'cpath':cert_paths(),'rw':RW,'backups':sorted(os.listdir(BKD))[::-1] if os.path.isdir(BKD) else [],**ustate_part(uh),'cert':certinfo(),'set':dict({k:v for k,v in sload().items() if k not in ('rpriv','tgtoken','ddns_tok')},tgmask=mask(sload()['tgtoken']),ddmask=mask(sload()['ddns_tok'])),'tfa':bool(lread().get('totp')),'warp':warp_info(),'geo':geo_ok(),'addr':pub_addr(),'me':curuser(),'ov':ov_on(),'hy':hy_on(),'wg':wg_on(),'dns':dns_info(),'cdn':cdn_info(),'pays':pay_load(),'pvals':pay_vals(),'h443':h_info(),
             'port':E.get('PANEL_PORT',''),'path':E.get('WEB_PATH',''),'ports':dict({k:v for k,v in E.items() if k.endswith('_PORT')},REALITY_PORT=str(P('REALITY_PORT',8444)),TROJAN_PORT=str(P('TROJAN_PORT',2096)),OVPN1_PORT=str(P('OVPN1_PORT',1194)),OVPN2_PORT=str(P('OVPN2_PORT',110)),SQUID_PORT=str(P('SQUID_PORT',3128)),HY_PORT=str(hyport()),WG_PORT=str(wgport()),HY_HOP='%d-%d'%hyhop() if hyhop() else '')}
 
 # ---------- stats: server traffic, protocols, top users ----------
@@ -3515,7 +3655,7 @@ def act_desc(r,d,res):
         if a=='toggle':
             u=next((x for x in uload() if x['name']==n),None)
             return 'Enabled user '+n if u and u.get('en',True) else 'Disabled user '+n+(' ('+str(d.get('reason'))[:60]+')' if d.get('reason') else '')
-        return {'newsub':'Made a new subscription link for %s','newuuid':'Made a new UUID for %s','newwg':'Made new WireGuard keys for %s','newcert':'Made a new OpenVPN certificate for %s','add':'Added user %s','edit':'Edited user %s','reset':'Reset data usage of %s','kick':'Disconnected %s','del':'Deleted user %s'}.get(a,'')%n if a!='detail' else None
+        return {'newsub':'Made a new subscription link for %s','newuuid':'Made a new UUID for %s','newwg':'Made new WireGuard keys for %s','newcert':'Made a new OpenVPN certificate for %s','add':'Added user %s','edit':'Edited user %s','reset':'Reset data usage of %s','kick':'Disconnected %s','del':'Deleted user %s'}.get(a,'%s')%n if a not in ('detail','rename') else ('Renamed user %s to %s'%(n,str(d.get('new',''))[:32]) if a=='rename' else None)
     if r=='/api/bulk':
         a=d.get('action'); w={'days':'added %s days'%d.get('days'),'reset':'reset data usage','disable':'disabled','enable':'enabled','delete':'deleted','dev':'set device limit %s for'%d.get('dev')}.get(a,a)
         nm=d.get('names') if isinstance(d.get('names'),list) else None
@@ -3968,13 +4108,58 @@ def jsub_set(d):
     for v,t in ((ln,'Length'),(it,'Interval')):
         if not re.fullmatch(r'\d{1,4}(-\d{1,4})?',v): raise Err(t+': a number or a range like 100-200')
     s['jpk'],s['jlen'],s['jint']=pk,ln,it; wjson(SETF,s,0o600); return {'ok':1}
+# ---------- Reality Watch: keep Reality inbounds working when their target site goes down ----------
+RWF=T+'/rwatch.json'; RW={}; RWL=threading.Lock()
+def rw_load():
+    global RW
+    try: RW=json.loads(rd(RWF) or '{}')
+    except Exception: RW={}
+def rw_save(): wjson(RWF,RW,0o600)
+def rw_cur(x,s):
+    """(host, port, sni) the Reality inbound uses now."""
+    if x.get('b')=='reality': return s['rsni'],443,s['rsni']
+    t=x.get('target') or x['sni']+':443'; h,_,p=t.rpartition(':')
+    return h,int(p or 443),x['sni']
+def rw_check(only=None,force=False):
+    """Check every watched Reality inbound. 3 failed checks in a row (or force) -> switch to the first spare that works."""
+    with RWL:
+        s=sload(); L=ib_load(); ch=False; now=int(time.time())
+        for x in L:
+            w=x.get('rw') or {}
+            if x['sec']!='reality' or not w.get('on') or (only and x['id']!=only): continue
+            st=RW.setdefault(x['id'],{'fails':0,'hist':[]}); h,p,sn=rw_cur(x,s)
+            ok=tls13(h,p,sn); st.update(last=now,ok=ok,cur=h)
+            if ok and not force: st['fails']=0; st.pop('alerted',None); continue
+            if not ok: st['fails']=st.get('fails',0)+1
+            if st['fails']<3 and not force: continue
+            sp=next((d for d in w.get('spares') or [] if d!=h and tls13(d)),None)
+            if not sp:
+                if not st.get('alerted'):
+                    tg_send('⚠️ Reality Watch: "%s" — %s does not answer and no spare target works. Add more spare targets in the inbound.'%(x['name'],h),s); st['alerted']=True
+                    st['hist']=(st.get('hist') or [])[-19:]+[[now,'%s failed, no spare works'%h]]
+                continue
+            if x.get('b')=='reality': s['rsni']=sp; wjson(SETF,s,0o600); x['sni']=sp
+            else: x['target']=sp+':443'; x['sni']=sp; x['snix']=[]
+            st.update(fails=0,ok=True,cur=sp); st.pop('alerted',None); ch=True
+            st['hist']=(st.get('hist') or [])[-19:]+[[now,'Switched %s → %s'%(h,sp)]]
+            tg_send('🔄 Reality Watch: "%s" — %s stopped working, switched to %s. Users should refresh their subscription.'%(x['name'],h,sp),s)
+            log('reality watch: %s %s -> %s'%(x['name'],h,sp))
+        if ch: ib_save(L)
+        rw_save()
+    if ch: xray_apply()
+    return {'ok':1,'rw':RW}
+def rw_api(d):
+    i=d.get('id') or None
+    if d.get('a')=='switch': return rw_check(i,True)
+    if d.get('a')=='check': return rw_check(i)
+    return {'ok':1,'rw':RW}
 def rdefault(d):
     h=hostok(d.get('domain'),'Domain')
     if not h or not tls13(h): raise Err('%s did not answer with TLS 1.3'%h)
     s=sload(); s['rsni']=h; wjson(SETF,s,0o600); xray_apply(); return {'ok':1}
 
 # ---------- ReXUI new version check (GitHub, every 6 hours) ----------
-RXVER='1.9'; RXURL=os.environ.get('REXUI_UPURL','https://raw.githubusercontent.com/chaliraza777/ReXUI/main/install.sh'); RXUPF=T+'/rxup.json'; RXUP={'latest':'','t':0}
+RXVER='2.0'; RXURL=os.environ.get('REXUI_UPURL','https://raw.githubusercontent.com/chaliraza777/ReXUI/main/install.sh'); RXUPF=T+'/rxup.json'; RXUP={'latest':'','t':0}
 def vtup(v): return tuple(int(x) for x in re.findall(r'\d+',v)[:3])
 def rx_check():
     import urllib.request
@@ -4276,7 +4461,7 @@ class Hd(BaseHTTPRequestHandler):
            '/api/bulk':lambda:bulk(d),'/api/automation':lambda:automation_save(d),'/api/tg-test':lambda:tg_test(d),'/api/tg-chat':lambda:tg_findchat(d),
            '/api/trial':lambda:trial_new(d),'/api/csv-import':lambda:csv_import(d),'/api/appearance':lambda:appearance_save(d),
            '/api/logs':lambda:logs(self.tok()),'/api/session-kill':lambda:session_kill(self.tok(),d),'/api/tg-backup':tg_backup_now,
-           '/api/fsite':lambda:fsite_save(d),'/api/rfind':lambda:rfind(d),'/api/rscan':lambda:rscan(d),'/api/rtargets':lambda:rtargets(d),'/api/jsub-set':lambda:jsub_set(d),'/api/rdefault':lambda:rdefault(d),'/api/xcheck':xcheck,'/api/xupdate':lambda:xup_bg(bool(d.get('force'))),
+           '/api/fsite':lambda:fsite_save(d),'/api/rfind':lambda:rfind(d),'/api/rscan':lambda:rscan(d),'/api/geo':geo_view,'/api/rwatch':lambda:rw_api(d),'/api/rtargets':lambda:rtargets(d),'/api/jsub-set':lambda:jsub_set(d),'/api/rdefault':lambda:rdefault(d),'/api/xcheck':xcheck,'/api/xupdate':lambda:xup_bg(bool(d.get('force'))),
            '/api/xauto':lambda:xauto_save(d),'/api/ddns':lambda:ddns_save(d),'/api/panel-path':lambda:panel_path(d),'/api/logview':lambda:logview(d),
            '/api/maint':maint_info,'/api/cleanup':cleanup,'/api/swap':lambda:swap_set(d),'/api/autoclean':lambda:autoclean_save(d),
            '/api/speedtest':speedtest,'/api/reboot':lambda:reboot_save(d),'/api/subpage':lambda:subpage_save(d),'/api/ovpn-set':lambda:ov_set(d),'/api/dns-set':lambda:dns_set(d),'/api/hy-set':lambda:hy_set(d),'/api/cdn-set':lambda:cdn_set(d),'/api/perf-set':lambda:perf_set(d),
@@ -4312,7 +4497,7 @@ if __name__=='__main__':
         print('FIREWALL  '+D_+('ufw on' if v['fw'] else 'ufw off')+N_)
         print(' '.join(line))
         nr=[x for x,why in bad if why=='not running']
-        if nr: print(Y_+'Not running: '+N_+', '.join('%s (%s)'%(x['port'],x['name']) for x in nr[:8])+(' +%d more'%(len(nr)-8) if len(nr)>8 else '')+D_+'  → check menu → 7 (Service restart)'+N_)
+        if nr: print(Y_+'Not running: '+N_+', '.join('%s (%s)'%(x['port'],x['name']) for x in nr[:8])+(' +%d more'%(len(nr)-8) if len(nr)>8 else '')+D_+'  → check menu → 8 (Restart Services)'+N_)
         uf=[x for x,why in bad if why=='ufw']
         if uf:
             print(R_+', '.join('%s/%s'%(x['port'],x['proto']) for x in uf)+N_+' blocked by ufw on this server')
@@ -4355,7 +4540,7 @@ if __name__=='__main__':
         try: r=restore(o); print('Restored %d users and the settings'%r['users'])
         except Err as e: print('Restore failed:',e); sys.exit(1)
     elif a[0]=='run':
-        migrate(); static(); sample(); hm_load(); tr_load(); fsite_apply(); fetch_ips(); CTX=ctx()
+        migrate(); upgrade(); rw_load(); static(); sample(); hm_load(); tr_load(); fsite_apply(); fetch_ips(); CTX=ctx()
         try: bans_apply(); smtp_apply(); enforce(); ssh_rules(True); xray_apply(True)
         except Exception as e: log('startup:',repr(e))
         try: ov_setup()
@@ -4451,7 +4636,22 @@ label{display:block;font-size:13px;color:var(--m);font-weight:600;margin:12px 0 
 #dt{position:fixed;inset:0;z-index:25;background:rgba(10,14,22,.45);display:flex;justify-content:flex-end}#dt[hidden],#md[hidden],#lg[hidden],#app[hidden]{display:none}
 .dts{width:100%;max-width:600px;height:100%;overflow:auto;background:var(--bg);border-left:1px solid var(--l);padding:0 16px 40px}.dts .card{margin-bottom:12px}
 .dth{position:sticky;top:0;z-index:2;background:var(--bg);display:flex;align-items:center;justify-content:space-between;padding:14px 0;margin-bottom:6px;border-bottom:1px solid var(--l)}
-.cb{padding:10px 0;border-bottom:1px solid var(--l)}.jsw{margin-top:8px;border:1px solid var(--l);border-radius:8px;overflow:hidden}.jsh{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 8px;background:var(--c2)}.jsh small{color:var(--m)}.jsb{margin:0;padding:10px;max-height:320px;overflow:auto;font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre;background:var(--c);color:var(--t)}
+.cb{padding:10px 0;border-bottom:1px solid var(--l)}
+.qrn{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}.qrn .btn{border-style:dashed;color:var(--a);border-color:color-mix(in srgb,var(--a) 55%,var(--l));padding:3px 10px;font-size:12px;font-weight:600}input.flash{box-shadow:0 0 0 3px color-mix(in srgb,var(--a) 35%,transparent)}
+.mr.mrx{justify-content:space-between;flex-wrap:wrap;gap:10px}.mra{display:flex;gap:6px;flex-wrap:wrap}.mra .btn{padding:5px 10px;font-size:12.5px}.btn.red{color:var(--r);border-color:color-mix(in srgb,var(--r) 40%,var(--l));background:color-mix(in srgb,var(--r) 6%,var(--c))}
+.cg2{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:10px;margin-top:6px}.cg2 .cb{border:1px solid var(--l)!important;border-radius:10px;padding:10px;height:100%}.cg2 .cb .code{max-height:96px;overflow-y:auto;font-size:12px;overscroll-behavior:contain;scrollbar-width:thin}.cg2>div{min-width:0}
+
+.kg{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin-top:10px}.kt{white-space:normal;display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;border:1px solid var(--l);background:var(--c2);border-radius:9px;padding:8px 10px;font:inherit;color:inherit;cursor:copy;min-width:0}.kt span{font-size:11.5px;color:var(--m)}.kt b{white-space:normal!important;overflow:visible!important;text-overflow:clip!important;max-width:100%;font-size:13.5px!important;line-height:1.3;overflow-wrap:anywhere;word-break:break-all;font-weight:600}.kt:hover{border-color:var(--a)}.uab0{width:28px;display:inline-block}#dtsub{scroll-margin-top:72px}
+.uact{display:inline-flex;gap:2px;flex:none}.uab{width:28px;height:28px;border:0;background:none;border-radius:6px;color:var(--m);display:inline-flex;align-items:center;justify-content:center;cursor:pointer}.uab:hover{background:var(--c2);color:var(--a)}
+.uqx{max-width:980px!important}.qst{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:14px 0}.qst div{background:var(--c2);border-radius:8px;padding:8px 10px}.qst span{display:block;font-size:11.5px;color:var(--m)}.qst b{font-size:15px}
+.qgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;align-items:stretch}
+.qcard{border:1px solid var(--l);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px;min-width:0;background:var(--c)}
+.qh b{font-size:13.5px;font-weight:700;overflow-wrap:anywhere}
+.qsv{background:#fff;border-radius:10px;padding:6px;display:flex;justify-content:center;border:1px solid var(--l)}.qsv svg{width:100%;height:auto;max-width:230px;aspect-ratio:1;display:block}
+.qln{font:11.5px/1.45 ui-monospace,Menlo,Consolas,monospace;color:var(--m);word-break:break-all;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.qtx{margin:0;flex:1;background:var(--c2);border-radius:10px;padding:10px 12px;font:12.5px/1.6 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all;color:var(--t)}
+.qbt{display:flex;gap:6px;flex-wrap:wrap;margin-top:auto}.qcard .jsb{border:1px solid var(--l);border-radius:8px;max-height:260px;margin:0}
+@media (max-width:560px){.qst{grid-template-columns:1fr 1fr}.qgrid{grid-template-columns:1fr}}.jsw{margin-top:8px;border:1px solid var(--l);border-radius:8px;overflow:hidden}.jsh{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 8px;background:var(--c2)}.jsh small{color:var(--m)}.jsb{margin:0;padding:10px;max-height:320px;overflow:auto;font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre;background:var(--c);color:var(--t)}
 #dt .lab{color:var(--t);font-size:13px;font-weight:700}#dt .cbh small{color:var(--t);font-weight:600}.cb:last-child{border:0;padding-bottom:0}.cbh{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
 .cbh small{font-size:12px;font-weight:700;letter-spacing:.4px;color:var(--m);text-transform:uppercase}
 .code{display:block;width:100%;text-align:left;font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace;color:var(--t);background:var(--c2);border:1px solid var(--l);border-radius:8px;padding:10px 12px;white-space:pre-wrap;word-break:break-all;cursor:copy}
@@ -4622,6 +4822,12 @@ a.btn{text-decoration:none;color:var(--t)}a.btn.pri{color:#fff}
 .ibx .btn{border-radius:6px;padding:4px 15px;font-size:14px;height:32px}.ibx .mr{margin-top:20px}.ibx .q{width:13px;height:13px;font-size:9px}
 .ibc .btn.pri,.ibx .btn.pri{background:var(--a);border-color:var(--a);border-radius:6px}
 @media (max-width:560px){.ibx{padding:16px!important}.ibx .ir{grid-template-columns:108px minmax(0,1fr);gap:10px}.ibx .ir>label,.ibx .ir>span{font-size:13px}.ibx .ixt{gap:18px}}
+.rws{border:1px solid var(--l);border-radius:9px;padding:8px 10px;font-size:12.5px;width:100%}.rws.ok b{color:var(--g)}.rws.no b{color:var(--r)}.rws.no.fr b{color:var(--m)}.rws small{display:block;color:var(--m);margin-top:2px}
+.gmap{margin-top:10px;border-radius:10px;background:color-mix(in srgb,var(--c2) 70%,var(--bg));overflow:hidden}.gmap svg{display:block;width:100%;height:auto}.gland{fill:color-mix(in srgb,var(--m) 28%,var(--c));stroke:var(--c);stroke-width:.6;vector-effect:non-scaling-stroke}
+.gd circle{fill:var(--a);stroke:#fff;stroke-width:2;filter:drop-shadow(0 0 6px color-mix(in srgb,var(--a) 60%,transparent))}.gd.w circle{fill:var(--r)}.gd text{font-weight:600;font-family:Inter,system-ui,sans-serif;fill:var(--t);text-anchor:middle;paint-order:stroke;stroke:var(--c)}
+.gst{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}.gst div{background:var(--c2);border-radius:9px;padding:8px 10px}.gst span{display:block;font-size:11.5px;color:var(--m)}.gst b{font-size:15px}
+.gl{display:block;color:var(--m);font-size:11.5px;font-weight:400}.gal{margin-bottom:12px}
+@media (max-width:560px){.gst{grid-template-columns:1fr 1fr}}
 .pck{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--l)}.pck:last-child{border:0}.pck>b{flex:none;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff;background:var(--m)}.pck.ok>b{background:var(--g)}.pck.no>b{background:var(--r)}.pck span{display:block;font-size:14px}.pck small{display:block;color:var(--m);font-size:12.5px;margin-top:2px}
 .ita{min-height:84px;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;border-radius:6px;padding:6px 10px}.btn.cdl{color:var(--r);border-color:color-mix(in srgb,var(--r) 55%,var(--l))}
 .ibsum{font-size:12.5px;background:var(--c2);border-radius:8px;padding:8px 10px;margin:6px 0 4px}
@@ -4675,9 +4881,9 @@ a.btn{text-decoration:none;color:var(--t)}a.btn.pri{color:#fff}
 <label for="lp">Password</label><div class="fi"><span data-i="lock"></span><input id="lp" type="password" autocomplete="current-password"><button type="button" class="ib" id="lpe" aria-label="Show password"></button></div>
 <div id="lcw" hidden><label for="lc">6-digit code from your authenticator app</label><div class="fi"><span data-i="shield"></span><input id="lc" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></div></div>
 <div id="capw" hidden><label for="lcap">Type the letters from the picture</label><div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><img id="capi" alt="Security check picture" width="200" height="64" style="border-radius:8px;max-width:100%"><button type="button" class="ib" id="capr" aria-label="Show a new picture"></button></div><div class="fi"><span data-i="shield"></span><input id="lcap" autocapitalize="characters" autocomplete="off" spellcheck="false" maxlength="8"></div></div>
-<div class="err" id="le" role="alert"></div><button class="btn pri lbtn">Log in</button><p class="lft">Protected panel · ReXUI v1.9</p></form></div>
-<div id="app" hidden><aside><div class="brand"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search" title="Search (/)" style="margin-left:auto"></button><button class="ib thb" id="th" aria-label="Switch theme"></button></div><nav id="nav"></nav><a class="pwr" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by <b>ReXUI</b> v1.9</a></aside>
-<main><div id="mt"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search"></button><button class="ib thb" aria-label="Switch theme"></button><button class="ib" id="lo2" aria-label="Log out"></button></div><div id="cbn"></div><div class="hdr"><span class="chip" id="xs"></span><span class="ver">ReXUI v1.9</span><small class="m" id="upd" style="margin-left:auto"></small></div><div id="pg"></div><a class="pwm" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by ReXUI v1.9</a></main><nav id="bn" aria-label="Main"></nav></div>
+<div class="err" id="le" role="alert"></div><button class="btn pri lbtn">Log in</button><p class="lft">Protected panel · ReXUI v2.0</p></form></div>
+<div id="app" hidden><aside><div class="brand"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search" title="Search (/)" style="margin-left:auto"></button><button class="ib thb" id="th" aria-label="Switch theme"></button></div><nav id="nav"></nav><a class="pwr" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by <b>ReXUI</b> v2.0</a></aside>
+<main><div id="mt"><b class="logo blogo" aria-label="ReXUI"><span>Re</span><i>X</i><span>UI</span></b><button class="ib sxb" aria-label="Search"></button><button class="ib thb" aria-label="Switch theme"></button><button class="ib" id="lo2" aria-label="Log out"></button></div><div id="cbn"></div><div class="hdr"><span class="chip" id="xs"></span><span class="ver">ReXUI v2.0</span><small class="m" id="upd" style="margin-left:auto"></small></div><div id="pg"></div><a class="pwm" href="https://github.com/chaliraza777/ReXUI" target="_blank" rel="noopener">Powered by ReXUI v2.0</a></main><nav id="bn" aria-label="Main"></nav></div>
 <div id="dt" hidden><div class="dts"><div class="dth"><b>User details</b><button class="btn sm" id="dx" aria-label="Close">Close</button></div><div id="dtb"></div></div></div>
 <div id="md" hidden><form class="card" id="mf"></form></div>
 <div id="sxo" hidden><div class="sxp" role="dialog" aria-label="Search"><div class="fi"><span data-i="search"></span><input id="sxi" placeholder="Search users, settings, tools..." autocomplete="off" spellcheck="false" aria-label="Search"><button type="button" class="btn sm" id="sxx">Esc</button></div><div id="sxr" role="listbox"></div></div></div>
@@ -4687,7 +4893,7 @@ a.btn{text-decoration:none;color:var(--t)}a.btn.pri{color:#fff}
 <script>
 const ls=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}};
 const $=s=>document.querySelector(s),X=s=>String(s??'').replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
-const P={gauge:'<path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4-6"/>',users:'<circle cx="9" cy="8" r="4"/><path d="M2 21c0-4 3-6 7-6s7 2 7 6M17 4a4 4 0 0 1 0 8M22 21c0-3-2-5-5-5.7"/>',user:'<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/>',gear:'<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/>',out:'<path d="M9 4H5v16h4M16 8l4 4-4 4M20 12H9"/>',up:'<path d="M12 19V5M6 11l6-6 6 6"/>',down:'<path d="M12 5v14M6 13l6 6 6-6"/>',cpu:'<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',ram:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18"/>',swap:'<path d="M4 8h16l-4-4M20 16H4l4 4"/>',disk:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M3 14h18M7 6.5h.01"/>',clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',panel:'<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h5"/>',globe:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',eye:'<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',eyeoff:'<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><path d="M3 3l18 18"/>',plus:'<path d="M12 5v14M5 12h14"/>',cal:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',key:'<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3"/>',bolt:'<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>',inb:'<path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/>',pen:'<path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/>',wg:'<path d="M3 12h4l3-7 4 14 3-7h4"/>',vpn:'<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><rect x="9" y="11" width="6" height="5" rx="1"/><path d="M10 11V9.5a2 2 0 0 1 4 0V11"/>',lock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',unlock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/>',del:'<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>',dev:'<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',cert:'<rect x="3" y="4" width="18" height="13" rx="2"/><circle cx="12" cy="19" r="3"/><path d="M7 9h10M7 12h6"/>',refresh:'<path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5"/>',sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5"/>',moon:'<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',net:'<path d="M5 12a7 7 0 0 1 14 0M8.5 12a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="16" r="1.5"/>',shield:'<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/>',wifi:'<path d="M2 8.5a15 15 0 0 1 20 0M5 12a10 10 0 0 1 14 0M8.5 15.5a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1"/>',kick:'<circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/>',save:'<path d="M12 3v12M7 10l5 5 5-5M4 19h16"/>',upl:'<path d="M12 21V9M7 14l5-5 5 5M4 5h16"/>',chart:'<path d="M4 20V11M10 20V5M16 20v-6M21 20H3"/>',search:'<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/>',file:'<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>',grid:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',list:'<path d="M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01"/>',check:'<path d="M5 12l5 5 9-10"/>',palette:'<path d="M12 3a9 9 0 1 0 0 18c1.5 0 2-1 2-2s-1-1.5-1-2.5 1-1.5 2-1.5h2a4 4 0 0 0 4-4c0-4.4-4-8-9-8z"/><circle cx="7.5" cy="11" r="1"/><circle cx="10.5" cy="7" r="1"/><circle cx="15" cy="7.5" r="1"/>'};
+const P={gauge:'<path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4-6"/>',copy:'<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',users:'<circle cx="9" cy="8" r="4"/><path d="M2 21c0-4 3-6 7-6s7 2 7 6M17 4a4 4 0 0 1 0 8M22 21c0-3-2-5-5-5.7"/>',user:'<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/>',gear:'<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/>',out:'<path d="M9 4H5v16h4M16 8l4 4-4 4M20 12H9"/>',up:'<path d="M12 19V5M6 11l6-6 6 6"/>',down:'<path d="M12 5v14M6 13l6 6 6-6"/>',cpu:'<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',ram:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18"/>',swap:'<path d="M4 8h16l-4-4M20 16H4l4 4"/>',disk:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M3 14h18M7 6.5h.01"/>',clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',panel:'<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h5"/>',globe:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',eye:'<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',eyeoff:'<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><path d="M3 3l18 18"/>',plus:'<path d="M12 5v14M5 12h14"/>',cal:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',key:'<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3"/>',bolt:'<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>',inb:'<path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/>',pen:'<path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/>',qr:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 17h4v4h-4"/>',wg:'<path d="M3 12h4l3-7 4 14 3-7h4"/>',vpn:'<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><rect x="9" y="11" width="6" height="5" rx="1"/><path d="M10 11V9.5a2 2 0 0 1 4 0V11"/>',lock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',unlock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/>',del:'<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>',dev:'<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',cert:'<rect x="3" y="4" width="18" height="13" rx="2"/><circle cx="12" cy="19" r="3"/><path d="M7 9h10M7 12h6"/>',refresh:'<path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5"/>',sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5"/>',moon:'<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',net:'<path d="M5 12a7 7 0 0 1 14 0M8.5 12a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="16" r="1.5"/>',shield:'<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/>',wifi:'<path d="M2 8.5a15 15 0 0 1 20 0M5 12a10 10 0 0 1 14 0M8.5 15.5a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1"/>',kick:'<circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/>',save:'<path d="M12 3v12M7 10l5 5 5-5M4 19h16"/>',upl:'<path d="M12 21V9M7 14l5-5 5 5M4 5h16"/>',chart:'<path d="M4 20V11M10 20V5M16 20v-6M21 20H3"/>',search:'<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/>',file:'<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>',grid:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',list:'<path d="M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01"/>',check:'<path d="M5 12l5 5 9-10"/>',palette:'<path d="M12 3a9 9 0 1 0 0 18c1.5 0 2-1 2-2s-1-1.5-1-2.5 1-1.5 2-1.5h2a4 4 0 0 0 4-4c0-4.4-4-8-9-8z"/><circle cx="7.5" cy="11" r="1"/><circle cx="10.5" cy="7" r="1"/><circle cx="15" cy="7.5" r="1"/>'};
 const I=(k,s=18)=>`<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[k]}</svg>`;
 const fb=(b,s='')=>{const u=['B','KB','MB','GB','TB'];let i=0;b=+b||0;while(b>=1024&&i<4){b/=1024;i++}return (i?b.toFixed(2):b.toFixed(0))+' '+u[i]+s};
 const dur=s=>{s=Math.floor(s||0);const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d?`${d}d ${h}h`:h?`${h}h ${m}m`:m?`${m}m`:`${s}s`};
@@ -4743,7 +4949,7 @@ window.addEventListener('popstate',e=>{const st=e.state;if(!st||!st.p)return;HNA
 const cur=pg=='us'?'us:'+UV.kind:pg;if(cur!=st.p)go(st.p);if(st.p=='st'&&window.STAB){GSEL=st.g||null;STAB(st.t||'general');window.scrollTo(0,0)}}finally{HNAV=false}});
 async function load(){try{const r=await fetch('api/state'+(D&&D.uh&&D.users?'?uh='+D.uh:''),{cache:'no-store'});if(r.status==401)return show(false);{const n=await r.json();if(!n.users&&D&&D.users)n.users=D.users;D=n}const sb=D.set;if(sb.brand!=BR.brand||sb.tagline!=BR.tagline||sb.accent!=SAC){SAC=sb.accent;applyBrand(sb)}
 if(pg=='ov'&&RG!='live'&&Date.now()-HMT>60000)await loadHist();if($('#app').hidden){show(true);go(pg)}else render();hdr();$('#upd').textContent='Live · '+new Date().toLocaleTimeString()}catch(e){$('#upd').textContent='Connection lost, retrying...'}}
-function hdr(){const c=D.cert,ru=D.rxup||{};$('#cbn').innerHTML=(ru.new?`<div class="banner i" role="status">${I('refresh',17)}<div><b>ReXUI v${X(ru.latest)} is available.</b> You have v${X(ru.cur)}. Update on the server: run <code>menu</code> → 1 (Update) → 1. Users and settings are kept. <a href="https://github.com/chaliraza777/ReXUI/releases" target="_blank" rel="noopener">What's new</a></div></div>`:'')+(c.days!=null&&c.days<=30?`<div class="banner ${c.days<0?'e':'w'}" role="status">${I('cert',17)}<div><b>${c.days<0?'Your SSL certificate has expired.':'Your SSL certificate expires in '+c.days+' day'+(c.days==1?'':'s')+'.'}</b> ${X(c.name)} · Renew it, then paste the new one in Settings or use menu → 8 (SSL certificate) on the server.</div></div>`:'');
+function hdr(){const c=D.cert,ru=D.rxup||{};$('#cbn').innerHTML=(ru.new?`<div class="banner i" role="status">${I('refresh',17)}<div><b>ReXUI v${X(ru.latest)} is available.</b> You have v${X(ru.cur)}. Update on the server: run <code>menu</code> → 1 (Update) → 1. Users and settings are kept. <a href="https://github.com/chaliraza777/ReXUI/releases" target="_blank" rel="noopener">What's new</a></div></div>`:'')+(c.days!=null&&c.days<=30?`<div class="banner ${c.days<0?'e':'w'}" role="status">${I('cert',17)}<div><b>${c.days<0?'Your SSL certificate has expired.':'Your SSL certificate expires in '+c.days+' day'+(c.days==1?'':'s')+'.'}</b> ${X(c.name)} · Renew it, then paste the new one in Settings or use menu → 7 (SSL Certificate) on the server.</div></div>`:'');
 const x=D.svc.find(s=>s.unit=='xray'),on=x&&x.st=='RUNNING';$('#xs').innerHTML=`<span class="dot" style="background:${on?'var(--g)':'var(--r)'}"></span>Xray · ${on?'Running':'Stopped'} <span class="m">v${X(D.xray.ver||'?')}</span>`}
 function render(first){if(!D)return;if(pg=='ov'){ov();tipRestore()}else if(pg=='us')us(first);else if(pg=='on')onl();else if(pg=='sc')secp(first);else if(pg=='ib')ibp(first);else if(first)st();else stb()}
 const SC={RUNNING:'var(--g)',IDLE:'var(--a)',FAILED:'var(--r)','NOT INSTALLED':'var(--m)'};
@@ -4805,13 +5011,15 @@ if(e.target.closest('#sel')){UV.sel=UV.sel?null:new Set();return us(true)}
 const g=e.target.closest('[data-go]');if(g){if(g.dataset.f)UV.f=g.dataset.f;return go(g.dataset.go)}
 const fl=e.target.closest('[data-f]');if(fl){UV.f=fl.dataset.f;return us()}
 if(e.target.closest('#trl'))return pg=='us'?trial():kpick(k=>trial(k));
-if(e.target.closest('#cdnb'))return jump('cdn','cdnf');if(e.target.closest('#rfj'))return jump('xray','rfc');if(e.target.closest('#ibj'))return go('ib');if(e.target.closest('#dnsj'))return jump('dns','dnsf');if(e.target.closest('#pgj'))return jump('pay','payf');
+if(e.target.closest('#cdnb'))return jump('cdn','cdnf');if(e.target.closest('#ibj'))return go('ib');if(e.target.closest('#dnsj'))return jump('dns','dnsf');if(e.target.closest('#pgj'))return jump('pay','payf');
 const kt=e.target.closest('[data-kind]');if(kt){UV.kind=kt.dataset.kind;ls('rx-kind',UV.kind);UV.sel=null;selbar();navhl();return us(true)}
 if(e.target.closest('#eye')){hideIp=!hideIp;return ov()}
 const t1=e.target.closest('[data-tu]');if(t1){TU=t1.dataset.tu;return ov()}const t2=e.target.closest('[data-pr]');if(t2){PRR=t2.dataset.pr;return ov()}const t3=e.target.closest('[data-trm]');if(t3){TRM=t3.dataset.trm;return ov()}
 const sk=e.target.closest('[data-sk]');if(sk){api('api/session-kill',{id:sk.dataset.sk}).then(()=>{toast('Session logged out');secp(true)}).catch(x=>toast(x.message,1));return}
 if(e.target.closest('#lgall')){if(!confirm('Log out every other device? You stay logged in here.'))return;api('api/session-kill',{all:1}).then(()=>{toast('Other devices logged out');secp(true)}).catch(x=>toast(x.message,1));return}
 const rg=e.target.closest('[data-rg]');if(rg){RG=rg.dataset.rg;ls('rx-range',RG);HOV=null;if(RG!='live'&&Date.now()-HMT>60000)loadHist().then(ov);return ov()}
+const ue=e.target.closest('[data-uedit]');if(ue){e.stopPropagation();api('api/user/detail',{name:ue.dataset.uedit}).then(u=>umodal(u,null,null,true)).catch(x=>toast(x.message,1));return}
+const uq=e.target.closest('[data-uqr]');if(uq){e.stopPropagation();return uqr(uq.dataset.uqr)}
 const ut=e.target.closest('[data-utg]');if(ut){e.stopPropagation();const n=ut.dataset.utg,on=ut.classList.contains('on');ut.disabled=true;api('api/user/toggle',{name:n}).then(()=>{toast(n+(on?' disabled':' enabled'));load()}).catch(x=>{ut.disabled=false;toast(x.message,1)});return}
 const vw=e.target.closest('.seg[aria-label="View"] [data-v]');if(vw){UV.v=vw.dataset.v;ls('rx-view3',UV.v);return us(true)}
 const so=e.target.closest('[data-sort]');if(so){const k=so.dataset.sort;UV.rev=UV.k==k?!UV.rev:false;UV.k=k;ls('rx-sort',k);return us(true)}
@@ -4849,9 +5057,9 @@ if(a=='disable')return modal('Disable '+N,[['reason','Reason (optional, shown on
 if(a=='reset'){if(confirm('Reset data usage of '+N+'?'))done({action:'reset'},'Usage reset for # user(s)');return}
 if(a=='enable')return done({action:'enable'},'# user(s) enabled');
 if(a=='delete'){if(confirm('Delete '+N+'? This cannot be undone.\n\n'+names.slice(0,20).join(', ')+(names.length>20?' ...':'')))done({action:'delete'},'# user(s) deleted');return}}
-function us(first){if(first){$('#pg').innerHTML=`<div class="khd"><div class="kts" id="kts" role="tablist" aria-label="User type"></div></div><div id="dnsb"></div><div class="bar"><input id="q" placeholder="Search users or notes" aria-label="Search users" value="${X(UV.q||'')}"><select id="srt" aria-label="Sort users">${Object.entries(SO).map(([k,v])=>`<option value="${k}"${k==UV.k?' selected':''}>Sort: ${v[0]}</option>`).join('')}</select>
+function us(first){if(first){$('#pg').innerHTML=`<div class="khd"><div class="kts" id="kts" role="tablist" aria-label="User type"></div></div><div id="dnsb"></div><div class="bar uacts"><button class="btn pri" id="add">${I('plus',16)}Add ${KN[UV.kind]} user</button><button class="btn" id="trl" title="1 day, 2 GB, deleted when it ends">${I('clock',16)}Trial</button>${UV.kind=='v2ray'||UV.kind=='both'?`<button class="btn bl" id="ibj">${I('inb',16)}Inbounds</button>`:''}${UV.kind=='ssh'?`<button class="btn bl" id="pgj">${I('file',16)}Payload generator</button>`:''}${UV.kind=='dns'?`<button class="btn bl" id="dnsj">${I('net',16)}DNS setup</button>`:''}<button class="btn" id="blk">${I('users',16)}Bulk / CSV</button><button class="btn${UV.sel?' pri':''}" id="sel" aria-pressed="${!!UV.sel}">${I('check',16)}${UV.sel?'Done':'Select'}</button></div><div class="bar"><input id="q" placeholder="Search users or notes" aria-label="Search users" value="${X(UV.q||'')}"><select id="srt" aria-label="Sort users">${Object.entries(SO).map(([k,v])=>`<option value="${k}"${k==UV.k?' selected':''}>Sort: ${v[0]}</option>`).join('')}</select>
 <div class="seg" role="group" aria-label="View">${[['cards','grid','Card view'],['table','list','Table view']].map(x=>`<button type="button" data-v="${x[0]}" class="${UV.v==x[0]?'on':''}" aria-pressed="${UV.v==x[0]}" aria-label="${x[2]}" title="${x[2]}">${I(x[1],16)}</button>`).join('')}</div>
-<button class="btn${UV.sel?' pri':''}" id="sel" aria-pressed="${!!UV.sel}">${I('check',16)}${UV.sel?'Done':'Select'}</button><button class="btn" id="blk">${I('users',16)}Bulk / CSV</button><button class="btn" id="trl" title="1 day, 2 GB, deleted when it ends">${I('clock',16)}Trial</button>${UV.kind=='v2ray'||UV.kind=='both'?`<button class="btn bl" id="ibj">${I('inb',16)}Inbounds</button><button class="btn bl" id="rfj">${I('search',16)}Reality target finder</button>`:''}${UV.kind=='ssh'?`<button class="btn bl" id="pgj">${I('file',16)}Payload generator</button>`:''}${UV.kind=='dns'?`<button class="btn bl" id="dnsj">${I('net',16)}DNS setup</button>`:''}<button class="btn pri" id="add">${I('plus',16)}Add ${KN[UV.kind]} user</button></div><div class="chips" id="flt" role="group" aria-label="Filter users"></div><div id="ul"></div><div id="ulm" class="ulm"></div>`;
+</div><div class="chips" id="flt" role="group" aria-label="Filter users"></div><div id="ul"></div><div id="ulm" class="ulm"></div>`;
 $('#q').oninput=()=>{UV.q=$('#q').value;UV.lim=100;us()};$('#srt').onchange=()=>{UV.k=$('#srt').value;UV.rev=false;ls('rx-sort',UV.k);us(true)}}
 const KU=D.users.filter(u=>inK(u,UV.kind));if($('#dnsb'))$('#dnsb').innerHTML=UV.kind=='dns'?DNSH():'';
 $('#kts').innerHTML=[['v2ray','globe','V2Ray users'],['ssh','key','SSH users'],['ovpn','vpn','OpenVPN users'],['hy2','bolt','UDP users'],['wg','wg','WireGuard users'],['dns','net','DNS users']].map(x=>`<button type="button" role="tab" data-kind="${x[0]}" class="${UV.kind==x[0]?'on':''}" aria-selected="${UV.kind==x[0]}">${I(x[1],16)}${x[2]} <b>${D.users.filter(u=>inK(u,x[0])).length}</b></button>`).join('');
@@ -4862,7 +5070,7 @@ const el=$('#ul');el.classList.toggle('pick',!!UV.sel);if(!L.length){el.classNam
 if(UV.v=='table'){el.className='card tw';const th=(k,t)=>k?`<th scope="col"><button type="button" data-sort="${k}" class="${UV.k==k?'on':''}">${t}${UV.k==k?I(UV.rev?'up':'down',12):''}</button></th>`:`<th scope="col"><button type="button" tabindex="-1" style="cursor:default">${t}</button></th>`;
 const ck=u=>UV.sel?`<span class="sck${UV.sel.has(u.name)?' on':''}" aria-hidden="true">${I('check',13)}</span>`:'';
 el.innerHTML=`<table class="ut"><thead><tr>${th('name','User')}${th('used','Bandwidth')}${th('exp','Expiry')}${th('','Devices')}${th('','On')}</tr></thead><tbody>${LP.map(u=>{const n=X(u.name),dl=dleft(u);return `<tr data-open="${n}" class="${UV.sel&&UV.sel.has(u.name)?'sel':''}" tabindex="0" aria-label="Open ${n}">
-<td><div class="tu">${ck(u)}${avd(u)}<div style="min-width:0"><b>${n}</b>${useen(u)}${tagT(u)}${u.note?`<small>${X(u.note)}</small>`:''}</div></div></td>
+<td><div class="tu">${ck(u)}<span class="uact"><button type="button" class="uab" data-uedit="${n}" title="Edit" aria-label="Edit ${n}">${I('pen',15)}</button>${HX(u.kind)?`<button type="button" class="uab" data-uqr="${n}" title="QR and configs" aria-label="QR and configs of ${n}">${I('qr',15)}</button>`:'<span class="uab0"></span>'}</span>${avd(u)}<div style="min-width:0"><b>${n}</b>${useen(u)}${tagT(u)}${u.note?`<small>${X(u.note)}</small>`:''}</div></div></td>
 <td>${lims(u.used,u.lim)}${u.lim?ubar(u.used,u.lim):''}${uspd(u)}</td><td class="${u.st=='ended'||(dl&&dnum(u)<=1&&u.exp!='never')?'exr':expiring(u)?'exw':''}">${u.exp=='never'&&!u.fdays?'<span class="m">No expiry</span>':X(u.fdays?'First use + '+u.fdays+'d':u.exp)+(dl&&!u.fdays?`<small style="display:block">${dl}</small>`:'')}</td>
 <td><span class="udev${uon(u)?' on':''}">${u.on} / ${u.dev||'∞'}</span></td><td><button type="button" class="sw${u.st=='disabled'?'':' on'}" data-utg="${n}" role="switch" aria-checked="${u.st!='disabled'}" aria-label="${n} ${u.st=='disabled'?'disabled':'enabled'}" title="${u.st=='disabled'?'Enable':'Disable'}"><i></i></button></td></tr>`}).join('')}</tbody></table>`;return}
 el.className='ul'+(UV.sel?' pick':'');el.innerHTML=LP.map(u=>{const n=X(u.name),on=UV.sel&&UV.sel.has(u.name);return `<button class="card uc${on?' sel':''}" data-open="${n}" aria-label="${UV.sel?(on?'Unselect ':'Select ')+n:'Open '+n}"${UV.sel?` aria-pressed="${!!on}"`:''}><div class="uh">${UV.sel?`<span class="sck${on?' on':''}" aria-hidden="true">${I('check',13)}</span>`:''}${avd(u)}<div style="min-width:0"><b>${n}</b>${tagT(u)}<small class="m" style="display:block">${lims(u.used,u.lim)}</small></div><span class="pill" style="color:${STC[u.st]}">${STN[u.st]}</span></div>
@@ -4878,27 +5086,59 @@ $('#pg').innerHTML=`<div class="card mb"><div class="ct"><div class="lab">${I('d
 <p class="note">Sessions last 12 hours. Changing the panel password logs out everyone.</p>${S.map(x=>`<div class="rk"><span class="dotc" style="background:var(--g);margin:0"></span><span class="nm"><b>${X(uaS(x.ua))}${x.me?' <span class="tag">This device</span>':''}</b><small class="m">${X(x.ip)} · logged in ${tago(x.t)}</small></span>${x.me?'':`<button class="btn sm" data-sk="${X(x.id)}">Log out</button>`}</div>`).join('')}</div>
 <div class="g2"><div class="card"><div class="ct"><div class="lab">${I('key',15)}Login history</div><span class="m" style="font-size:12.5px">last ${L.length}</span></div><div class="lst">${L.length?L.map(x=>`<div class="li"><span class="dotc" style="background:${ok(x.res)?'var(--g)':'var(--r)'}"></span><span class="tx"><b>${ok(x.res)?'Logged in':X(x.res)}</b> · ${X(x.user||'-')}<small>${X(x.ip)} · ${X(uaS(x.ua))}</small></span><span class="dt" title="${tfull(x.t)}">${tago(x.t)}</span></div>`).join(''):'<p class="note">No logins recorded yet.</p>'}</div></div>
 <div class="card"><div class="ct"><div class="lab">${I('panel',15)}Activity log</div><span class="m" style="font-size:12.5px">last ${A.length}</span></div><div class="lst">${A.length?A.map(x=>`<div class="li"><span class="tx">${X(x.a)}<small>${X(x.ip)}</small></span><span class="dt" title="${tfull(x.t)}">${tago(x.t)}</span></div>`).join(''):'<p class="note">Changes you make in the panel are listed here.</p>'}</div></div></div>`}
-function onl(){const L=D.online;const tot=L.reduce((a,x)=>a+x.ssh+x.ips.length+(x.ov||[]).length+(x.hy||0)+(x.wg?1:0),0);
-$('#pg').innerHTML=`<div class="card mb"><div class="ct"><div class="lab">${I('wifi',15)}Online users</div><span class="m">${L.length} users · ${tot} connections</span></div>
+const WORLD='M670 157l3 1l2 -1l1 -1l2 -1l1 -1l1 -2l2 -1l2 0l2 0l2 1l3 -1l2 -1l2 0l2 -3l1 1l0 4l2 1l2 -1l2 -1l1 0l3 0l-1 1l-1 1l-3 0l-3 1l-2 1l1 2l-1 3l-1 2l-3 0l1 2l-1 1l-2 2l1 2l-3 0l-2 1l-2 1l-2 2l0 2l-3 2l-2 -1l-2 1l-3 0l-5 -2l3 -2l-1 -3l-2 0l0 -2l-1 -3l1 -2l0 -2l1 -4zM545 291l1 3l1 2l2 2l1 0l3 0l1 -3l2 0l1 1l3 0l0 2l1 3l0 2l1 1l0 4l1 0l2 -1l2 2l0 3l0 2l-6 0l0 10l2 3l1 2l-5 1l-6 0l-2 -2l-12 0l-2 -1l-3 1l-2 -2l1 -3l1 -3l1 -4l2 -3l1 -2l0 -2l-1 -3l-1 -2l0 -2l1 -2l-1 -3l-1 -2l-1 -2l1 -2l2 0l8 0zM535 291l-2 -3l1 -1l2 1l-1 1zM557 137l0 2l1 2l-1 1l-1 2l-2 -2l0 -4l0 -3l1 -1l1 1l1 2zM643 194l3 0l2 0l4 -2l2 -2l2 -2l1 3l-2 2l-1 3l-1 1l0 2l-9 -1l-1 -4zM318 451l-3 0l-1 -1l-5 0l0 -7l1 1l2 3l3 1l4 1l-1 2zM320 344l1 2l1 -3l3 0l6 6l2 1l4 2l3 2l-3 6l3 1l3 0l2 0l3 -3l0 -3l3 2l0 2l-2 2l-2 1l-3 4l-4 4l-1 3l-1 3l1 3l-1 3l3 4l0 3l1 1l-2 6l-5 2l-5 0l-3 0l0 2l0 2l0 2l-1 1l-3 0l-3 -1l0 4l1 1l2 -1l1 2l-3 1l-2 2l0 3l-1 2l-3 0l-2 2l-1 2l3 2l3 1l-1 3l-4 2l-1 4l-3 1l-1 1l1 4l2 2l-4 -1l-7 0l-1 -2l0 -3l-2 0l-1 -1l0 -3l2 -2l1 -2l1 -4l1 -4l0 -2l1 -2l-1 -2l-1 -1l0 -4l0 -5l1 -3l1 -3l1 -1l-1 -3l0 -3l3 -2l-1 -3l2 -3l0 -3l-2 -6l2 -4l0 -3l1 -3l1 -3l2 -2l-1 -1l1 -6l3 -2l1 -3l2 -4l4 1zM621 139l4 -1l2 2l0 2l1 2l1 3l-2 -2l-2 -2l-2 0l-2 -1l0 -3zM691 430l2 1l3 0l-1 2l-4 0l0 -3zM904 404l3 1l3 -1l2 4l-1 1l0 3l-3 1l-2 0l-2 -3l0 -2l-2 -3l2 -1zM899 317l1 2l2 -1l0 1l2 2l0 4l1 1l1 4l1 4l3 1l2 2l1 1l2 3l1 3l2 1l1 3l2 2l1 1l3 3l0 3l0 3l2 3l-1 3l-1 4l0 5l-2 3l-2 1l-1 3l-1 1l0 3l-1 2l-1 2l0 2l-2 2l-3 1l-3 1l-1 1l-2 2l-2 -2l-2 0l1 -2l-2 0l-2 3l-2 -1l-2 -1l-4 -1l-2 -2l-1 -2l0 -2l-2 -1l-2 -1l1 -1l-1 -3l-1 3l-3 0l2 -1l0 -2l1 -2l0 -2l-2 2l-2 2l-1 2l-2 -1l-2 -4l-2 -1l-3 -3l-2 0l-2 -2l-5 0l-4 2l-3 1l-3 -1l-3 2l-2 1l0 2l-2 1l-2 0l-2 0l-2 0l-2 0l-2 0l-2 2l-2 1l-1 1l-2 0l-5 -2l-1 -1l1 -2l0 -2l1 -3l-1 -1l-1 -4l-1 -2l-1 -4l-1 -2l0 -2l-2 -3l0 -3l1 1l1 1l-1 -4l-1 -2l0 -2l1 -2l0 -2l1 -2l0 2l1 -2l3 -1l1 -2l2 -1l2 0l2 -1l2 0l1 -1l5 -1l1 -2l1 -1l2 -2l0 -3l2 -3l1 3l0 -2l1 -2l1 -1l2 -2l2 -2l1 -1l3 -1l2 1l2 2l3 1l-1 -2l2 -3l1 -1l1 -2l2 -1l3 -1l-2 -2l3 0l2 1l2 1l3 1l1 -1l2 0l1 1l0 2l-1 1l-1 2l-1 1l-1 2l3 2l2 2l1 1l2 2l2 0l3 2l2 -1l1 -1l1 -4l1 -2l-1 -3l0 -2l0 -2l1 -3l1 -2l1 -2l1 1l0 2l1 2l1 2l0 2zM547 116l-2 2l0 2l-3 1l-1 1l-3 -1l-4 0l-3 -1l-2 0l-3 0l1 -2l2 1l3 -1l2 0l2 0l0 -2l2 -2l2 1l1 -2l4 1l2 1zM625 143l2 1l1 3l-2 -1l-1 -1zM632 139l1 -1l2 -1l1 1l2 3l2 1l-2 0l-1 2l-1 2l-1 2l-2 -2l1 -1l-2 -1l-3 3l0 -3l-2 -1l-1 -2l-1 -3l3 1l2 0l-2 -2l4 2zM581 287l0 -4l0 -2l2 -1l2 1l0 2l-1 2l-1 2zM509 106l2 0l3 -1l2 2l1 1l0 2l-1 2l-3 -2l-3 -1l-1 -1l-2 -2l2 0zM507 252l-2 0l-1 -2l1 -7l-1 -3l-1 -1l-1 -3l2 -1l2 -2l2 -1l2 2l1 3l-1 3l-1 2l-1 3l0 2l-1 5zM492 241l-2 -1l-2 1l-2 -2l-1 -2l1 -2l2 -4l0 -2l2 0l2 -2l2 -1l3 -2l2 0l2 1l2 4l3 2l0 2l-2 2l-2 1l-2 0l-2 1l-6 0l0 4zM757 201l0 2l0 2l-1 -2l-1 -3l-1 -2l-3 0l0 3l-3 0l-1 -3l-1 -2l0 -2l-1 -1l2 -3l-2 -1l1 -3l2 2l2 2l2 1l3 0l2 0l-2 3l-2 2l2 2l0 -2l2 5zM563 129l1 1l3 0l4 1l1 -1l4 -1l2 1l-1 4l1 2l-3 0l-2 1l-3 2l-2 -2l-2 1l-2 0l0 -2l-2 -1l1 -2l1 -1l-1 -1l0 -2zM285 195l-2 -2l0 -3l2 3zM286 186l0 2l-1 -2l-1 -1l2 1zM553 127l1 2l-1 2l-1 1l0 2l-3 -1l-1 -2l-2 -2l-2 -2l1 -1l2 0l3 0l3 1zM565 97l3 0l3 -1l1 -2l2 -1l1 -2l3 -1l3 1l2 0l3 1l-1 3l2 2l1 1l2 0l-3 2l1 3l-2 1l-1 2l-4 0l-3 -1l-2 0l-3 -1l-3 0l-2 0l-1 1l-2 -1l-1 -2l2 -1l-1 -2zM252 214l2 -2l1 2l0 1l0 4l-1 1l-2 1l0 -4l0 -3zM325 343l-3 0l-1 3l-1 -2l-4 -1l-2 3l-2 0l-1 -4l-2 -4l1 -3l-2 -1l0 -3l-1 -2l1 -3l-1 -3l0 -2l1 -2l1 -3l0 -2l-2 -6l2 0l2 -1l2 -1l2 -2l4 0l-1 2l0 4l3 2l3 1l2 1l1 1l2 1l3 1l1 3l-1 1l1 4l5 0l0 2l2 2l0 2l0 3l-1 1l0 2l-3 -2l-3 0l-5 1l-1 3l-1 5zM340 370l4 -4l3 -4l2 -1l2 -2l0 -2l-1 -2l-1 -1l0 -2l-1 -3l-2 1l0 -4l-3 -2l-4 0l0 -5l-1 -2l1 -2l1 -1l0 -3l0 -2l-2 -1l0 -3l-5 0l-1 -4l1 -1l-1 -3l-2 -1l-3 -1l-1 -1l-2 -1l-3 -1l-3 -2l1 -3l0 -3l-4 0l-2 2l-2 1l-2 1l-2 0l-2 0l-1 -5l-2 2l-3 0l-1 -2l-1 0l-1 -4l-2 -3l1 -1l2 -1l0 -2l1 -3l3 -2l2 -1l3 0l1 -9l0 -3l-2 -1l1 -3l1 0l-1 -1l0 -2l5 0l1 -1l2 2l2 2l2 0l3 -2l1 -2l2 -1l-3 -1l0 -2l0 -2l-1 -1l3 0l2 1l3 -1l3 -2l1 -1l1 -1l0 2l2 2l-2 4l1 2l2 3l2 -1l2 0l2 -1l2 0l1 -2l2 0l2 1l2 -1l1 1l2 -1l1 -2l2 -3l1 1l2 6l1 0l0 3l-2 2l6 2l0 3l2 -2l4 1l4 2l2 2l-1 2l3 -1l6 2l4 -1l4 3l4 4l2 1l2 0l1 1l1 4l1 2l-2 5l-1 2l-4 5l-2 4l-2 2l-1 3l0 6l-1 5l0 2l-1 1l0 5l-3 4l-1 3l-2 2l-1 2l-3 0l-4 1l-2 1l-3 1l-3 3l-3 3l0 2l0 2l0 3l-1 2l-2 2l-3 5l-2 3l-2 2l-1 3l-2 2l-1 -2l1 -2l-1 -2l-3 -2l-2 -2l-4 -2l-2 0zM817 257l1 -1l3 -2l-1 4l-2 1l-1 -2zM755 182l1 1l0 2l-3 0l-2 0l-2 1l-2 -2l2 -3l1 -1l2 1l3 1zM571 332l2 3l3 3l1 2l1 2l2 0l2 2l-4 2l-3 2l-1 3l0 1l-2 2l-2 1l-3 0l-1 -1l-3 1l0 1l-2 1l-1 2l-2 0l0 -3l-2 -3l-1 -10l3 0l0 -12l2 0l4 -1l1 1l2 -1l3 -1l1 3zM542 248l3 0l5 -1l1 -2l2 -1l3 -1l2 -2l2 -3l2 -1l2 -1l1 3l0 3l1 2l2 1l2 2l2 3l1 1l1 2l2 1l-3 1l-2 0l-1 1l-2 0l-3 1l-3 2l-2 -1l-2 0l-2 -1l-2 -1l-1 1l-1 2l-1 2l-3 -1l-2 2l-2 3l0 -3l-1 -1l-1 -1l-2 -3l0 -3l0 -2l2 -4zM323 121l2 1l3 0l-2 1l-4 -1l0 -2l1 1zM328 113l-5 -1l-2 -1l4 0l3 1zM157 115l-6 -1l-3 -2l-4 -2l-1 -2l3 0l2 1l3 0l1 1l1 2l3 1l1 2zM344 108l-2 3l2 -1l2 0l-1 1l2 1l2 0l2 1l0 2l2 -1l0 2l1 2l-1 3l-3 -1l0 -2l-4 2l-2 -2l-3 0l-6 0l2 -2l-2 -1l3 -2l3 -5l1 -2l3 -1l-1 3zM131 97l3 0l-1 3l3 3l-3 -1l-1 -2l-2 -1l0 -2zM273 69l-4 2l-2 0l2 -3l4 0zM263 59l2 1l2 1l3 1l3 1l3 2l1 1l-2 1l-4 -1l-2 -2l-3 2l-4 2l-1 -2l-3 0l2 -1l0 -3l1 -3l2 0zM289 55l-3 0l-1 -2l2 -2l2 0l2 1l0 2l-2 1zM234 48l-1 1l-4 -1l-2 1l-4 -2l2 -1l2 -1l3 1l2 0l2 2zM248 47l0 3l4 -2l4 2l-1 2l2 2l3 -2l2 -3l0 -3l4 0l4 0l4 2l-2 3l2 2l-6 4l-3 0l-3 0l-1 1l-3 3l-1 1l-3 2l-4 1l-2 1l0 2l-3 1l-4 2l-3 4l-1 2l0 4l4 1l1 3l2 2l4 0l5 1l2 1l2 2l4 1l3 1l4 0l3 0l0 3l1 4l2 3l4 3l2 -1l2 -3l-2 -5l-2 -2l5 -1l3 -3l1 -2l0 -2l-2 -3l-3 -2l3 -4l-1 -3l-1 -5l2 -1l5 1l3 1l2 -1l2 1l4 2l1 1l5 0l0 3l1 4l2 1l2 2l4 -2l3 -4l2 -1l2 3l3 4l3 4l-1 2l4 1l3 2l4 1l2 1l1 3l2 0l1 2l0 3l-2 1l-2 2l-4 1l-4 2l-4 1l-6 -1l-5 0l-2 0l-3 3l-3 1l-4 4l-4 3l3 0l4 -4l6 -3l4 0l3 1l-3 2l1 4l1 2l4 2l4 -1l3 -3l0 2l2 1l-4 2l-6 2l-2 2l-4 2l-2 0l0 -3l5 -3l-4 0l-3 1l-2 -2l0 -4l-2 -1l-1 0l-3 2l-1 2l-1 2l-2 1l-6 0l-4 0l-4 3l-1 2l-3 0l-3 0l0 2l-4 2l-3 0l-3 2l-2 0l1 -2l1 -2l1 -2l-1 -3l0 -3l-3 -1l-2 -2l-1 -1l-1 -1l-2 -1l-2 -1l-3 -1l-2 -1l-3 1l-4 -1l-3 0l-2 -1l-3 0l-2 -1l-1 -2l-1 1l-6 0l-10 0l-9 0l-8 0l-9 0l-8 0l-8 0l-3 0l-8 0l-8 0l-6 -3l-2 -1l-5 -2l-2 -2l1 -2l-4 -2l0 -2l-4 -3l2 -3l0 -2l-5 -2l-3 -4l-1 -2l-3 -2l-2 -1l-1 -2l-3 1l-3 2l-2 -2l-2 -1l-3 -1l-3 0l0 -19l0 -12l6 1l4 2l3 0l2 -1l4 -1l4 0l4 -1l4 -1l2 1l2 -1l1 -1l2 0l5 3l3 -2l1 2l3 0l5 -1l4 1l6 2l4 0l3 0l4 2l-4 1l5 1l7 -1l3 0l3 2l3 -2l-3 -1l2 -1l3 0l2 -1l2 1l3 2l3 0l5 1l4 -1l5 1l-1 -2l3 -1l4 1l0 3l2 -2l2 0l1 -4l-3 -2l-3 -1l0 -4l4 -2l3 1l3 1l4 4l-3 1l5 1zM183 35l-2 2l7 -1l4 1l3 -1l2 1l2 3l2 -1l-2 -4l2 0l3 0l3 2l2 3l1 2l4 2l5 1l-4 2l1 1l-1 1l-5 0l-4 -1l-4 0l-5 1l-7 1l-5 0l-1 -1l-4 -1l-3 0l-3 -3l2 0l4 0l4 0l4 -1l-6 -1l-6 1l-4 0l-1 -2l6 -1l-4 0l-5 -1l3 -2l2 -1l7 -2l3 0zM210 34l-3 2l-4 -2l5 0l2 0zM288 35l-3 1l-3 0l-3 0l-4 -1l2 -2l6 1l5 1zM260 35l2 2l2 -2l7 -2l5 4l0 2l5 -1l3 -2l6 2l4 2l5 0l3 2l7 2l2 1l3 3l-5 1l6 3l5 0l4 3l4 1l-1 2l-5 4l-3 -2l-4 -3l-4 0l0 2l3 2l3 2l2 1l1 3l-1 2l-3 -1l-7 -2l4 2l3 2l-7 0l-6 -2l-4 -1l-3 -3l-4 -1l-8 1l-2 -1l2 -2l5 -1l6 0l-1 -1l1 -2l3 -3l-1 -1l-1 -1l-4 -2l-6 -1l2 -1l-3 -2l-2 0l-2 -1l-2 1l-5 0l-10 -1l-6 0l-4 -1l-3 -1l3 -2l-4 0l-1 -3l3 -3l2 -1l8 -1l-2 2zM221 33l4 1l5 -1l-2 3l4 1l-1 3l-4 1l-3 0l-2 -1l-7 -3l6 0l-3 -3l3 -1zM241 36l-3 3l-3 0l-2 -3l2 -3l2 -1l6 0l6 1l-5 3l-3 0zM165 41l-7 1l-1 -1l-7 -2l1 -1l2 -2l3 -3l-3 -2l9 0l4 1l7 0l3 1l3 1l-3 1l-7 2l-4 2zM240 29l-2 1l-4 0l-3 -1l2 -1l4 -1l2 1l1 1zM226 24l3 1l-2 4l-4 0l-3 0l-5 -2l0 -2l3 0l4 -1l4 0zM199 25l2 1l2 0l3 0l0 2l-1 1l-10 1l-7 1l-4 0l5 -2l-12 0l-4 -1l4 -3l2 -1l8 1l5 2l5 1l-4 -3l3 -2l2 1l1 1zM237 22l3 1l6 0l2 1l2 2l2 1l4 0l4 1l4 -1l6 0l5 0l3 1l-1 2l-5 1l-3 0l-8 0l-6 0l-4 0l-8 -1l-1 -2l-3 -3l-6 -1l-3 -1l1 -1l6 0zM177 21l0 2l-2 1l-3 0l-5 2l-4 0l-4 0l4 -3l6 -2l4 0l4 0zM239 21l-6 0l5 -1l2 1zM194 20l-5 1l-4 -1l2 -1l4 0l4 0zM195 17l-3 1l-5 0l3 -1l5 0zM234 19l-4 1l-3 -1l-1 -1l4 -1l5 1zM222 18l1 2l-4 -1l-5 -1l-6 0l3 -1l-4 -1l5 0l8 1l2 1zM258 14l4 1l-4 1l-5 3l-5 0l-6 -1l-3 -1l2 -2l-5 0l-3 -1l-2 -2l2 -1l2 -1l3 0l5 -1l4 2l5 0l4 1l2 2zM310 3l7 0l6 1l5 0l-7 3l-6 0l-3 1l6 0l-6 2l-5 1l-5 3l-5 0l-2 1l-9 0l4 1l-2 0l3 2l-3 1l-4 1l-2 1l-4 1l6 1l-8 2l-7 -1l-8 1l-4 0l-6 -1l5 -2l-1 -2l9 1l-4 -2l-4 -1l2 -1l5 -1l-3 -2l-1 -2l7 0l2 1l5 -2l-7 0l-9 0l-5 -1l-3 -1l-3 -1l4 -2l3 0l5 0l4 -2l4 1l3 0l2 -1l4 -1l5 0l8 0l10 -1l6 1l6 0zM527 118l1 2l1 2l-3 0l-2 1l-2 1l-3 -1l-1 -1l-1 -1l2 -2l2 -1l2 0l4 0zM309 443l0 7l3 0l1 1l-2 1l-3 0l-2 -1l-3 -1l-4 -1l-3 -2l-3 -4l2 1l4 2l3 1l2 -1l1 -2l2 -2l2 1zM311 342l1 4l2 0l-1 4l-3 2l0 5l0 2l-2 2l-1 3l-1 3l0 3l-2 4l1 5l1 4l-2 3l1 3l-3 2l0 3l1 3l-1 1l-1 3l-1 3l1 4l-1 5l1 1l0 1l1 2l-1 3l-1 4l-1 3l-1 3l-2 2l0 3l1 1l2 0l0 3l1 2l7 0l3 1l-3 0l-1 0l-3 1l0 4l-5 -1l-3 -3l-3 -2l-1 -2l1 -2l-2 -2l0 -5l1 -3l3 -3l-4 -1l3 -3l0 -5l4 1l1 -7l-2 0l-1 4l-1 -1l0 -4l1 -6l2 -3l-1 -3l0 -4l2 -5l2 -5l2 -5l-1 -5l1 -2l-1 -4l2 -4l1 -7l0 -6l1 -8l0 -5l0 -4l1 -1l1 -2l1 2l0 3l2 1l-1 3l2 4zM806 212l-2 1l-2 -1l0 -3l1 -1l3 -1l2 1l-1 2l-1 2zM855 111l4 1l4 2l1 3l4 0l2 -1l5 -1l-1 3l-1 1l-1 4l-2 3l-4 -1l-2 1l1 3l-1 4l-1 2l-2 -2l-1 2l-4 1l0 2l-2 0l-2 -1l-1 2l-4 2l-2 2l-4 1l-2 1l-3 1l2 -1l1 -4l-1 -2l-3 2l-3 2l-1 2l-3 0l-2 2l2 2l2 0l3 3l3 -3l2 2l2 1l-4 1l-1 2l-3 2l-1 2l3 2l1 3l2 3l2 2l0 3l-2 1l1 1l1 1l0 3l-1 3l-4 3l-2 5l-2 4l-4 3l-4 2l-3 1l-2 1l-1 -1l-1 2l-4 1l-3 1l-1 3l-2 -2l-4 -2l-4 -1l-1 -1l0 -2l-2 0l-1 -2l-3 2l-2 1l-3 0l-1 0l-1 5l-2 -1l-2 -1l-3 -2l0 -2l-1 -1l-1 -3l-3 1l0 -4l3 -3l0 -3l0 -2l-2 -3l-5 0l1 -1l-1 -2l-2 1l-2 -1l-4 2l-2 3l-2 0l-2 -1l-3 -1l-1 1l-2 3l-1 -3l-1 1l-3 -1l-4 0l-2 -2l-2 0l-1 -2l-2 0l-2 -2l-3 -1l-5 -2l-2 -2l-1 -4l2 1l-1 -3l0 -3l-3 -4l-4 -1l-1 -3l-2 -1l-1 -3l-2 -2l-1 -3l3 -3l2 0l3 0l1 -2l3 0l1 -2l5 -1l0 -3l2 -1l-3 -5l6 -2l1 0l2 -6l6 1l1 -2l0 -3l3 0l2 -2l1 2l3 1l4 2l2 2l-1 4l1 1l3 1l4 0l3 2l2 1l1 3l2 2l3 0l5 0l4 0l3 0l4 2l3 0l2 1l3 -1l4 -2l4 0l4 -1l2 -2l2 -1l-2 -2l2 -2l4 1l3 -2l4 -1l2 -2l2 -1l4 -1l2 1l-2 -4l-2 -1l-2 2l-3 -1l-2 -1l2 -3l1 -2l3 1l4 -2l3 -5l1 -1l-1 -3l2 -1l4 -1l3 0l4 1l3 1l2 3l1 2l1 2l1 3zM492 256l-3 -1l-5 1l-2 1l-3 1l0 -3l-1 -3l-2 -1l1 -1l0 -3l0 -1l1 -2l0 -2l-1 -3l4 0l2 -1l1 1l2 0l2 2l2 -1l2 1l1 4l-1 3l-1 4l1 3zM536 265l-2 0l-1 0l-6 0l0 -3l-1 -2l-2 -2l0 -1l0 -3l2 -3l2 -2l3 2l2 -2l1 -2l0 -2l1 -1l1 -2l1 -3l1 -2l2 -2l0 -2l-1 -1l1 -2l1 3l1 2l-1 2l2 3l-2 0l-2 1l1 2l2 2l1 2l-2 4l-1 3l0 3l2 1l1 3l1 1l0 3l-2 1l-2 -1l-4 0zM586 261l-1 4l0 2l-1 2l-1 1l0 3l-1 3l-1 3l0 2l0 2l0 4l1 3l0 3l2 2l1 4l-4 0l-2 3l1 1l-1 4l0 3l3 2l0 3l-2 0l-1 -2l-1 -1l-2 -1l-1 -1l-1 1l-2 -1l-1 -1l-2 0l-2 -1l-2 -1l-2 1l-1 0l0 -4l-1 -1l0 -2l0 -2l-1 -3l-3 0l-1 -1l-2 0l-1 2l-2 1l-2 0l-2 -1l-1 -3l-1 -3l-8 0l-2 0l-1 0l1 -2l1 -1l2 -1l1 1l3 -2l2 -1l0 -4l2 -3l1 -2l2 -1l0 -3l0 -3l1 -3l0 -2l1 -1l0 -2l1 -2l1 -2l1 -1l2 1l2 1l2 0l2 1l1 -2l5 -1l2 0l1 -1l2 0l3 0l2 3l2 0l3 -1l0 2l3 2zM536 288l-1 -2l-2 2l-2 -3l2 -2l-1 -2l3 -1l4 0l1 -1l0 -3l0 -2l-2 -2l2 -4l-3 0l-1 -2l4 -1l2 1l2 1l2 -5l2 -2l1 1l2 2l-1 1l0 2l-1 3l0 3l0 3l-2 1l-1 2l-2 3l0 3l-2 2l-1 2l-2 -1l-2 1zM291 273l-3 -2l-3 0l-1 -2l-3 -1l0 -3l3 -2l1 -2l1 -1l-1 -3l0 -3l0 -4l-1 -1l1 -2l0 -3l2 0l2 -2l1 -2l0 -2l2 -2l2 -1l2 1l2 -2l3 -2l1 1l-2 2l-1 1l-1 1l-1 1l0 3l-1 1l2 2l1 2l0 2l1 1l4 0l1 1l2 2l3 0l3 0l-1 2l0 4l0 2l1 1l-1 2l1 2l1 3l-1 -1l-7 0l0 2l2 1l-2 0l-1 3l2 1l0 2l-1 10l-2 -2l1 -3l-2 -2l-2 0l-2 1l-2 0l-2 -4l-1 -1l-1 -1l-2 -2zM270 245l-2 0l0 -2l-2 -2l-1 -1l-1 1l-2 -1l0 -2l0 -2l2 1l2 0l2 1l1 2l2 1l-1 2l0 2zM271 197l3 0l2 0l3 1l1 2l2 -1l4 3l1 1l3 1l2 1l2 1l-2 2l-2 0l-2 -1l-4 1l2 -2l-3 -1l-2 -3l-4 -1l-4 -1l-3 -1l-2 1l-1 1l-3 0l1 -1l2 -2l2 0l2 -1zM591 158l3 0l2 -1l-2 1l-2 0zM594 159l-2 1l-2 -2l2 0l2 0zM547 115l-2 -1l-3 -1l-2 2l-2 -1l-2 -2l-1 0l-1 -3l2 0l3 -2l3 0l1 1l2 0l1 1l3 0l2 1l1 2l-2 1l-1 1l-2 1zM528 94l2 2l3 1l2 -1l3 1l1 1l1 2l0 2l1 1l1 4l-2 0l-3 1l-3 1l1 3l1 0l2 2l-1 1l-1 3l-2 0l-2 0l-3 0l-2 0l-3 -1l-3 1l0 -2l1 -3l-4 0l-1 -1l0 -2l0 -2l0 -4l2 -1l1 -3l2 -2l2 -1l0 -3l2 0l2 0zM620 231l0 2l-1 1l1 1l-1 2l-3 -1l0 -2l1 -1l1 -2l2 0zM535 92l-1 3l-3 -2l3 -3l1 2zM530 89l-1 1l-2 2l1 2l-2 0l-2 0l-1 -2l-1 -3l2 -2l2 0l3 -2l-1 3l2 1zM301 208l2 0l2 1l1 1l2 1l2 1l-1 1l-1 -1l-2 0l-2 1l-2 2l-1 -1l-1 -2l1 -2l0 -2zM533 196l-9 6l-8 7l-4 1l-3 0l0 -2l-3 -1l-1 -2l-9 -7l-10 -7l-10 -8l0 -4l4 -3l3 0l2 -1l2 -2l3 -1l0 -2l3 -2l3 0l0 -2l-1 -4l0 -2l-1 -2l3 -2l3 0l1 -1l3 -1l5 -1l4 0l4 -1l3 0l3 0l0 2l0 3l0 3l-2 2l0 2l2 2l2 2l1 6l1 3l0 4l0 3l0 2l-1 2l2 2l1 3l3 1l1 2zM277 283l1 -2l0 -2l-1 2l-2 -2l0 -3l2 -3l1 -2l1 -2l2 -1l3 1l1 2l2 0l2 1l2 3l-1 2l-3 4l-3 1l-2 3l0 2l-2 1l-1 -1l-2 -1l0 -2zM597 177l-1 1l0 2l-1 2l-2 0l-1 -2l-2 -5l1 4l2 3l2 5l1 2l1 2l2 4l0 2l3 3l-11 1l-10 0l-12 0l0 -12l0 -12l0 -2l0 -2l1 -3l4 0l2 1l3 1l3 -1l2 -1l2 0l2 0l1 2l3 0l2 0l1 -1l2 6zM618 231l-2 -2l-2 -2l-3 -2l-2 -1l-2 1l-2 -1l-1 2l-3 -1l1 -6l0 -2l3 -1l2 -2l1 4l1 3l2 1l3 3l2 2l1 2l3 2l-2 0zM475 136l0 -2l-1 -1l4 -3l3 1l4 0l3 1l2 -1l5 0l1 2l5 1l4 1l3 0l0 1l-2 3l-4 0l-2 3l-1 3l1 2l-1 1l-1 2l-2 1l-2 2l-3 0l-3 0l-2 1l-1 2l-2 -2l-1 -2l-3 0l1 -2l0 -2l0 -2l-1 -2l1 -2l1 -3l1 -1l-1 -2l-2 1l-2 -2l-2 1zM568 85l0 -2l-3 -1l0 -2l3 -1l4 0l3 1l3 -1l-2 3l1 3l-1 1l-2 0l-3 -1l-3 0zM605 224l2 1l2 -1l2 1l3 1l2 3l1 1l0 3l-1 1l0 2l2 0l1 4l1 1l1 1l9 4l3 0l-8 10l-4 0l-2 2l-3 1l-3 -1l-2 2l-1 1l-2 0l-2 -1l-4 -2l-3 -1l-1 -3l-2 -3l-1 -1l-2 -3l-1 -2l2 -1l0 -3l1 -3l1 -1l2 -4l2 -2l1 -3l0 -3l3 1l1 -2zM579 48l0 3l4 2l-2 2l3 4l-2 3l3 2l-2 2l5 2l-2 2l-2 2l-6 4l-5 0l-5 2l-4 0l-2 -2l-3 -1l1 -3l-2 -3l2 -2l2 -2l7 -3l2 -1l-5 -3l-1 -1l0 -5l-4 -2l-4 -2l2 -1l3 2l4 0l3 1l2 -2l2 -2l4 -1l4 1l-2 2zM995 328l1 3l-2 0l-2 -1l2 -2l1 0zM998 327l-2 0l1 -2l3 -1l-2 3zM330 440l3 -2l3 1l1 -1l3 1l-5 2l-1 -1l-3 2l-1 -2zM527 136l-1 2l-2 -3l2 -2l1 3zM510 109l2 1l4 2l2 1l4 0l-1 3l0 2l-2 0l-2 3l1 1l1 1l1 2l-1 4l2 2l-3 1l-5 0l-4 1l-1 2l-3 0l-3 -2l-6 0l-1 -2l1 -1l1 -7l-3 -3l-2 -2l-4 -1l-1 -3l4 0l5 1l-1 -4l2 1l7 -2l1 -3l2 -1l2 2l1 1zM531 285l-3 -3l-2 -3l-2 -3l1 -2l1 -3l0 -2l5 0l0 -4l3 0l2 0l1 3l2 0l-1 4l2 2l0 2l0 3l-1 1l-3 0l-1 -2l-2 2l0 3l-2 2zM484 95l-1 3l-2 -1l-1 -2l-1 -1l2 -1l3 2zM492 82l-3 4l3 -1l3 0l-1 3l-3 3l3 0l3 4l2 1l2 3l0 2l4 0l-1 2l-1 1l1 2l-2 2l-4 0l-5 1l-3 0l-3 0l-2 1l-1 0l4 -4l3 0l-5 -1l-1 -1l3 -1l-1 -2l0 -2l4 0l1 -2l-2 -2l-3 0l0 -3l-3 1l0 -3l-1 -2l1 -3l2 -3l2 0l4 0zM615 138l0 -4l-1 -1l-3 -2l3 1l4 0l4 2l2 0l2 0l1 2l2 1l1 2l-2 0l-2 -1l-5 1l-3 -2l-3 1zM503 253l-4 2l-2 1l-2 1l-3 -1l-1 -4l1 -4l1 -3l-1 -4l0 -3l5 -2l2 0l1 1l1 2l0 2l0 3l0 4l1 4zM477 247l-2 1l-1 0l-1 -4l-2 1l-1 -2l0 -2l-3 -1l-2 0l0 2l-2 1l-1 -2l-1 -1l-1 -1l-1 -2l0 -2l2 -1l1 -1l1 -2l2 1l3 0l1 1l2 0l2 0l1 -1l2 2l1 1l-1 2l2 2l-1 1l1 4l-1 1l0 2zM453 230l4 -2l1 -1l2 1l-2 0l-2 1l-3 1zM458 236l-2 -1l-1 -1l-1 -1l1 -2l7 0l0 3l-2 1l-2 1zM526 269l1 -4l4 0l0 4l-4 0zM566 156l1 2l3 -1l2 1l1 1l-4 0l-4 -1zM574 137l-1 3l-2 0l-5 0l2 2l-3 1l-2 -2l0 3l2 1l0 2l2 1l-3 1l1 2l-2 0l1 3l-4 -1l-1 -3l0 -2l-1 -1l-2 -2l1 -3l1 -1l2 -1l3 -1l3 -1l2 -1l2 2l3 -1l1 -1zM370 4l9 -1l10 0l4 -2l10 0l22 1l17 2l-5 1l-11 1l-15 0l12 0l8 1l5 -1l3 1l-3 2l7 -1l13 -1l9 0l1 2l-11 2l-2 1l-9 0l7 1l-3 2l-3 2l0 4l4 2l-5 0l-4 1l5 2l1 2l-3 1l3 2l-6 1l3 1l-1 1l-4 1l-3 0l3 2l-5 0l-2 1l4 1l4 2l1 2l-5 1l-3 -1l-3 -2l1 2l-3 2l7 0l4 0l-8 3l-7 2l-8 1l-3 0l-3 2l-4 3l-6 2l-2 1l-4 0l-4 1l-2 2l0 2l-1 2l-5 3l1 3l-1 2l-1 3l-4 1l-5 -3l-5 0l-3 -2l-2 -3l-4 -4l-2 -2l0 -3l-4 -3l1 -2l-2 -2l3 -3l4 -2l1 -1l1 -2l-3 1l-4 1l-4 -1l0 -3l1 -1l3 0l5 1l-5 -3l-2 -1l-3 1l-2 -1l3 -3l-2 -1l-2 -2l-3 -4l-4 -1l-7 -3l-6 -1l-8 0l-6 1l-4 -1l-4 -2l7 -1l6 -1l-12 0l-7 -2l11 -3l10 -1l2 -1l-8 -1l2 -2l10 -2l4 0l-1 -2l7 -1l8 0l9 0l3 1l7 -2l7 1l4 1l5 1l-6 -2zM250 228l-3 -1l-3 -2l0 -2l1 -3l4 0l-1 -2l-2 -2l1 -2l3 0l2 0l0 3l0 4l2 0l-2 2l0 2l-2 2zM354 264l-1 1l-2 0l-1 0l-1 -2l1 -3l-1 -2l0 -2l1 -3l3 2l3 2l-1 5l-1 2zM334 245l2 1l2 2l1 2l1 2l1 1l0 3l-2 1l0 2l1 2l1 2l2 3l-2 0l-2 1l-3 1l-2 -2l-1 -3l1 -3l0 -2l-1 -2l-2 -1l-2 -2l1 -3l2 0l0 -2l2 -3zM257 230l-1 -1l-1 -2l-2 -1l-1 -1l0 -2l2 -1l1 -1l2 0l2 0l2 0l2 0l3 0l1 1l2 2l-2 0l-2 1l-2 1l-1 1l-2 1l-1 1l-2 1zM552 123l2 3l-1 1l-3 -1l-3 0l-2 0l-1 1l1 1l2 3l2 2l3 1l-3 -1l-2 -1l-3 -1l-2 -2l-1 -2l-1 -1l-1 1l-1 -2l2 0l3 0l1 -1l2 -3l3 2l2 1zM297 208l4 0l0 2l-1 2l1 2l-2 -1l-3 0l-3 0l3 -1l2 0l0 -2l-2 -2zM545 120l1 -2l1 -2l2 1l3 0l1 -1l3 0l2 -1l3 1l2 0l-2 2l-1 2l-2 2l-2 1l-4 0l-3 0l-2 -1l-2 -2zM835 305l-5 -2l3 -1l2 1l0 2zM846 305l-3 1l1 -4l3 -1l-1 4zM828 298l2 1l1 1l-3 1l-2 0l-1 -1l3 -2zM841 298l0 2l-4 1l-4 0l2 -2l2 1l2 0l2 -2zM802 294l5 0l6 1l1 2l4 0l3 2l-3 1l-3 -1l-2 0l-3 0l-3 -1l-3 -1l-2 0l-6 -1l-3 -2l2 -3l3 0l2 2l2 1zM874 292l-1 2l0 -2l1 -2l0 2zM862 282l1 3l-2 -2l-2 0l-4 0l1 -2l3 0l3 1zM873 276l0 5l3 2l3 -3l3 -2l2 0l3 1l2 1l3 1l0 10l0 11l-3 -3l-3 -1l-4 1l1 -2l2 -1l-1 -4l-1 -2l-5 -3l-3 0l-4 -3l-1 1l-1 -1l-2 -3l3 -1l2 0l-5 -1l-1 -2l-2 0l-1 -2l3 -1l2 -1l4 2zM848 268l-2 3l-2 0l-3 0l-5 0l-2 0l-1 3l3 3l1 -2l6 -1l-2 1l-1 2l-2 1l2 4l2 5l0 2l-1 1l-1 -1l1 -2l-3 1l0 -2l-2 -2l0 -3l-2 1l0 3l1 5l-2 0l-1 0l0 -3l0 -4l-2 -2l1 -2l0 -3l2 -4l3 -4l2 1l3 0l4 0l2 -2zM857 268l0 3l-2 2l2 2l-2 -2l-1 -4l0 -3l1 -1l2 2zM827 266l4 3l-4 1l-1 2l0 3l-2 2l0 3l-1 5l-4 0l-1 -2l-2 0l-1 -1l-4 1l-1 -1l-4 0l0 -5l-2 -1l-1 -2l0 -3l0 -3l2 -2l0 2l2 2l2 -1l2 0l1 -1l4 0l2 -1l2 -4l1 -1l1 -4l3 0l2 1l-1 3l2 3zM794 291l-3 0l-2 -3l-4 -2l-1 -2l-2 -3l-2 -2l-2 -5l-2 -2l-1 -3l-1 -3l-3 -2l-1 -3l-2 -1l-3 -4l1 -2l5 1l2 3l2 2l2 2l3 3l2 0l3 3l1 2l2 2l-1 2l2 2l1 2l1 2l2 0l2 2l-1 4l0 5zM716 157l3 4l0 3l1 1l-2 1l1 4l2 2l4 2l-1 2l-2 3l3 1l3 2l3 1l4 1l2 2l2 0l3 1l3 0l0 -4l1 -2l1 3l2 2l2 -1l2 0l3 0l0 -2l-1 -1l2 0l2 -3l4 -2l2 1l2 -1l1 2l-1 1l3 1l0 1l0 2l-2 0l-4 2l-1 5l-2 4l-2 -1l0 3l0 3l-2 1l-1 -5l-1 2l-2 -2l1 -2l3 -3l-2 0l-3 0l-2 -1l0 -2l-4 -2l-1 3l2 1l-2 2l1 2l0 2l1 2l0 3l-2 1l-3 0l0 3l-2 2l-4 2l-3 4l-2 2l-3 2l-1 2l-3 1l-2 3l1 4l0 3l-1 3l0 6l-3 2l-2 2l0 2l-2 1l-2 -3l-2 -4l-1 -4l-1 -1l-1 -3l-1 -4l0 -2l-3 -5l-1 -6l-1 -4l0 -4l0 -3l-4 2l-2 -1l-4 -3l1 -2l0 -1l-4 -3l2 -2l6 0l0 -3l-2 -1l0 -3l-2 -1l3 -4l3 1l3 -4l2 -3l3 -3l0 -3l2 -1l-2 -2l-1 -2l-1 -3l1 -1l4 0l4 0l2 -3zM483 98l0 2l-2 3l-5 2l-4 -1l3 -3l-2 -3l4 -3l2 -1l1 1l-1 2l4 1zM650 152l2 -1l2 -2l3 0l2 0l3 2l3 0l3 3l2 0l0 3l-1 4l-1 2l0 2l1 3l0 2l2 0l1 3l-3 2l1 2l2 2l2 2l0 2l2 2l-4 2l-1 4l-5 -1l-3 -1l-4 0l-1 -4l-3 0l-3 1l-3 -1l-3 -2l-3 -1l-2 -3l-2 -5l-1 1l-2 -1l-1 1l-2 -2l-1 -1l1 -3l-2 -2l-3 -2l-2 -3l1 -2l1 -2l0 -1l-2 -1l-2 -4l-1 -3l0 -5l1 -1l2 3l2 1l4 -3l2 1l-1 1l2 2l2 2l2 1l2 2l4 0l5 -1zM626 156l2 1l0 1l-1 2l-1 2l2 3l3 2l2 2l-1 3l1 1l2 2l-4 0l-2 3l-5 0l-8 -7l-4 -2l-3 -1l-1 -4l6 -3l1 -4l0 -3l1 0l2 -2l4 -1l2 1l2 4zM460 57l-1 2l3 2l-3 3l-8 2l-3 0l-3 0l-8 -1l3 -2l-7 -1l5 -1l-6 -1l2 -3l5 0l4 2l4 -2l4 1l4 -1l5 0zM599 166l-1 1l-1 2l1 1l-1 7l-2 -6l2 -3l0 -2l2 -1zM543 148l-1 3l0 2l-2 -1l-5 -2l0 -1l3 0l3 0l2 -1zM526 139l1 2l0 4l-3 1l-1 -5l0 -2l3 0zM534 121l4 0l1 3l-2 0l-3 1l0 3l1 1l3 2l1 3l3 2l2 0l3 3l2 1l2 1l-2 1l-2 -1l-1 2l2 1l-1 2l-2 3l-1 -2l0 -3l-1 -2l-2 -1l-2 -1l-1 -1l-2 -1l-2 -1l-3 -2l-2 -2l-1 -3l-3 -2l-3 2l-1 -1l-2 -3l0 -2l3 0l1 -1l2 0l3 -1l1 -2l2 1l3 -2zM285 212l1 1l2 0l-2 1l-2 0l-2 -1l2 -1zM599 167l3 0l6 -3l1 4l-6 2l3 3l-2 2l-2 0l-2 3l-3 -1l1 -6l1 -2zM874 161l-1 4l-1 -1l-2 0l-1 2l-1 -1l1 -3l3 -1l2 0zM892 152l-1 2l0 2l-1 2l-4 2l-5 0l-4 4l-2 -2l0 -2l-5 1l-3 1l-3 0l3 3l-2 5l-2 2l-1 -2l0 -3l-1 -1l-2 -2l3 -1l2 -2l2 -1l2 -3l6 -1l3 1l3 -6l2 2l4 -3l1 -2l2 -4l0 -3l1 -2l3 -1l1 5l0 2l-2 3l0 4zM900 129l2 1l2 -2l0 4l-4 1l-2 3l-5 -2l-1 3l-3 0l-1 -3l2 -2l3 0l1 -5l0 -2l4 3l2 1zM697 135l-1 1l-4 2l-1 2l-2 -1l-4 0l0 -3l-1 -3l-4 -3l-4 1l-4 0l-2 -3l-3 -1l-4 -2l-8 1l0 12l-3 -2l-2 -1l-3 1l-1 1l0 -2l-3 -3l-2 -3l-1 0l2 -1l1 -2l2 -1l2 0l1 -3l-1 -2l-2 0l-3 0l-3 1l-3 1l-1 -2l-2 -3l-2 1l-2 -3l2 -2l1 -4l3 2l0 -3l6 -3l4 0l6 2l4 1l3 -1l4 0l4 1l4 0l1 -2l-4 -2l2 -2l2 -2l-2 -2l2 -1l10 -1l1 -1l7 -1l3 -1l5 0l1 4l3 -1l3 1l3 2l7 -3l-1 1l3 2l6 8l2 -1l4 2l4 -1l1 0l1 2l2 1l2 1l3 0l2 2l-2 2l-3 0l0 3l-1 2l-6 -1l-2 6l-1 0l-6 2l3 5l-2 1l0 2l-2 -1l-1 -1l-4 0l-5 0l-5 -1l-1 1l-1 1l-4 -1l-2 1l-1 1zM614 275l2 3l-2 1l-1 1l-2 3l0 1l-1 2l-1 1l-4 -3l0 -2l-10 -6l-1 -4l1 -2l1 -2l1 -2l-1 -4l-2 -4l2 -2l2 -2l1 3l1 1l6 2l2 1l2 0l1 -1l2 -2l1 1l0 4l0 12zM697 135l1 -1l2 -1l4 1l1 -1l1 -1l4 1l6 0l4 0l1 1l2 1l-5 2l-1 2l-3 0l-1 2l-3 0l-2 0l-3 2l-6 2l-3 -1l-3 0l0 -2l3 1l1 -1l2 0l4 -2l-3 -2l-2 1l-2 -1l2 -2zM787 238l-1 -2l-1 -3l-1 -4l2 -3l4 -1l2 1l3 1l1 -2l2 1l1 2l0 4l-5 3l1 2l-3 0l-2 1l-3 0zM857 147l2 4l1 2l0 4l-1 1l-3 1l-2 1l-3 1l0 -2l1 -2l-2 -4l2 0l-2 -3l3 -2l2 0l2 -1zM558 136l-2 -1l1 -2l1 -1l1 1l1 1l-1 1l-1 1zM633 175l1 1l0 4l-1 0l-1 -2l-3 0l2 -3l2 0zM792 226l1 -2l0 -2l-2 -3l0 -3l-2 -3l-2 0l-3 1l-3 1l0 -3l0 -3l-2 0l0 -2l-1 -1l3 -3l2 1l-1 -4l3 2l2 3l3 0l1 3l-2 1l3 3l2 3l2 3l2 3l1 2l-1 3l-2 -1l-1 2l-3 -1zM600 164l-2 1l1 -3l1 -2l2 1l-2 2l0 1zM479 258l-4 -2l-3 -2l-2 -2l-2 -2l1 -2l1 -2l2 -1l2 1l0 2l2 -1l1 3l-1 1l2 1l1 2l0 4zM541 198l-2 1l-1 -2l-5 -1l-1 -2l-2 -1l-2 -2l-2 -3l1 -2l0 -2l0 -2l0 -4l-1 -4l2 -1l0 -3l2 -1l2 -2l0 -2l3 1l4 0l3 2l2 2l2 1l4 1l3 2l1 -1l2 -1l-1 -3l1 -1l2 -2l2 0l4 0l1 2l1 0l3 1l0 2l0 4l0 2l0 12l0 12l0 6l-3 0l-11 -5l-11 -6l-3 2zM727 248l0 3l-1 1l-3 1l-1 -3l-1 -4l2 -6l2 2l1 2l1 4zM580 366l1 2l-2 2l-2 1l-2 -2l1 -2l2 -1l2 0zM563 96l-1 -2l-3 -1l-1 -2l4 -1l4 0l3 -1l2 1l3 2l-2 2l-1 2l-3 1l-3 0l-2 -1zM558 91l1 -3l1 -2l3 -1l2 2l2 0l1 -2l2 -1l4 2l2 0l1 1l1 3l-3 1l-1 1l-3 -2l-2 -1l-3 1l-4 0l-4 1zM486 156l1 2l3 -1l3 1l2 2l0 2l1 4l0 2l-3 0l-2 1l-1 3l-3 1l-2 2l-2 1l-3 0l-4 3l0 4l0 1l-3 1l-2 0l-3 0l-1 3l-2 4l-4 3l-1 5l-1 1l-6 2l1 -3l1 -1l1 -4l1 -2l2 -2l1 -4l2 -1l2 -3l1 -2l3 0l2 -2l1 -1l2 -3l0 -4l1 -3l0 -1l2 -3l3 -1l2 -1l2 -4l1 -2l2 0zM574 116l2 -1l2 1l3 1l1 2l1 2l-2 1l-1 1l-2 2l0 -3l-1 -3l-1 -2l-2 -1zM638 313l0 1l1 2l0 4l1 1l-1 3l0 -2l0 3l-2 3l0 2l-1 4l-1 5l-2 6l-1 4l-1 4l-2 1l-3 1l-1 -1l-3 -1l0 -2l-1 -3l-1 -2l0 -2l1 -3l1 -1l1 -3l1 -2l-1 -1l-1 -3l0 -2l1 -2l0 -2l3 -1l3 -1l1 -2l3 -2l0 -1l3 -3l1 -4l1 2zM230 188l-1 3l0 2l-1 5l1 3l0 2l1 2l2 3l1 2l1 1l3 1l1 1l2 -1l2 0l2 0l2 -1l2 -1l1 -2l0 -3l2 -2l3 -1l3 1l2 0l-2 3l0 2l0 2l-1 3l-1 -1l-2 2l-3 0l-3 0l-1 2l1 1l1 2l-3 1l-1 3l0 2l-3 -3l-2 -2l-2 0l-4 1l-3 0l-2 -1l-3 -2l-2 0l-3 -2l-2 -1l-3 -1l-3 -1l-1 -2l-3 -1l-1 -3l-1 -1l2 -2l-1 -3l-2 -3l-2 -3l-3 -2l-1 -2l-3 -2l0 -3l-1 0l-2 -2l0 -2l-3 -2l-2 -2l-1 -3l-1 -3l-2 -2l-3 -1l0 3l0 2l1 2l2 2l2 2l1 2l1 2l2 2l1 3l1 1l0 2l2 2l1 1l1 1l-1 2l-1 -2l-2 -2l-2 -1l-2 -1l0 -2l0 -2l-1 -1l-2 -2l-3 -1l-2 -2l3 -1l-2 -4l-2 -1l-1 -2l-1 -2l-1 -2l-1 -3l3 -1l3 0l4 2l7 3l5 0l2 0l5 -2l1 1l2 1l1 2l1 2l1 1l1 1l3 1l1 -2l3 0l2 1l1 2l1 2l2 2l0 2l1 2l2 1l2 0zM557 137l2 -2l3 0l2 1l0 2l-3 1l-3 1l-1 -2zM466 225l2 -3l2 1l2 -1l13 0l0 -2l-2 -15l-1 -14l4 0l10 7l9 7l1 2l1 1l2 2l3 0l0 8l-2 2l0 2l-2 0l-4 0l-1 2l-4 0l-2 0l-3 1l-2 2l-2 2l-2 0l0 2l-3 3l0 3l0 2l-2 0l-1 -1l-3 1l-2 -1l-1 -2l0 -2l-1 -2l-2 1l-2 0l-2 0l-1 -1l0 -2l-2 -3l0 -2zM777 207l-2 1l-2 0l-1 4l0 3l2 3l1 2l-1 3l-1 2l2 2l1 2l1 5l-2 3l-1 3l-1 -2l1 -3l-1 -2l1 -3l-1 -2l-1 -4l-1 -4l-1 -3l-2 2l-3 2l-3 -1l1 -4l-1 -3l-2 -4l-1 -1l-2 -3l-1 -2l1 -2l2 -1l0 -3l0 -3l2 1l2 -3l1 -4l4 -4l2 0l0 -2l0 -1l3 1l1 3l0 3l-3 3l0 4l3 -1l1 3l1 1l0 2l2 2l3 -1l-2 4l-2 2zM555 134l-1 1l-3 0l1 -3l1 -1l2 1l1 1l-1 1zM744 112l3 0l5 -3l4 -1l3 1l3 0l1 1l3 0l4 1l3 -2l-1 -2l3 -3l3 1l2 0l4 1l0 2l4 2l3 -1l3 0l3 0l3 2l1 1l3 0l3 1l3 -1l4 0l4 -3l1 1l2 1l3 0l-1 2l-2 3l1 2l4 0l2 -2l2 1l3 3l-3 0l-4 1l-2 1l-2 2l-4 1l-3 2l-3 -1l-3 2l1 1l-1 2l-2 2l-4 1l-4 0l-4 2l-3 1l-2 -1l-3 0l-4 -2l-3 0l-4 0l-5 0l-3 0l-2 -2l-1 -3l-2 -1l-3 -2l-4 0l-3 -1l-1 -1l1 -4l-2 -2l-4 -2l-3 -1l0 -3zM596 309l2 0l3 1l3 0l3 -1l3 -2l2 -1l0 4l1 3l0 5l0 2l-1 2l-1 2l-1 2l-3 2l-3 1l-3 4l-3 2l-2 4l2 2l0 2l1 4l0 2l-2 2l-2 2l-3 1l-2 1l1 2l-2 2l-1 -3l1 -5l-1 -2l-1 -5l3 -3l0 -3l1 -2l0 -3l0 -3l0 -4l-1 -1l-2 -1l-4 0l0 -4l8 -3l2 2l2 0l-1 3l1 3l1 2l1 -3l1 -5l-1 -2l-1 -1l-2 -4l1 -3zM466 225l-2 -2l-1 -3l-2 -1l-1 -1l-3 1l-3 1l1 -3l0 -4l0 -3l0 -3l-1 -2l-1 -1l11 -1l0 -5l0 -1l3 -1l0 -8l9 0l0 -5l10 8l-4 0l1 14l2 14l0 3l-12 0l-3 1l-2 -1l-1 2zM596 309l-1 3l1 4l2 1l1 2l0 5l-2 3l-1 -2l-1 -3l1 -1l-1 -2l-3 -2l-1 0l1 -3l1 -2l-1 -2l1 -3l-1 -4l-1 -1l3 1l1 2l1 4zM781 252l2 1l1 -1l2 2l1 2l0 3l0 2l1 2l2 4l-2 1l-3 -2l-3 -3l-2 -4l-1 -2l-1 -2l1 -2l-1 -2l3 1zM829 258l-2 1l-2 -1l-3 0l-1 4l-1 1l-2 4l-2 1l-3 -1l-2 2l-2 0l-2 1l-2 -2l0 -2l2 1l2 -1l0 -3l5 -1l2 -3l1 -2l1 2l2 -1l1 -2l2 -4l1 -2l3 1l2 3l2 1l-2 1l0 2zM545 365l-2 -3l-1 -2l0 -3l-1 -3l-1 -5l0 -3l0 -2l-1 -2l-2 -2l-1 -4l-1 -2l-2 -3l0 -3l3 -1l3 2l12 -1l2 2l6 0l5 -1l3 -1l3 1l-2 1l-3 1l-1 -1l-4 1l-2 0l0 12l-3 0l0 9l0 12l-2 2l-3 0l-2 -2l-3 1zM960 340l3 2l1 2l-2 0l-2 -2l-2 -1l-2 -3l2 0l2 1zM506 233l0 -2l-3 -1l-2 -3l0 -3l3 -2l4 0l2 0l0 -2l2 -2l0 -8l4 -1l8 -7l9 -6l5 1l1 2l2 -1l1 5l1 2l1 1l-1 8l-1 4l-3 3l-1 5l1 1l0 2l1 1l-1 2l-2 -4l-3 2l-2 -1l-2 0l-4 1l-4 -1l-2 1l-2 -2l-3 -1l-3 1l-1 2l-1 1l0 3l-2 -2l-2 1zM524 257l-3 1l-2 0l-3 0l-1 -2l-1 -2l-2 -2l-2 0l-3 0l1 -5l0 -2l0 -2l2 -3l1 -3l-1 -2l0 -4l1 -1l0 -2l4 -1l3 1l1 2l3 -1l3 2l3 -2l3 0l3 1l2 -2l3 4l1 1l0 2l-2 2l-1 2l0 2l-2 3l-1 1l0 2l-1 2l-2 2l-2 -2l-3 2l-2 3l0 3zM262 236l-2 -2l-2 -2l-2 -2l2 0l1 -2l2 -1l2 -1l1 -2l2 0l2 0l1 2l-1 2l0 2l0 2l0 2l-1 2l-1 1l-1 -1l-3 0zM517 99l2 0l0 4l-2 1l0 4l-1 -1l-2 -2l-3 1l-2 0l2 -1l2 -5l4 -1zM578 42l9 2l-4 1l3 2l-4 1l-3 0l2 -2l-4 -1l-4 1l-2 2l-2 2l-3 -1l-4 0l-3 -2l-2 1l-2 3l-5 -1l-1 2l-2 0l-2 2l-3 4l-4 4l1 1l-1 2l-3 0l-2 3l0 4l2 2l-1 3l-2 3l-1 1l-2 -2l-6 4l-3 1l-4 -2l-1 -3l-1 -8l2 -2l8 -2l5 -4l5 -4l7 -7l5 -2l7 -4l6 -1l5 0l4 -3l5 0l5 0zM569 20l-7 1l-4 -1l1 0l-1 -1l6 -1l1 1l4 1zM551 14l9 2l-7 2l-2 2l-2 1l-1 2l-4 0l-6 -2l3 -1l-4 -1l-6 -2l-2 -3l8 -1l1 1l4 0l1 -1l4 0l4 1zM571 12l5 1l-4 2l-8 0l-8 -1l-5 -1l-3 -1l9 -1l4 1l3 -1l7 1zM745 182l0 3l-3 2l-3 -1l-2 0l-2 -2l-4 -1l-3 -1l-3 -2l-3 -1l2 -3l1 -2l4 1l2 2l2 0l1 2l2 0l2 2l4 0l3 1zM981 405l2 0l1 1l-1 3l-2 2l-1 2l1 1l-2 0l-3 1l0 3l-2 3l-2 1l-2 1l-2 0l-2 -1l-3 0l1 -4l4 -3l1 -1l2 -1l3 -1l1 -2l2 -3l1 -2l2 -2zM985 389l2 4l0 -3l1 1l1 3l2 1l2 0l1 -1l1 3l-1 2l-2 0l0 2l-2 3l-1 2l-2 1l-2 -1l2 -3l-1 -2l-3 -1l2 -2l0 -3l0 -2l-1 -2l-1 -2l-2 -3l-1 -2l2 2l2 0l1 3zM664 204l-2 2l-1 1l-1 1l1 2l-4 2l-1 2l-2 1l-2 2l-3 1l-2 -2l-3 -5l9 -4l2 -6l-2 -2l1 -3l2 -2l-1 -3l3 3l1 1l2 0l2 1l1 2l2 1l-1 3l-1 2zM709 152l2 1l1 3l4 1l-2 3l-4 0l-4 0l-1 1l1 3l1 2l2 2l-2 1l0 3l-3 3l-2 3l-3 4l-3 -1l-3 4l2 1l0 3l2 1l0 3l-6 0l-2 2l-2 0l0 -3l-3 -2l-5 0l-4 0l-4 1l1 -4l4 -2l-2 -2l0 -2l-2 -2l-2 -2l-1 -2l5 2l3 0l1 0l3 0l3 -2l0 -2l2 -2l2 0l2 -2l3 0l-1 -2l2 -2l1 -1l-1 -2l3 0l1 -2l1 -2l-1 -3l2 -1l3 -1l3 0l1 -1zM284 249l-2 -3l0 -2l-2 -1l-2 1l-1 1l1 3l-1 1l-2 -2l-2 -1l-2 -1l-1 -1l0 -3l2 1l2 2l2 -1l2 -1l2 -1l3 1l2 2l0 2l-1 1zM307 329l-1 2l-1 1l-3 -2l-6 -5l-5 -3l-2 -2l-1 -3l-2 -5l-3 -6l-3 -7l-1 -1l-1 -3l-2 -2l-2 -1l1 -1l-1 -4l1 -2l2 -2l-1 2l2 1l2 2l2 -1l0 -2l2 -3l3 -1l3 -4l1 -2l0 -2l2 1l1 1l1 1l2 4l2 0l2 -1l2 0l2 2l-1 3l2 2l-3 0l-2 1l-3 2l-1 3l0 2l-2 1l-1 1l2 3l1 2l1 2l1 2l3 0l2 -2l0 5l3 0l2 5l0 3l-1 3l-1 2l0 2l1 3l-1 3zM851 245l0 2l0 5l-1 -4l-2 2l1 3l-1 1l-3 -2l-1 -2l1 -2l-2 -1l-1 1l-3 2l1 -4l2 -1l1 -1l1 1l2 0l3 -2l-1 -3l3 2l0 3zM844 239l-1 1l0 2l-3 -1l1 -2l1 -2l1 2l2 -3l-1 3zM829 242l-4 3l2 -2l2 -2l2 -3l1 -3l0 3l-1 2l-2 2zM839 234l1 1l2 1l-1 1l-2 1l0 -3zM849 233l0 3l-2 -1l1 4l-1 0l0 -2l-2 -2l2 -1l-2 -3l3 1zM838 230l-1 3l-1 -2l-2 -3l3 1l1 1zM837 212l2 1l1 4l0 2l-2 2l0 2l0 3l3 0l3 1l0 2l1 3l-3 -2l-1 -2l-2 -1l-3 1l-1 -1l1 -2l-2 -1l-1 -5l1 1l0 -5l1 -3zM933 294l-2 -1l-1 -2l-1 -2l2 1l1 2l1 1zM922 290l-2 1l-1 1l-2 1l-3 -1l-2 -1l3 -1l2 -2l0 2l3 -1l1 -1l0 -2l2 0l-1 4zM909 296l2 2l2 4l2 1l2 0l2 2l-2 2l-3 -2l-3 0l-2 -2l-2 -2l-1 -3l-4 -1l-2 1l-2 1l0 2l-2 1l-1 0l-3 0l0 -11l0 -10l4 2l6 2l2 1l1 2l1 2l4 2l1 2l-3 0l1 2zM925 287l-1 -1l-2 -3l-1 -1l-2 -1l2 0l2 2l1 1l1 1l0 2zM542 107l-1 -3l-1 -2l-1 -2l0 -2l2 -1l4 -1l4 -2l3 1l3 1l3 0l5 0l2 1l1 3l-2 2l1 2l2 4l-2 1l-2 3l0 1l-3 -1l-2 0l-3 1l-1 -1l-3 -2l-2 0l-2 -1l-2 0l-2 -1l-1 -1zM316 212l2 1l-3 1l-2 -1l3 -1zM863 135l-2 1l-1 4l-1 0l-2 2l-2 0l-1 1l0 2l3 2l-2 1l-2 0l-1 2l-3 -1l-1 1l-2 -1l1 -2l1 -2l-2 -1l-1 -1l2 -2l4 -2l1 -2l2 1l2 0l0 -2l4 -1l1 -2l2 2zM475 136l2 -1l1 2l2 -1l2 2l-1 1l0 2l-1 2l0 3l0 2l0 2l-1 1l-1 2l-3 0l1 -3l-1 -2l-1 -1l0 -2l1 -2l1 -3l-1 -2zM326 344l1 -4l1 -4l5 -1l3 0l2 1l1 3l0 5l3 0l3 1l1 3l1 2l2 0l0 4l-1 1l0 3l-3 3l-2 0l-3 0l-3 -1l3 -5l-3 -3l-4 -2l-2 -1l-5 -5zM641 192l0 -2l1 -2l1 1l0 3l-2 0zM563 117l3 0l3 0l3 0l2 -1l2 1l1 2l1 1l0 3l2 2l2 0l-1 2l-2 4l-3 -2l-4 1l-1 1l-4 -1l-2 0l-2 -1l-1 -2l-2 0l-2 -2l-2 -2l2 -1l2 -2l1 -2l2 -1zM899 108l3 5l-4 -1l-2 5l3 3l0 3l-2 -2l-2 2l-1 -3l0 -3l0 -3l1 -3l0 -4l-2 -3l1 -5l2 -1l-1 -2l2 2l1 3l0 3l1 4zM563 96l-5 0l-3 0l0 -2l4 -1l3 1l1 1zM14 56l2 1l-1 -2l8 0l5 3l-3 2l-4 0l0 3l-4 1l-2 -1l-4 -1l0 -2l-3 0l-3 0l-2 -1l-3 0l2 1l-2 2l0 -13l7 2l7 3l0 2zM1000 43l-3 0l3 -3l0 3zM4 42l-4 1l0 -3l3 0l4 1l-3 1zM899 35l-4 0l-6 0l2 -2l4 0l4 1zM919 29l-4 1l-4 0l-5 -1l6 -1l7 1zM903 27l-2 3l-10 0l-5 0l-6 -2l2 -2l4 -1l7 1l10 1zM660 43l-11 0l-1 -2l-5 0l0 -2l3 -1l5 -4l-2 -1l6 -3l0 -1l6 -2l9 -2l9 -1l5 -1l5 0l2 1l-2 1l-9 2l-9 1l-9 3l-4 4l-4 3l1 2l5 3zM797 23l1 1l2 0l9 0l6 1l2 1l-1 2l-3 1l-7 2l-2 1l3 0l4 1l3 -1l1 3l2 -1l4 -1l9 1l1 1l11 1l0 -3l6 1l5 0l4 2l1 2l-1 1l3 2l5 2l2 -4l5 2l5 -1l5 1l2 -1l5 1l-2 -3l3 -2l25 2l3 2l7 3l11 -1l6 1l2 1l0 2l3 1l4 0l5 -1l5 1l5 0l5 3l3 -1l-2 -3l1 -1l9 1l6 0l8 1l4 2l0 13l-4 1l-3 0l2 2l2 2l1 1l0 2l-5 0l-8 2l-3 0l-4 3l-4 2l-1 1l-4 -2l-7 2l-1 -1l-3 2l-4 -1l-1 2l-3 3l3 2l0 5l-3 0l-1 3l1 1l-5 2l0 4l-5 1l0 3l-4 3l-2 -2l-1 -5l-1 -7l1 -5l2 -2l5 -2l5 -4l5 -3l5 -3l2 -5l-4 1l-1 2l-7 4l-2 -4l-8 1l-7 6l3 2l-7 0l-4 1l0 -3l-4 0l-3 1l-9 0l-9 1l-9 6l-11 8l5 0l1 2l3 1l2 -2l3 1l4 3l0 3l-2 3l-1 4l-1 5l-4 5l-1 2l-4 4l-4 4l-1 2l-4 1l-4 -1l-3 2l1 -5l-1 -3l2 -1l4 1l2 -3l1 -4l1 -1l1 -3l-5 1l-2 1l-4 0l-1 -3l-4 -2l-4 -1l-1 -3l-1 -2l-1 -2l-2 -3l-3 -1l-4 -1l-3 0l-4 1l-2 1l1 1l-1 3l-3 3l-4 4l-3 -1l-3 0l-2 -1l-1 -1l-4 3l-4 0l-3 1l-3 -1l-3 0l-1 -1l-3 -2l-3 0l-3 0l-3 1l-4 -2l0 -2l-4 -1l-2 0l-3 -1l-3 3l1 2l-3 2l-4 -1l-3 0l-1 -1l-3 0l-3 -1l-4 1l-5 3l-3 0l-3 -1l-3 0l-2 -1l-2 -1l-1 -2l-1 0l-4 1l-4 -2l-2 1l-6 -8l-3 -2l1 -1l-7 3l-3 0l-3 -3l-3 1l-1 -4l-5 0l-3 1l-7 1l-1 1l-10 1l-2 1l2 2l-2 1l-2 3l4 2l-1 2l-4 -1l-4 0l-4 0l-3 1l-4 -1l-6 -2l-4 0l-6 3l0 3l-3 -2l-2 3l-1 3l2 3l2 -1l2 3l1 2l-1 2l-3 0l-2 4l2 3l0 2l3 4l-2 1l-1 1l-2 -2l-3 -1l-1 -2l-2 0l-2 0l-4 -2l-4 0l-3 -1l-4 -2l-3 -2l-2 -1l2 -1l2 -3l-1 -1l4 -1l-3 0l2 -3l2 0l0 -3l1 -2l-4 -2l-3 -1l-2 0l-4 -1l-1 -2l-2 0l1 -2l-2 -1l-3 0l-2 0l-1 -2l2 -1l-2 -2l-1 -1l-2 -2l1 -3l-3 -1l-2 0l-3 -1l-1 -2l-1 -2l1 -1l-1 -3l2 -2l3 -2l-3 -2l6 -4l2 -2l2 -2l-5 -2l2 -2l-3 -2l2 -3l-3 -4l2 -2l-4 -2l0 -3l3 0l4 -1l3 -1l5 2l7 0l11 4l2 2l0 2l-3 1l-4 1l-13 -2l-2 0l5 3l0 4l4 1l2 1l-2 -3l2 -1l7 2l2 -1l-2 -2l7 -3l2 0l3 1l2 -2l-3 -2l2 -2l-2 -2l7 1l2 2l-3 0l2 3l4 -1l1 -2l6 -1l9 -3l2 0l-2 2l3 1l2 -2l5 0l4 -1l4 2l3 -2l-3 -2l1 -1l8 1l4 1l10 4l2 -2l-3 -2l-3 -1l1 -1l-2 -3l5 -4l2 -3l2 0l8 0l0 2l-2 3l1 1l1 2l0 5l3 2l-2 2l-5 4l3 1l1 -1l3 -1l1 -2l2 -1l-1 -2l1 -2l-3 -1l-1 -1l3 -4l-4 -2l5 -3l-1 -2l3 2l-1 3l3 1l-1 -3l4 -1l6 0l5 2l-2 -3l0 -3l4 -1l7 0l6 0l-2 -2l3 -2l3 0l6 -2l7 0l8 -2l3 1l6 -2l5 1l1 -2l2 -1l7 -2l5 1l-4 1l6 1zM792 18l-16 2l5 -5l3 0l2 0l7 2l-1 1zM642 11l-4 1l-2 0l-4 1l-3 -1l2 -1l-6 0l5 -1l4 0l2 1l3 -1l4 1zM778 17l-6 0l-8 -1l-5 -1l-2 -3l-4 0l7 -2l7 -1l5 2l6 3l0 3zM584 276l2 2l-1 2l-2 0l-1 2l-1 -2l0 -3l2 0l1 -1zM476 184l0 -1l0 5l-9 0l0 8l-3 1l0 1l0 5l-11 0l6 -1l1 -2l1 -5l4 -3l2 -4l1 -3l3 0l2 0l3 -1zM619 219l-1 -2l-2 -3l-1 -2l-1 -3l-2 -2l-3 -4l-1 -2l1 -2l-2 -4l-1 -1l-2 -1l-1 -1l0 -3l-2 -3l-2 -3l-1 -2l-1 -2l0 -2l3 1l1 -1l3 -2l2 -2l-3 -3l5 -2l4 1l4 2l8 7l5 0l3 0l1 2l1 0l2 2l1 1l2 3l0 2l1 2l1 2l2 0l0 2l1 4l9 1l2 2l-2 6l-9 4l-8 1l-2 1l-2 4l-2 -1l-4 0l-4 0l-1 -1l-1 2l-1 2zM594 241l0 -1l-2 -3l0 -2l0 -2l-3 0l1 3l-2 2l-1 2l-4 -1l-1 1l-1 1l-3 1l-3 -1l-1 0l-2 -2l-2 0l-1 1l-1 3l-2 1l-1 -1l0 -2l-1 -4l0 -2l-2 -3l-1 -1l1 -2l1 -3l0 -2l1 -3l2 1l0 -13l3 -2l0 -6l12 0l10 0l11 0l1 3l0 4l1 4l3 2l-2 2l-2 0l-1 3l-1 5l0 4l-1 3l-2 2l-1 2l-2 3l-1 3zM594 241l0 3l-2 1l0 2l3 2l1 2l2 3l-2 2l-2 2l-1 2l-4 1l-2 -1l-1 1l-3 -2l0 -2l-2 1l-2 0l-3 -3l-2 -2l-1 -2l-1 -1l-2 -2l-2 -3l-2 -1l2 -1l1 -3l1 -1l2 -1l2 3l1 0l2 0l3 1l2 -2l1 -1l3 2l2 -3l2 -2l0 -2l1 -1l1 2l0 2l2 2l0 2zM454 228l-2 -2l-1 -2l3 -2l0 -2l3 -1l1 -1l3 1l2 1l1 3l2 2l0 2l1 2l1 2l-2 1l-3 -1l-6 0l-3 1l-1 -2l3 0l2 -2l2 1l1 -2l-2 1l-2 -1l-3 1zM949 303l-2 -2l-1 -2l2 3l1 1zM944 299l-2 -1l-1 -1l-2 -1l2 1l2 1zM468 250l-3 -1l-1 -2l-1 -4l2 -1l0 -2l2 0l2 0l1 2l1 2l-1 2l-1 2l-1 2zM256 229l-2 0l-2 0l-2 -1l1 -2l2 0l1 1l2 0zM636 241l-1 2l-2 3l-3 0l-9 -4l-1 -1l-1 -1l-1 -2l2 -3l1 2l2 1l4 -1l3 0l2 -1l2 -1l2 2l0 3zM638 235l3 -2l1 1l0 2l-1 3l-1 3l-1 4l-2 4l-2 5l-2 3l-4 5l-2 2l-5 4l-2 2l-3 4l-1 2l-2 -2l0 -12l2 -4l3 -1l2 -2l4 0l8 -10l2 -3l1 -2l0 -4l1 -2zM558 125l2 1l2 2l1 1l0 2l1 1l-1 1l-1 2l-2 0l0 -2l-2 -1l-1 1l-2 -1l-1 0l0 -3l-1 -1l1 -1l-1 -2l1 -2l4 1zM341 253l4 0l2 0l3 0l-1 3l0 2l1 2l-1 3l0 2l-2 -1l-2 0l-1 2l-3 -3l0 -2l-2 -2l0 -2l2 -1l0 -3zM552 112l3 1l2 -1l3 0l3 1l-2 2l-3 0l-2 1l-3 0l-1 1l-2 0l-3 -1l1 -2l2 0l1 -2zM538 121l3 1l1 -1l2 0l2 0l-2 1l-1 2l-2 0l-3 1l0 -4zM562 59l-3 2l0 2l-4 3l-5 3l-2 4l2 3l2 1l-2 4l-3 1l-1 5l-2 3l-3 0l-2 3l-3 0l-1 -3l-2 -4l-2 -5l1 -1l2 -3l1 -3l-2 -2l0 -4l2 -3l3 0l1 -2l-1 -1l4 -4l3 -4l2 -2l2 0l1 -2l5 1l1 -3l5 2l4 2l0 5l1 1l-4 1zM547 86l-1 4l1 -4zM554 84l-2 1l-1 2l-1 -1l2 -2l2 0zM589 359l0 1l-4 -1l1 -3l1 -1l2 2zM608 164l-6 3l-3 -1l1 -2l0 -1l2 -2l-2 -1l0 -3l0 -1l2 -1l1 -2l3 0l1 0l3 0l3 -1l5 0l-2 2l-1 0l0 3l-1 4l-6 3zM540 230l-1 -1l0 -2l-1 -1l1 -5l3 -3l1 -4l1 -7l-1 -2l-1 -2l-1 -5l3 -2l11 6l11 7l0 13l-2 -1l-1 3l-1 2l0 1l-1 3l1 2l2 3l-2 2l-2 1l-2 3l-2 2l-3 0l-2 2l-1 2l-4 1l-4 0l0 -3l-2 -2l-1 -2l0 -1l2 0l0 -3l1 -2l-1 -2l-1 -3zM505 252l-2 1l-1 -3l0 -5l-1 -4l0 -2l-1 -2l2 -1l0 2l2 2l1 3l-1 7l1 2zM785 233l-3 -2l-2 0l0 -2l-2 0l0 3l-2 5l-1 3l1 2l3 3l0 3l2 2l1 0l2 2l-1 1l-2 1l-3 -3l-1 -1l-1 -2l-1 -2l-1 -1l-1 2l0 -2l0 -2l1 -3l1 -3l2 -3l-1 -3l-1 -4l-2 -2l0 -2l2 -3l-1 -2l-2 -3l-2 -3l3 -4l2 0l2 -1l1 -1l1 1l0 2l2 0l0 3l0 3l3 -2l2 1l3 -1l2 3l0 3l2 3l0 2l-1 2l-2 -1l-4 1l-2 3l1 4zM697 142l-1 1l-3 -1l0 2l3 0l3 1l6 -1l0 3l3 1l0 3l-3 0l-1 0l-2 1l-2 1l-2 -1l1 -3l-2 -2l-2 2l0 1l-3 2l-3 0l1 -3l-1 -3l-2 -1l1 -1l2 0l2 -2l1 -2l3 -1l0 2l1 1zM670 157l0 -3l-2 0l-3 -3l-3 0l-3 -2l-2 0l-3 0l-2 2l-2 1l-1 -3l1 -3l-2 -1l0 -2l-2 -1l1 -2l3 0l2 -1l-2 -1l-1 -2l-2 0l0 3l-1 -2l1 -1l3 -1l2 1l2 2l5 0l-1 -1l3 -1l2 -2l4 1l0 3l4 0l2 4l3 3l2 1l3 2l4 1l0 2l-2 -1l-3 2l-1 2l-1 1l-2 1l-1 1l-2 1l-3 -1zM847 301l3 -2l2 0l-2 3l-3 1zM329 237l1 0l1 2l-3 1l1 -3zM526 174l-1 -6l-2 -1l-2 -3l0 -2l2 -2l0 -3l0 -3l0 -2l3 -1l2 1l3 0l-2 2l1 2l0 3l-2 2l1 2l2 1l1 3l-2 1l-2 2l0 3l-2 1zM603 138l4 1l3 0l2 0l3 -1l3 -1l3 2l0 3l2 1l1 0l-1 1l0 4l1 4l-2 -1l-3 0l-5 1l-4 1l-3 0l-1 0l-3 0l-1 2l-2 1l-1 -1l1 -2l-4 0l-1 2l-5 0l-2 -2l-3 0l-3 2l-2 -2l-3 0l-2 -3l-2 -2l1 -2l-1 -2l3 -3l4 0l1 -2l6 0l3 -2l3 -1l5 0l5 2zM576 140l-3 2l-1 -1l2 -4l-1 0l2 -1l3 0l3 2l-4 1l-1 1zM838 193l-1 5l-2 3l-1 -3l0 -2l1 -3l2 -3l2 1l-1 2zM594 275l11 7l0 2l4 3l-1 4l0 2l2 1l-1 3l0 3l1 2l1 3l-1 2l-3 2l-3 1l-2 0l-4 -1l-2 0l-1 -4l-1 -1l-3 -2l-2 -1l-1 -1l-3 -1l-1 -4l-2 -2l0 -2l-1 -4l3 -2l1 -1l0 -2l0 -2l1 -2l-2 -2l5 -1l5 0zM589 275l-4 0l-2 2l-1 -3l1 -4l1 -1l1 -2l2 -2l-1 -4l1 -1l2 1l2 -1l3 -2l2 3l1 5l-1 2l-1 2l-1 2l0 3l-5 0zM588 103l2 0l4 0l2 1l-1 2l2 0l1 2l4 1l2 0l2 1l5 1l-1 3l1 2l-3 1l-2 1l-2 2l-2 1l-2 0l-3 1l0 2l2 1l2 0l-3 2l-4 1l-1 0l0 -2l-3 -1l3 -1l-5 -2l-3 -1l-1 2l-2 2l-2 0l0 -2l0 -1l3 0l-1 -2l-1 -2l-1 -2l-4 -1l-1 0l-2 1l-3 1l-2 0l-4 -1l-3 -1l2 -2l2 -4l2 -1l-2 -3l3 -1l2 0l3 0l3 1l2 0l3 0l3 1l1 -2l3 -1zM340 370l2 0l3 2l3 2l3 2l1 2l-1 2l1 2l-1 2l-4 1l-2 0l-4 -1l-3 -2l0 -2l0 -4l1 -3l1 -3zM68 210l-2 -2l1 -2l2 1l1 2l-1 1zM237 112l0 2l3 1l3 0l2 1l3 0l3 1l4 -1l2 1l3 1l2 1l2 1l1 1l1 1l2 1l3 2l0 3l1 3l-1 2l-1 2l-1 1l1 1l4 -2l3 0l4 -2l-1 -2l4 0l3 0l1 -1l3 -3l5 -1l5 0l2 -1l2 -2l1 -2l2 -3l2 1l2 1l0 4l2 2l-3 3l-3 1l-3 1l-1 2l-1 2l1 2l2 -1l-2 2l-4 0l-2 1l-3 1l4 -1l-3 1l-1 0l-1 3l-2 3l-2 -2l1 2l1 2l-1 1l-2 3l1 -3l-2 -1l0 -3l0 4l-2 -1l2 1l0 3l1 2l1 3l-2 2l-3 1l-2 2l-3 2l-3 3l-2 1l-1 2l0 3l0 2l1 3l1 2l2 5l0 2l-1 3l-2 0l-2 -2l-1 -2l-2 -3l0 -3l0 -2l-3 -3l-3 1l-2 -2l-2 0l-3 0l-3 0l-2 0l0 1l0 2l-2 1l-2 0l-3 -2l-2 0l-2 0l-4 1l-3 2l-2 1l-2 2l0 1l0 3l0 2l-3 0l-2 -1l-1 -2l0 -2l-2 -2l-1 -2l-1 -2l-2 -1l-3 0l-1 2l-3 -1l-1 -1l-1 -1l-1 -2l-1 -2l-2 -1l-1 -1l-5 0l-2 2l-5 0l-7 -3l-4 -1l-3 -1l-3 1l-1 -2l-2 -2l-1 -1l-3 -1l-2 0l-1 -3l-3 -3l-2 -5l-2 -1l-2 -3l0 -3l-2 -1l1 -3l0 -3l-1 -2l1 -3l0 -3l1 -3l-1 -5l-1 -2l0 -2l4 0l1 4l1 -4l-1 -3l8 0l8 0l3 0l8 0l8 0l9 0l8 0l9 0l10 0l6 0l1 -1zM75 87l-3 1l-1 -1l2 -2l3 0l1 1l-2 1zM40 78l-2 1l-1 -1l-2 -1l3 0l2 0zM23 65l2 1l1 0l3 1l2 0l-2 1l-2 -1l-4 0l0 -2zM69 42l2 1l6 0l4 1l3 0l6 1l5 0l2 0l4 0l4 1l3 0l0 12l0 19l3 0l3 1l2 1l2 2l3 -2l3 -1l1 2l2 1l3 2l1 2l3 4l5 2l0 2l-2 2l-1 -2l-3 -1l0 -2l-4 -3l-1 -3l-3 0l-5 0l-3 -1l-6 -4l-2 0l-5 -2l-4 1l-5 -2l-4 -1l-3 1l1 2l-5 1l-2 1l-3 0l-1 -1l1 -4l3 -1l-4 1l-2 3l-4 2l2 1l-2 3l-3 1l-3 1l-1 2l-4 1l-1 2l-3 1l-2 0l-3 1l-3 1l-2 1l-5 1l3 -2l3 -1l3 -2l3 0l1 -2l4 -2l3 -1l0 -3l2 -2l-3 1l-3 1l-2 -2l-1 0l-3 1l-2 -2l-1 -2l-4 0l-2 -1l-2 -1l-2 -3l1 -2l2 -2l1 -1l2 -1l2 1l2 -2l2 1l2 -1l-2 -3l2 -1l-4 1l-3 0l-4 0l-4 0l-1 -2l-4 -2l4 -1l6 -2l2 0l6 2l-2 -2l-4 -1l-2 -2l-2 -1l-4 -1l1 -2l5 0l4 -2l0 -1l3 -2l3 0l5 -2l3 1l4 -2l4 1zM685 151l0 -2l-4 -1l-3 -2l-2 -1l-3 -3l-1 -3l-4 0l-1 -4l-4 -1l-2 2l-3 1l1 1l-4 0l0 -12l8 -2l4 3l3 1l2 3l4 0l4 -1l4 3l-1 3l2 3l4 0l1 1l2 -2l4 -2l1 -1l-1 3l2 1l2 -1l3 2l-4 2l-2 0l-1 -1l0 -2l-3 1l-1 2l-2 2l-2 0l-1 1l2 1l1 3l-2 3l-2 -1zM302 234l-2 1l1 2l-1 3l1 3l2 -3l-1 -1l0 -2l3 -2l1 -2l1 2l2 0l1 2l3 1l3 0l2 1l2 0l1 -1l4 -1l3 0l-2 1l1 2l2 0l2 2l0 2l3 1l-2 2l1 2l-3 1l-1 3l2 2l0 2l-3 2l-2 0l-3 0l-3 0l1 3l0 2l3 0l-2 2l-1 2l-3 1l-2 1l-2 -2l-1 -3l-1 -2l1 -2l-1 -1l0 -2l0 -3l1 -3l-3 0l-2 0l-3 -2l-1 -1l-4 0l-1 -1l0 -2l-1 -2l-2 -2l1 -1l0 -3l1 -1l1 -1l1 -1l2 -1zM800 202l-4 3l-2 3l0 2l2 4l2 4l3 2l1 3l2 6l-1 5l-2 2l-3 3l-2 2l-4 3l-1 -2l1 -2l-2 -2l2 -1l3 0l-1 -2l5 -3l0 -4l-1 -2l1 -3l-1 -2l-2 -3l-2 -3l-2 -3l-3 -2l2 -2l-1 -3l-3 0l-2 -3l-1 -3l1 0l3 0l2 -1l3 -2l1 2l2 0l0 2l1 1l3 1zM648 218l-2 1l-1 3l-3 1l-4 1l-3 3l-2 0l-1 1l-2 1l-3 0l-1 1l-1 1l-2 0l-2 0l-1 -2l0 -2l-1 -3l-1 -1l1 -2l1 -3l1 -3l1 1l4 0l3 0l2 1l3 -4l2 -1l8 -1l3 5l1 2zM588 367l-2 2l-1 2l-2 2l-3 3l-2 2l-2 2l-3 1l-1 1l-2 0l-4 0l-2 0l-4 1l-3 1l-1 1l-3 -1l-2 -2l0 -2l-1 -2l1 -3l-2 -3l-2 -3l-2 -4l2 -2l1 2l3 1l4 -2l0 -12l3 4l-1 2l3 1l1 -2l2 -1l0 -1l2 -1l2 1l3 0l1 0l1 -3l2 -1l1 -3l3 -2l4 -2l2 0l3 0l1 5l1 2l-1 4l-2 0l-1 3l2 3l2 -2l2 0l0 2l-1 3l-1 1l-1 2zM591 302l1 1l1 3l-1 4l1 2l-1 2l-1 3l1 0l-8 3l0 2l-2 1l-2 1l-1 1l-2 3l-2 2l-2 0l-3 0l-1 -2l-5 1l-1 -2l-2 -3l0 -10l6 0l0 -2l-1 -2l0 -2l2 1l3 0l1 1l2 1l1 -1l1 1l2 1l1 1l1 2l2 0l0 -3l-2 -1l-1 -4l1 -4l-1 -1l1 -2l4 -1l3 1l2 1l2 1zM587 344l-3 0l-2 0l-2 -2l-2 0l-1 -2l-1 -2l-3 -3l-1 -2l-2 -3l3 0l2 0l2 -2l2 -3l1 -1l2 -1l2 -1l3 1l1 2l3 1l0 4l0 3l0 2l0 3l-1 3l-3 3z';
+let GEOV=null,GEOT=0;const flag=cc=>cc&&cc.length==2?String.fromCodePoint(...[...cc.toUpperCase()].map(c=>127397+c.charCodeAt(0))):'🌐';
+async function geoGet(force){if(!force&&GEOV&&Date.now()-GEOT<20000)return GEOV;try{GEOV=await api('api/geo',{});GEOT=Date.now()}catch(e){}return GEOV}
+const gloc=ip=>{if(!GEOV||!ip)return null;for(const u of GEOV.users)for(const c of u.conns)if(c.ip==ip)return c;return null};
+const glab=c=>!c?'':c.local?'local network':c.cdn?'☁️ Cloudflare (CDN, real place hidden)':c.cc?flag(c.cc)+' '+X(c.city||c.country)+(c.isp?' · '+X(c.isp):''):'locating…';
+function geoMap(){const G=GEOV;if(!G)return '<div class="card mb"><p class="note">Loading the map…</p></div>';
+const conns=G.users.flatMap(u=>u.conns.map(c=>Object.assign({u:u.name,share:!!u.share},c))),pl=conns.filter(c=>c.lat!=null&&!c.cdn);
+const by={};pl.forEach(c=>{const k=(c.city||c.country)+'|'+c.cc;(by[k]=by[k]||{c,us:new Set(),share:false}).us.add(c.u);if(c.share)by[k].share=true});
+const B=Object.values(by).map(b=>Object.assign(b,{x:(b.c.lon+180)/360*1000,y:(84-b.c.lat)/142*460,t:(b.c.city||b.c.country)+' · '+b.us.size}));
+let vx=0,vy=0,vw=1000,vh=460;if(B.length){const xs=B.map(b=>b.x),ys=B.map(b=>b.y);vw=Math.min(1000,Math.max(320,Math.max(...xs)-Math.min(...xs)+220));vh=vw*.46;
+vx=Math.max(0,Math.min(1000-vw,(Math.min(...xs)+Math.max(...xs))/2-vw/2));vy=Math.max(0,Math.min(460-vh,(Math.min(...ys)+Math.max(...ys))/2-vh/2))}
+const fs=vw/1000*(innerWidth<560?30:15),cw=fs*.58;B.sort((a,b)=>a.y-b.y);const placed=[];
+const pts=B.map(b=>{const w=b.t.length*cw;let ly=b.y-fs*.95;for(const p of placed)if(Math.abs(p.x-b.x)<(w+p.w)/2&&Math.abs(p.ly-ly)<fs*1.1)ly=b.y+fs*1.75;placed.push({x:b.x,ly,w});
+return `<g class="gd${b.share?' w':''}"><circle cx="${b.x.toFixed(1)}" cy="${b.y.toFixed(1)}" r="${(fs*.45).toFixed(1)}" style="stroke-width:${(fs*.13).toFixed(2)}"/><text x="${b.x.toFixed(1)}" y="${ly.toFixed(1)}" style="font-size:${fs.toFixed(1)}px;stroke-width:${(fs*.3).toFixed(1)}px">${X(b.t)}</text></g>`}).join('');
+const isp={};pl.forEach(c=>{if(c.isp)isp[c.isp]=(isp[c.isp]||0)+1});const top=Object.entries(isp).sort((a,b)=>b[1]-a[1])[0];
+const st=(k,v,cl)=>`<div><span>${k}</span><b${cl?` style="color:${cl}"`:''}>${v}</b></div>`;
+return `${G.alerts.map(a=>`<div class="banner e gal" role="alert">${I('warn',17)}<div><b>Sharing?</b> <b>${X(a.name)}</b> is connected from ${a.places.map(X).join(' and ')} at the same time (${a.km} km apart). <button class="btn sm dng" data-kick="${X(a.name)}">${I('kick',14)}Kick</button> <button class="btn sm" data-open="${X(a.name)}">Open user</button></div></div>`).join('')}
+<div class="card mb"><div class="ct"><div class="lab">${I('globe',15)}Where users connect from</div><span class="m">${G.pending?'locating new IPs…':'Live'}</span></div>
+<div class="gmap"><svg viewBox="${vx.toFixed(0)} ${vy.toFixed(0)} ${vw.toFixed(0)} ${vh.toFixed(0)}" role="img" aria-label="World map of online users"><path d="${WORLD}" class="gland"/>${pts}</svg></div>
+<div class="gst">${st('Countries',new Set(pl.map(c=>c.cc)).size)}${st('Cities',Object.keys(by).length)}${st('Top network',top?X(top[0]):'-')}${st('Sharing alerts',G.alerts.length,G.alerts.length?'var(--r)':'')}</div></div>`}
+function onl(){const L=D.online;if(!GEOV||Date.now()-GEOT>20000)geoGet().then(()=>{if(pg=='on')onl()});const tot=L.reduce((a,x)=>a+x.ssh+x.ips.length+(x.ov||[]).length+(x.hy||0)+(x.wg?1:0),0);
+$('#pg').innerHTML=geoMap()+`<div class="card mb"><div class="ct"><div class="lab">${I('wifi',15)}Online users</div><span class="m">${L.length} users · ${tot} connections</span></div>
 <p class="note">SSH shows active sessions. V2Ray and DNS users show while they use data (offline about 30 seconds after they stop). OpenVPN, UDP (Hysteria2) and WireGuard show connected devices ("via proxy" when OpenVPN uses the HTTP proxy). Kick disconnects the user and blocks their current Xray IPs for 1 minute. An IP shared with another user (common on mobile data) is never blocked.</p></div>
-${L.length?`<div class="ul">${L.map(x=>{const n=X(x.name),over=x.dev&&(x.ssh>x.dev||x.ips.length>x.dev||(x.ov||[]).length>x.dev||(x.hy||0)>x.dev);return `<div class="card"><div class="uh"><div class="av" style="background:hsl(${hue(x.name)} 55% 52%)">${n[0].toUpperCase()}</div><div style="min-width:0"><b>${n}</b><small class="m" style="display:block">Device limit ${x.dev||'Unlimited'}${over?' · <span class="bad">over limit</span>':''}</small></div><button class="btn sm dng" data-kick="${n}" style="margin-left:auto">${I('kick',14)}Kick</button></div>
-<div style="margin-top:10px">${HS(x.kind)?`<div class="kv"><span>SSH sessions</span><b>${x.ssh}</b></div>`:''}${(x.sips||[]).length?`<div class="kv"><span>SSH from</span><b>${x.sips.map(ip=>X(ip)).join(', ')}</b></div>`:''}${x.hy?`<div class="kv"><span>Hysteria2 devices</span><b>${x.hy}</b></div>`:''}${x.wg?`<div class="kv"><span>WireGuard from</span><b>${X(x.wg)}</b></div>`:''}${(x.ov||[]).map(o=>`<div class="kv"><span>OpenVPN ${X(o.ip=='127.0.0.1'?'via proxy':o.ip)}</span><b>for ${ago(o.since)}</b></div>`).join('')}</div>${x.ips.map(i=>`<div class="kv"><span>Xray ${X(i.ip)}</span><b>${i.ban?'<span class="bad">Blocked '+i.ban+'s</span>':i.ago+'s ago'+(i.shared?' · shared IP':'')}</b></div>`).join('')}<button class="btn sm" data-open="${n}" style="margin-top:10px">Details</button></div>`}).join('')}</div>`:'<div class="empty card">No one is connected right now.</div>'}`}
+${L.length?`<div class="ul">${L.map(x=>{const n=X(x.name),over=x.dev&&(x.ssh>x.dev||x.ips.length>x.dev||(x.ov||[]).length>x.dev||(x.hy||0)>x.dev);return `<div class="card"><div class="uh"><div class="av" style="background:hsl(${hue(x.name)} 55% 52%)">${n[0].toUpperCase()}</div><div style="min-width:0"><b>${n}</b><small class="m" style="display:block">Device limit ${x.dev||'Unlimited'}${over?' · <span class="bad">over limit</span>':''}${GEOV&&(GEOV.users.find(g=>g.name==x.name)||{}).share?' · <span class="bad">⚠️ far apart</span>':''}</small></div><button class="btn sm dng" data-kick="${n}" style="margin-left:auto">${I('kick',14)}Kick</button></div>
+<div style="margin-top:10px">${HS(x.kind)?`<div class="kv"><span>SSH sessions</span><b>${x.ssh}</b></div>`:''}${(x.sips||[]).map(ip=>`<div class="kv"><span>SSH ${X(ip)}<small class="gl">${glab(gloc(ip))}</small></span><b>connected</b></div>`).join('')}${x.hy?`<div class="kv"><span>Hysteria2 devices</span><b>${x.hy}</b></div>`:''}${x.wg?`<div class="kv"><span>WireGuard ${X(x.wg)}<small class="gl">${glab(gloc(x.wg))}</small></span><b>connected</b></div>`:''}${(x.ov||[]).map(o=>`<div class="kv"><span>OpenVPN ${X(o.ip=='127.0.0.1'?'via proxy':o.ip)}${o.ip=='127.0.0.1'?'':`<small class="gl">${glab(gloc(o.ip))}</small>`}</span><b>for ${ago(o.since)}</b></div>`).join('')}</div>${x.ips.map(i=>`<div class="kv"><span>Xray ${X(i.ip)}<small class="gl">${glab(gloc(i.ip))}</small></span><b>${i.ban?'<span class="bad">Blocked '+i.ban+'s</span>':i.ago+'s ago'+(i.shared?' · shared IP':'')}</b></div>`).join('')}<button class="btn sm" data-open="${n}" style="margin-top:10px">Details</button></div>`}).join('')}</div>`:'<div class="empty card">No one is connected right now.</div>'}`}
 function bulkm(){modal('Bulk actions: '+KN[UV.kind]+' users',[['action','Action','select','','days',[['days','Add days to expiry'],['dev','Set device limit'],['reset','Reset data usage to 0']]],['days','Days to add (for "Add days")','number','',1],['dev','Device limit (for "Set device limit", 2 recommended)','number','',2],['scope','Apply to','select','','active',[['active','Active users only'],['all','All users']]]],
 async d=>{d.kind=UV.kind;const KU=D.users.filter(u=>inK(u,UV.kind)),n=d.scope=='all'?KU.length:KU.filter(u=>['active','online'].includes(u.st)).length;if(!confirm((d.action=='days'?'Add '+d.days+' days to ':d.action=='dev'?'Set device limit '+d.dev+' for ':'Reset data usage of ')+n+' user(s)?'))throw Error('Cancelled');const r=await api('api/bulk',d);toast('Done for '+r.count+' user(s)')},
 `Users without expiry are skipped when adding days.<span style="display:block;border-top:1px solid var(--l);margin-top:12px;padding-top:12px"><b style="color:var(--t)">CSV file</b> (Excel / Google Sheets): export all users, or import new ones. Columns: name, password, expiry (YYYY-MM-DD, days, never or first-use+30), data_limit_gb, devices, reset_day, sni, host, note. Export once to see the format.</span><span style="display:flex;gap:8px;margin-top:10px"><button type="button" class="btn sm" id="cxe">${I('save',14)}Export CSV</button><button type="button" class="btn sm" id="cxi">${I('upl',14)}Import CSV</button><input type="file" id="cxf" accept=".csv,text/csv" hidden></span>`);csvUI()}
 const rpw=()=>{const a='abcdefghjkmnpqrstuvwxyz23456789';let r='';const v=crypto.getRandomValues(new Uint32Array(10));v.forEach(x=>r+=a[x%a.length]);return r};
 const KN={v2ray:'V2Ray',ssh:'SSH',both:'V2Ray + SSH',ovpn:'OpenVPN',hy2:'UDP',wg:'WireGuard',dns:'DNS'},HX=k=>k=='v2ray'||k=='both',HS=k=>k=='ssh'||k=='both',inK=(u,k)=>u.kind==k||((k=='v2ray'||k=='ssh')&&u.kind=='both'),SUBK=k=>HX(k)||k=='hy2';
-function umodal(u,c,kd){const ds=D.set,dd=D.cert.domain,def=v=>'Default: '+(v||'auto'),k=u?u.kind:c?c.kind:(kd||UV.kind),src=u||c||{},X_=HX(k),S_=HS(k);
-const F=[];if(!u)F.push(['name','Username','text','Any name, no spaces']);
+async function uqr(n){await openU(n);const t=$('#dtsub');if(t)requestAnimationFrame(()=>t.scrollIntoView({block:'start'}))}
+function umodal(u,c,kd,quick){const ds=D.set,dd=D.cert.domain,def=v=>'Default: '+(v||'auto'),k=u?u.kind:c?c.kind:(kd||UV.kind),src=u||c||{},X_=HX(k),S_=HS(k);
+const F=[];const RN=u&&!S_&&k!='ovpn',CUR=u?(u.fdays||(u.exp=='never'?0:Math.max(0,dnum(u)))):0;if(!u)F.push(['name','Username','text','Any name, no spaces']);else if(RN)F.push(['name','Name','text','',u.name]);
 if(S_||k=='hy2')F.push(['pw',u?'New password (leave empty to keep)':'Password','text','',u?'':rpw()]);
-if(u)F.push(['expmode','Expiry','select','',u.exp=='never'&&!u.fdays?'never':'add',[...(u.exp=='never'&&!u.fdays?[]:[['add',u.fdays?'Add days (counting has not started yet)':'Add days to the current expiry']]),['set','Set new expiry: days from today'],['never','No expiry (unlimited)']]]);
-F.push(['days',u?'Days (0 = no change)':'Valid for days (0 = no expiry)','number','',u?0:c?(c.fdays||(c.exp=='never'?0:Math.max(1,dnum(c)))):30]);
+F.push(['days',u?'Expiry: days left from today (0 = no expiry)'+(u.fdays?' · counting starts on first use':u.exp!='never'&&dnum(u)<=0?' · expired now, add days to renew':''):'Valid for days (0 = no expiry)','number','',u?CUR:c?(c.fdays||(c.exp=='never'?0:Math.max(1,dnum(c)))):30]);
 if(!u)F.push(['first','Start the days on first connection (not today)','check','',c?!!c.fdays:false]);
 F.push(['lim','Data limit in GB (0 = unlimited)','number','',src.lim??0]);if(k!='wg')F.push(['dev','Device limit (2 recommended, 0 = unlimited)','number','',src.dev??2]);F.push(['rday','Monthly data reset day, 1-28 (0 = off)','number','',src.rday??0]);
 F.push(['note','Note (only you see this)','area','Name, phone, payment...',src.note]);
-if(X_)F.push(['ibs','Attached inbounds','ibs','',src.ibs===undefined?null:src.ibs]);
+if(X_)F.push(['ibs','Attached inbounds','ibs','',u&&u.ibs==null?(D.ibs||[]).map(y=>y.id):src.ibs===undefined?null:src.ibs]);
 const RI=k=='wg'?(D.wg?'WireGuard users get a .conf file and a QR code for the WireGuard app (UDP '+(D.ports.WG_PORT||51820)+'). One config works on one device at a time. They get no SSH or V2Ray access.':'WireGuard is not installed on this server yet. Run the installer again to add it. You can still create the user now.'):k=='dns'?'DNS users connect through a DNS tunnel with V2Ray inside. Real domain needed: set it in Settings → DNS. It is slow, but works where only DNS is open.':k=='hy2'?(D.hy?'UDP users connect with Hysteria2 (UDP '+D.ports.HY_PORT+(D.ports.HY_HOP?', port hopping '+D.ports.HY_HOP:'')+') in v2rayNG, NekoBox or Hiddify. They get a subscription link. They get no SSH or V2Ray access.':'Hysteria2 is not installed on this server yet. Run the installer again to add it. You can still create the user now.'):k=='ovpn'?(D.ov?'OpenVPN users get a .ovpn file (TCP '+OVP()+', with or without the HTTP proxy). They get no SSH or V2Ray access.':'OpenVPN is not installed on this server yet. Run the installer again to add it. You can still create the user now.'):X_?((D.ibs||[]).length?'Pick the inbounds this user gets at the bottom. Address, Host, Path and SNI come from each inbound.':'There are no inbounds yet: make them in Inbounds. This user gets them automatically.'):'SSH users can log in with SSH, SSL, WebSocket and UDPGW. They get no V2Ray configs.';
-modal(u?'Edit '+u.name:(c?'Clone '+c.name:'Add '+KN[k]+' user'),F,d=>u?api('api/user/edit',Object.assign(d,{name:u.name})).then(()=>{toast('User updated');openU(u.name)}):api('api/user/add',Object.assign(d,{kind:k})).then(()=>{toast(KN[k]+' user created');openU(d.name)}),RI,true)}
+modal(u?'Edit '+u.name:(c?'Clone '+c.name:'Add '+KN[k]+' user'),F,d=>u?(()=>{const nn=RN?String(d.name||u.name).trim():u.name;delete d.name;const v=Math.max(0,parseInt(d.days)||0);if(v==CUR){d.expmode='add';d.days=0}else if(!v){d.expmode='never';d.days=0}else{d.expmode='set';d.days=v}
+return (nn!=u.name?api('api/user/rename',{name:u.name,new:nn}):Promise.resolve()).then(()=>api('api/user/edit',Object.assign(d,{name:nn}))).then(()=>{toast('User updated');if(quick)load();else openU(nn)})})():api('api/user/add',Object.assign(d,{kind:k})).then(()=>{toast(KN[k]+' user created');openU(d.name)}),RI,true);if(u)uacts(u)}
+function uacts(u){const qd=(id,vals,suf)=>{const i=$('#m_'+id);if(!i)return;const w=document.createElement('div');w.className='qrn';w.innerHTML=vals.map(v=>`<button type="button" class="btn sm" data-q="${v}">+${v}${suf}</button>`).join('');i.after(w);
+w.onclick=e=>{const b=e.target.closest('[data-q]');if(!b)return;i.value=Math.round(((parseFloat(i.value)||0)+ +b.dataset.q)*1000)/1000;i.classList.add('flash');setTimeout(()=>i.classList.remove('flash'),500)}};
+qd('days',[7,30,90],' days');qd('lim',[10,50,100],' GB');
+const mr=$('#mf .mr');if(!mr)return;const L=document.createElement('div');L.className='mra';const dis=u.st=='disabled';
+L.innerHTML=`<button type="button" class="btn sm red" data-uea="reset">${I('refresh',14)}Reset usage</button><button type="button" class="btn sm" data-uea="toggle">${I(dis?'unlock':'lock',14)}${dis?'Enable':'Disable'}</button><button type="button" class="btn sm" data-uea="clone">${I('users',14)}Clone</button><button type="button" class="btn sm" data-uea="share">${I('upl',14)}Share</button><button type="button" class="btn sm red" data-uea="del">${I('del',14)}Delete</button>`;
+mr.prepend(L);mr.classList.add('mrx');
+L.onclick=async e=>{const b=e.target.closest('[data-uea]');if(!b)return;const a=b.dataset.uea,n=u.name,dt=!$('#dt').hidden;
+if(a=='clone')return umodal(null,u);if(a=='share'){$('#md').hidden=true;return shareCard(u)}
+if(a=='toggle'&&!dis)return modal('Disable '+n,[['reason','Reason (optional, shown on the user\'s page)','text','Payment pending']],d=>api('api/user/toggle',{name:n,reason:d.reason}).then(()=>{toast(n+' disabled');load();if(dt)openU(n)}),'The user is disconnected and cannot connect until you enable them again.');
+if(a=='del'&&!confirm('Delete '+n+'? All of their access will be removed.'))return;if(a=='reset'&&!confirm('Reset data usage of '+n+' to 0?'))return;
+try{await api('api/user/'+a,{name:n});toast(a=='del'?n+' deleted':a=='reset'?'Usage reset':a=='toggle'?n+' enabled':'Done');$('#md').hidden=true;if(dt){if(a=='del')$('#dt').hidden=true;else openU(n)}load()}catch(x){toast(x.message,1)}}}
 function kpick(fn){modal('Which type of user?',[['kind','User type','select','',UV.kind,[['v2ray','V2Ray (VLESS, Reality, XHTTP, Trojan)'],['ssh','SSH (SSH, SSL, WebSocket, UDPGW)'],['ovpn','OpenVPN (TCP, HTTP proxy)'],['hy2','UDP (Hysteria2)'],['wg','WireGuard'],['dns','DNS + V2Ray (real domain needed)']]]],d=>{setTimeout(()=>fn(d.kind),60);return Promise.resolve()})}
 let DT=null,CP=[];const cp=t=>{CP.push(t);return CP.length-1};
 async function copy(t){try{await navigator.clipboard.writeText(t)}catch(e){const a=document.createElement('textarea');a.value=t;a.style.position='fixed';a.style.opacity='0';document.body.append(a);a.select();document.execCommand('copy');a.remove()}toast('Copied')}
@@ -4914,18 +5154,19 @@ function dnsCard(u,cbox){const o=u.dns;if(!o.on)return `<div class="card"><div c
 const all=`DNS tunnel (DNSTT)\nNameserver: ${o.ns||'-'}\nPublic key: ${o.pub}\nDNS resolver: 8.8.8.8 (faster with DoH: https://dns.google/dns-query)\nHTTP Custom: SlowDNS, Type Auto\nV2Ray: ${(u.links[0]||{}).url||''}`;
 return `${o.ns?'':DNSH()}<div class="card"><div class="ct"><div class="lab">${I('net',15)}DNS tunnel + V2Ray</div><button class="btn sm" data-cp="${cp(all)}">Copy all</button></div>
 <p class="note">In a DNS tunnel app (DNSTT / SlowDNS with V2Ray) enter the nameserver and public key, pick a DNS resolver, then add the V2Ray config. <b>HTTP Custom:</b> Method SlowDNS, Type <b>Auto</b>. <b>Faster:</b> use the DoH resolver <code>https://dns.google/dns-query</code> when you have normal internet; use 8.8.8.8 or your SIM's DNS when only DNS is open.</p>
-${[['Nameserver (NS)',o.ns||'Not set'],['DNS resolver','8.8.8.8 · DoH: https://dns.google/dns-query'],['HTTP Custom','SlowDNS · Type Auto']].map(r=>`<div class="kv"><span>${r[0]}</span><b>${X(r[1])}</b></div>`).join('')}${cbox('Public key',o.pub,false)}${u.links.map(l=>cbox(l.name,l.url)).join('')}
+${TL([['Nameserver (NS)',o.ns||'Not set'],['DNS resolver','8.8.8.8'],['DoH','https://dns.google/dns-query'],['HTTP Custom','SlowDNS · Type Auto']])}<div class="cg2">${cbox('Public key',o.pub,false)}${u.links.map(l=>cbox(l.name,l.url)).join('')}</div>
 <div class="ua" style="margin-top:10px"><button class="btn sm" data-ua="newuuid">${I('refresh',14)}New UUID</button></div></div>`}
+const TL=a=>`<div class="kg">${a.map(r=>`<button type="button" class="kt" data-cp="${cp(String(r[1]))}" title="Copy"><span>${r[0]}</span><b>${X(r[1])}</b></button>`).join('')}</div>`;
 function hyCard(u,cbox){const o=u.hy2;return `${o.on?'':`<div class="banner w" role="status">${I('bolt',17)}<div><b>Hysteria2 is not installed yet.</b> Run the installer again to add it.</div></div>`}
-<div class="card"><div class="ct"><div class="lab">Subscription link</div><button class="btn sm" data-ua="newsub">${I('refresh',14)}New link</button></div><p class="note">Import into v2rayNG, NekoBox or Hiddify. It has the Hysteria2 configs and shows usage and expiry.</p>${cbox('Subscription',u.sub)}${u.jsub?cbox('JSON subscription (v2rayNG, fragment)',u.jsub):''}<a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>
-<div class="card"><div class="lab">${I('bolt',15)}Hysteria2 (UDP)</div><p class="note">Tap a config to copy it. Port hopping changes the UDP port all the time, which helps when the network slows down one port. To change the password use Edit; the user then needs the new config.</p>${u.links.map(l=>cbox(l.name,l.url)).join('')}
-<div style="margin-top:10px">${[['Server',u.addr],['UDP port',o.port],['Port hopping',o.hop||'Off'],['Password',u.pw||'-'],['Devices online',o.online]].map(r=>`<div class="kv"><span>${r[0]}</span><b>${X(r[1])}</b></div>`).join('')}</div></div>`}
+<div class="card" id="dtsub"><div class="ct"><div class="lab">Subscription link</div><button class="btn sm" data-ua="newsub">${I('refresh',14)}New link</button></div><p class="note">Import into v2rayNG, NekoBox or Hiddify. It has the Hysteria2 configs and shows usage and expiry.</p><div class="cg2">${cbox('Subscription',u.sub)}${u.jsub?cbox('JSON subscription (v2rayNG, fragment)',u.jsub):''}</div><a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>
+<div class="card"><div class="lab">${I('bolt',15)}Hysteria2 (UDP)</div><p class="note">Tap a config to copy it. Port hopping changes the UDP port all the time, which helps when the network slows down one port. To change the password use Edit; the user then needs the new config.</p><div class="cg2">${u.links.map(l=>cbox(l.name,l.url)).join('')}</div>
+${TL([['Server',u.addr],['UDP port',o.port],['Port hopping',o.hop||'Off'],['Password',u.pw||'-'],['Devices online',o.online]])}</div>`}
 function wgCard(u,cbox){const o=u.wg;if(!o.on)return `<div class="card"><div class="lab">${I('wg',15)}WireGuard</div><p class="note bad">WireGuard is not installed on this server yet. Run the installer again to add it.</p></div>`;
 return `<div class="card" id="wgc"><div class="ct"><div class="lab">${I('wg',15)}WireGuard config</div><button class="btn sm" data-ua="newwg">${I('refresh',14)}New keys</button></div>
 <p class="note">Scan the QR in the WireGuard app (+ → Scan from QR code), or download the .conf file and import it. One config works on one device at a time.</p>
 ${o.conf?cbox('WireGuard config',o.conf):'<p class="note bad">The keys are made in a few seconds. Open this user again.</p>'}
 <div class="ua" style="margin-top:12px"><button class="btn pri" data-ua="wgdl">${I('save',15)}Download .conf</button></div>
-<div style="margin-top:10px">${[['Server',u.addr],['UDP port',o.port],['User address',o.ip||'-'],['Connected',o.online?'Yes, from '+(o.from||'?'):'No']].map(r=>`<div class="kv"><span>${r[0]}</span><b>${X(r[1])}</b></div>`).join('')}</div></div>`}
+${TL([['Server',u.addr],['UDP port',o.port],['User address',o.ip||'-'],['Connected',o.online?'Yes, from '+(o.from||'?'):'No']])}</div>`}
 function ovCard(u){const o=u.ovpn;if(!o.on)return `<div class="card"><div class="lab">${I('vpn',15)}OpenVPN</div><p class="note bad">OpenVPN is not installed on this server yet. Run the installer again to add it.</p></div>`;
 return `<div class="card" id="ovc"><div class="ct"><div class="lab">${I('vpn',15)}OpenVPN file</div><button class="btn sm" data-ua="newcert">${I('refresh',14)}New certificate</button></div>
 <p class="note">Make a .ovpn file and import it in OpenVPN Connect, HTTP Custom or HTTP Injector. With the HTTP proxy on, the app connects through port ${o.proxy} and sends your Host header.</p>
@@ -4938,29 +5179,29 @@ const ago=t=>{const s=Math.max(0,Date.now()/1000-t|0);return s<60?s+'s':s<3600?(
 async function ovdl(url,fn){try{const r=await fetch(url,{credentials:'same-origin'});if(!r.ok)throw new Error(r.status==401?'Please log in again':(await r.text()).slice(0,200)||'Download failed');
 const b=await r.blob(),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=fn;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1500);toast('File downloaded')}catch(x){toast(x.message,1)}}
 function onlineCard(u){const any=u.ssh||u.ips.length||(u.ovpn&&u.ovpn.sess.length)||(u.hy2&&u.hy2.online)||(u.wg&&u.wg.online);return `<div class="card"><div class="ct"><div class="lab">${I('wifi',15)}Connected now</div>${any?`<button class="btn sm dng" data-ua="kick">${I('kick',14)}Kick</button>`:''}</div>
-${any?`${HS(u.kind)?`<div class="kv"><span>SSH sessions</span><b>${u.ssh}</b></div>`:''}${(u.sips||[]).length?`<div class="kv"><span>SSH from</span><b>${u.sips.map(ip=>X(ip)).join(', ')}</b></div>`:''}${u.ovpn?`<div class="kv"><span>OpenVPN sessions</span><b>${u.ovpn.sess.length}</b></div>`:''}${u.hy2?`<div class="kv"><span>Hysteria2 devices</span><b>${u.hy2.online}</b></div>`:''}${u.wg&&u.wg.online?`<div class="kv"><span>WireGuard from</span><b>${X(u.wg.from||'?')}</b></div>`:''}${u.dns&&u.ips.length?`<div class="kv"><span>DNS tunnel</span><b>Connected</b></div>`:''}${u.ips.map(x=>`<div class="kv"><span>Xray ${X(x.ip)}</span><b>${x.ban?'<span class="bad">Blocked '+x.ban+'s</span>':'Active '+x.ago+'s ago'+(x.shared?' · shared IP':'')}</b></div>`).join('')}`:'<p class="note">Not connected right now.</p>'}</div>`}
+${any?`${HS(u.kind)?`<div class="kv"><span>SSH sessions</span><b>${u.ssh}</b></div>`:''}${(u.sips||[]).length?`<div class="kv"><span>SSH from</span><b>${u.sips.map(ip=>X(ip)).join(', ')}</b></div>`:''}${u.ovpn?`<div class="kv"><span>OpenVPN sessions</span><b>${u.ovpn.sess.length}</b></div>`:''}${u.hy2?`<div class="kv"><span>Hysteria2 devices</span><b>${u.hy2.online}</b></div>`:''}${u.wg&&u.wg.online?`<div class="kv"><span>WireGuard from</span><b>${X(u.wg.from||'?')}</b></div>`:''}${u.dns&&u.ips.length?`<div class="kv"><span>DNS tunnel</span><b>Connected</b></div>`:''}${u.ips.map(x=>`<div class="kv"><span>Xray ${X(x.ip)}<small class="gl">${glab(gloc(x.ip))}</small></span><b>${x.ban?'<span class="bad">Blocked '+x.ban+'s</span>':'Active '+x.ago+'s ago'+(x.shared?' · shared IP':'')}</b></div>`).join('')}`:'<p class="note">Not connected right now.</p>'}</div>`}
 function drawU(){const u=DT,p=u.ports,n=X(u.name),hx=HX(u.kind),hs=HS(u.kind);CP=[];
 const row=(k,v)=>`<div class="kv"><span>${k}</span><b>${X(v)}</b></div>`;
-const cbox=(label,v,qr,js)=>{const i=cp(v),jt=js?JSON.stringify(js,null,2):'',j=js?cp(jt):0;return `<div class="cb"><div class="cbh"><small>${X(label)}</small><span style="display:flex;gap:6px">${qr===false?'':`<button class="btn sm" data-qr="${i}" data-ql="${X(label)}">QR</button>`}<button class="btn sm" data-cp="${i}">Copy</button>${js?`<button class="btn sm" data-jsn aria-expanded="false">JSON</button>`:''}</span></div><button class="code" data-cp="${i}" aria-label="Copy ${X(label)}">${X(v)}</button>${js?`<div class="jsw" hidden><div class="jsh"><small>JSON config (v2rayNG → Custom config)</small><button class="btn sm pri" data-cp="${j}">Copy JSON</button></div><pre class="jsb">${X(jt)}</pre></div>`:''}</div>`};
+const cbox=(label,v,qr,js)=>{const i=cp(v),jt=js?JSON.stringify(js,null,2):'',j=js?cp(jt):0;return `<div class="cb"><div class="cbh"><small>${X(label)}</small><span style="display:flex;gap:6px">${qr===false?'':`<button class="btn sm" data-qr="${i}" data-ql="${X(label)}">QR</button>`}<button class="btn sm" data-cp="${i}">Copy</button>${js?`<button class="btn sm" data-jsn aria-expanded="false">JSON</button>`:''}</span></div><div class="code" role="button" tabindex="0" data-cp="${i}" aria-label="Copy ${X(label)}">${X(v)}</div>${js?`<div class="jsw" hidden><div class="jsh"><small>JSON config (v2rayNG → Custom config)</small><button class="btn sm pri" data-cp="${j}">Copy JSON</button></div><pre class="jsb">${X(jt)}</pre></div>`:''}</div>`};
 const sshAll=`Host: ${u.addr}\nUsername: ${u.name}\nPassword: ${u.pw||'-'}\nSSH: ${p.SSH_PORT}\nSSH SSL/TLS: ${AP(u,'SSL_PORT')}\nSSH WS: ${AP(u,'WS_PORT')}\nSSH WS TLS: ${AP(u,'WSTLS_PORT')}\nUDPGW: 127.0.0.1:${p.UDPGW_PORT}\nExpires: ${u.exp=='never'?'No expiry':u.exp}`;
 $('#dtb').innerHTML=`<div class="uh" style="margin-bottom:14px"><div class="av" style="background:hsl(${hue(u.name)} 55% 52%)">${n[0].toUpperCase()}</div><div style="min-width:0"><b style="font-size:18px">${n}</b>${tagT(u)}<small class="m" style="display:block">Created ${X(u.created||'-')}</small></div><span class="pill" style="color:${STC[u.st]}">${STN[u.st]}</span></div>
 <div class="card"><div class="ct"><div class="lab">Data usage</div><b>${lims(u.used,u.lim)}</b></div>${ubar(u.used,u.lim)}
 <div class="um" style="margin-top:10px"><span class="bl">${I('up',14)}${fb(u.up)}</span><span>${I('down',14)}${fb(u.down)}</span><span>${I('cal',14)}${u.fdays?'Starts on first connection ('+u.fdays+' days)':u.exp=='never'?'No expiry':'Expires '+X(u.exp)+(dleft(u)?' · '+dleft(u):'')}</span><span>${I('dev',14)}Device limit ${u.dev||'Unlimited'}</span><span>${I('refresh',14)}${u.rday?'Monthly reset on day '+u.rday:'No monthly reset'}</span></div>
-<div class="ua"><button class="btn" data-ua="edit">${I('key',15)}Edit</button><button class="btn" data-ua="share">${I('upl',15)}Share</button><button class="btn" data-ua="clone">${I('users',15)}Clone</button><button class="btn" data-ua="reset">${I('refresh',15)}Reset usage</button><button class="btn" data-ua="toggle">${I(u.st=='disabled'?'unlock':'lock',15)}${u.st=='disabled'?'Enable':'Disable'}</button><button class="btn dng" data-ua="del">${I('del',15)}Delete</button></div></div>
+</div>
 ${u.st=='disabled'?`<div class="banner w" role="status">${I('lock',17)}<div><b>Disabled.</b> ${u.reason?'Reason shown to the user: '+X(u.reason):'No reason given.'}</div></div>`:''}${u.trial?`<div class="banner w" role="status">${I('clock',17)}<div><b>Trial account.</b> It is deleted automatically when the time or data runs out.</div></div>`:''}
 ${u.note?`<div class="card"><div class="lab">Note</div><div class="note2">${X(u.note)}</div></div>`:''}
 ${usageCard(u.hist)}
 ${onlineCard(u)}
 ${hx||u.kind=='hy2'?'':`<div class="card"><div class="lab">User page</div><p class="note">Send this link to the user. ${u.kind=='dns'?'It shows their usage, expiry and the DNS tunnel details.':u.kind=='wg'?'It shows their usage, expiry, the WireGuard QR and the .conf file.':u.kind=='ovpn'?'It shows their usage, expiry and the OpenVPN file download.':'It shows their usage, expiry, SSH details and payloads.'}</p>${cbox('User page',u.sub,false)}<a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>`}
-${hx?`<div class="card"><div class="ct"><div class="lab">Subscription link</div><button class="btn sm" data-ua="newsub">${I('refresh',14)}New link</button></div><p class="note">Import into v2rayNG, NekoBox or Hiddify. It contains this user's V2Ray configs (the inbounds they have) and shows usage and expiry.</p>${cbox('Subscription',u.sub)}${u.jsub?cbox('JSON subscription (v2rayNG, fragment)',u.jsub):''}<a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>
-<div class="card"><div class="ct"><div class="lab">Xray configs</div><button class="btn sm" data-ua="newuuid">${I('refresh',14)}New UUID</button></div><p class="note">Tap a config to copy it. XHTTP needs a recent app (v2rayNG 1.9.30+, Hiddify, NekoBox with Xray core).</p>${u.links.map(l=>cbox(l.name+(l.alt?' · port '+(l.url.match(/:(\d+)\?/)||[])[1]+' (or '+l.alt+')':''),l.url,undefined,l.json)+(l.name=='VLESS XHTTP (no TLS)'&&!u.plaindomain?'<p class="note bad" style="margin-top:6px">New Xray apps refuse VLESS without TLS on an IP address. Set a domain (Settings → Server address, or a domain certificate) to use this config.</p>':'')).join('')}</div>
+${hx?`<div class="card" id="dtsub"><div class="ct"><div class="lab">Subscription link</div><button class="btn sm" data-ua="newsub">${I('refresh',14)}New link</button></div><p class="note">Import into v2rayNG, NekoBox or Hiddify. It contains this user's V2Ray configs (the inbounds they have) and shows usage and expiry.</p><div class="cg2">${cbox('Subscription',u.sub)}${u.jsub?cbox('JSON subscription (v2rayNG, fragment)',u.jsub):''}</div><a class="btn sm" href="${X(u.sub)}" target="_blank" rel="noopener" style="margin-top:10px;text-decoration:none">Open user page</a></div>
+<div class="card"><div class="ct"><div class="lab">Xray configs</div><button class="btn sm" data-ua="newuuid">${I('refresh',14)}New UUID</button></div>${TL([['UUID / Trojan password',u.uuid],['Inbounds',(u.ibs==null?(D.ibs||[]).length:u.ibs.length)+' of '+(D.ibs||[]).length+' (change with ✏️)']])}<p class="note" style="margin-top:10px">Tap a config to copy it.</p>${'<div class="cg2">'+u.links.map(l=>'<div>'+cbox(l.name+(l.alt?' · port '+(l.url.match(/:(\d+)\?/)||[])[1]+' (or '+l.alt+')':''),l.url,undefined,l.json)+(l.name=='VLESS XHTTP (no TLS)'&&!u.plaindomain?'<p class="note bad" style="margin-top:6px">New Xray apps refuse VLESS without TLS on an IP address. Set a domain (Settings → Server address, or a domain certificate) to use this config.</p>':'')+'</div>').join('')+'</div>'}</div>
 `:''}
 ${hs?`<div class="card"><div class="ct"><div class="lab">SSH account</div><button class="btn sm" data-cp="${cp(sshAll)}">Copy all</button></div>
-${row('Host',u.addr)}${row('Username',u.name)}${row('Password',u.pw||'Unknown (set a new one with Edit)')}${row('SSH',p.SSH_PORT)}${row('SSH SSL / TLS',AP(u,'SSL_PORT'))}${row('SSH WS',AP(u,'WS_PORT'))}${row('SSH WS TLS',AP(u,'WSTLS_PORT'))}${row('UDPGW','127.0.0.1:'+p.UDPGW_PORT)}</div>
+${TL([['Host',u.addr],['Username',u.name],['Password',u.pw||'Unknown'],['SSH',p.SSH_PORT],['SSH SSL / TLS',AP(u,'SSL_PORT')],['SSH WS',AP(u,'WS_PORT')],['SSH WS TLS',AP(u,'WSTLS_PORT')],['UDPGW','127.0.0.1:'+p.UDPGW_PORT]])}</div>
 `:''}
-${hx?`<div class="card"><div class="lab">Xray details</div>${row('Inbounds',u.ibs==null?'All ('+(D.ibs||[]).length+')':u.ibs.length+' of '+(D.ibs||[]).length)}${(D.ibs||[]).filter(y=>u.ibs==null||u.ibs.includes(y.id)).map(y=>row(y.name+(y.on?'':' (off)'),(y.b=='reality'?u.rport||y.port:(y.hp?y.hp+' (or '+y.port+')':y.port))+' · '+y.proto+' '+NETN(y).toLowerCase()+(y.sec!='none'?' '+y.sec:''))).join('')}${row('UUID / Trojan password',u.uuid)}</div>`:''}
-${hs?`<div class="card"><div class="lab">SSH WebSocket payloads</div><p class="note">Host ${X(u.whost)}. Use port ${AP(u,'WS_PORT')} for SSH WS, or ${AP(u,'WSTLS_PORT')} with TLS on for SSH WS TLS. Try them one by one.</p>${payloads(u.whost,p).map((x,i)=>cbox('Payload '+(i+1),x,false)).join('')}</div>`:''}
-${hs&&u.pays&&u.pays.length?`<div class="card"><div class="lab">Custom payloads</div><p class="note">Made in Settings → Payloads. The user sees these on their page too.</p>${u.pays.map(x=>cbox(x.name+' · '+(PAYM[x.mode]||x.mode)+' · port '+payPort(x.mode),x.text,false)+(x.note?`<p class="note" style="margin-top:4px">${X(x.note)}</p>`:'')).join('')}</div>`:''}
+
+${hs?`<div class="card"><div class="lab">SSH WebSocket payloads</div><p class="note">Host ${X(u.whost)}. Use port ${AP(u,'WS_PORT')} for SSH WS, or ${AP(u,'WSTLS_PORT')} with TLS on for SSH WS TLS. Try them one by one.</p><div class="cg2">${payloads(u.whost,p).map((x,i)=>cbox('Payload '+(i+1),x,false)).join('')}</div></div>`:''}
+${hs&&u.pays&&u.pays.length?`<div class="card"><div class="lab">Custom payloads</div><p class="note">Made in Settings → Payloads. The user sees these on their page too.</p><div class="cg2">${u.pays.map(x=>'<div>'+cbox(x.name+' · '+(PAYM[x.mode]||x.mode)+' · port '+payPort(x.mode),x.text,false)+(x.note?`<p class="note" style="margin-top:4px">${X(x.note)}</p>`:'')+'</div>').join('')}</div></div>`:''}
 ${u.ovpn?ovCard(u):''}${u.hy2?hyCard(u,cbox):''}${u.wg?wgCard(u,cbox):''}${u.dns?dnsCard(u,cbox):''}`}
 $('#dt').onclick=async e=>{if(e.target.id=='dt'||e.target.closest('#dx'))return $('#dt').hidden=true;
 const jb=e.target.closest('[data-jsn]');if(jb){const w=jb.closest('.cb').querySelector('.jsw');w.hidden=!w.hidden;jb.setAttribute('aria-expanded',!w.hidden);jb.textContent=w.hidden?'JSON':'Hide JSON';return}
@@ -5044,10 +5285,10 @@ ${L.map((x,i)=>({x,i})).filter(o=>!IBQ||(o.x.name+' '+o.x.port+' '+o.x.proto+' '
 <td><b class="ibn">${X(x.name)}</b>${x.qk?'<span class="ibqt">1-click</span>':''}${x.warn?`<div class="ibw">${X(x.warn)}</div>`:''}</td>
 <td><span class="ibp1">${PRN[x.proto]||x.proto}</span></td>
 <td><span class="mono">:${x.port}</span>${x.hp?`<div class="m">also :${x.hp}</div>`:''}</td>
-<td><span class="ibts">${NETN(x)} + ${x.sec=='none'?'None':x.sec=='tls'?'TLS':'Reality'}${x.flow?' · Vision':''}${x.ech?' · ECH':''}</span>${(x.ext||[]).length?`<div class="m">+${x.ext.length} external</div>`:''}</td>
+<td><span class="ibts">${NETN(x)} + ${x.sec=='none'?'None':x.sec=='tls'?'TLS':'Reality'}${x.flow?' · Vision':''}${x.ech?' · ECH':''}${x.venc?' · Enc':''}${x.rw&&x.rw.on?' · Watch':''}</span>${(x.ext||[]).length?`<div class="m">+${x.ext.length} external</div>`:''}</td>
 <td><span class="ibu">${x.users}</span></td>
 <td><button class="sw${x.on?' on':''}" data-ib="tog" data-id="${x.id}" role="switch" aria-checked="${x.on}" aria-label="${X(x.name)} ${x.on?'on':'off'}" title="${x.on?'Turn off':'Turn on'}"><i></i></button></td>
-<td class="r"><span class="iba"><button data-ib="port" data-id="${x.id}" aria-label="Check port ${x.port}" title="Check if the port is open">${I('shield',15)}</button><button data-ib="edit" data-id="${x.id}" aria-label="Edit ${X(x.name)}" title="Edit">${I('pen',15)}</button><button class="dng" data-ib="del" data-id="${x.id}" aria-label="Delete ${X(x.name)}" title="Delete">${I('del',15)}</button></span></td></tr>`).join('')||`<tr><td colspan="7" class="note" style="padding:18px">${L.length?'Nothing matches the search.':'No inbounds yet. Press Add Inbound to make your first V2Ray config. V2Ray users get their configs from the inbounds you make here.'}</td></tr>`}
+<td class="r"><span class="iba"><button data-ib="port" data-id="${x.id}" aria-label="Check port ${x.port}" title="Check if the port is open">${I('shield',15)}</button><button data-ib="clone" data-id="${x.id}" aria-label="Clone ${X(x.name)}" title="Clone (copy with a new port)">${I('copy',15)}</button><button data-ib="edit" data-id="${x.id}" aria-label="Edit ${X(x.name)}" title="Edit">${I('pen',15)}</button><button class="dng" data-ib="del" data-id="${x.id}" aria-label="Delete ${X(x.name)}" title="Delete">${I('del',15)}</button></span></td></tr>`).join('')||`<tr><td colspan="7" class="note" style="padding:18px">${L.length?'Nothing matches the search.':'No inbounds yet. Press Add Inbound to make your first V2Ray config. V2Ray users get their configs from the inbounds you make here.'}</td></tr>`}
 </tbody></table></div></div>`;
 $('#iba').onclick=()=>ibmodal(null);
 if($('#ibqa'))$('#ibqa').onclick=async()=>{if(!confirm('Are you sure?\n\nThis adds 7 inbounds (VLESS / Trojan · TCP Vision, WS, HTTPUpgrade, XHTTP, Reality) on free ports from 20001. Your own inbounds are not changed.\n\nOpen ports 20001-20007 in your provider firewall too.'))return;const b=$('#ibqa');b.disabled=true;toast('Adding... (checks ports and the Reality target)');
@@ -5063,6 +5304,7 @@ document.addEventListener('click',e=>{const mb=e.target.closest('[data-ibm]');if
 document.addEventListener('click',e=>{const b=e.target.closest('[data-ib]');if(!b||pg!='ib')return;if($('#ibpop'))$('#ibpop').remove();const x=(D.ibs||[]).find(y=>y.id==b.dataset.id);if(!x)return;const a=b.dataset.ib;
 if(a=='edit')return ibmodal(x);
 if(a=='port')return ibPort(x.id);
+if(a=='clone')return ibmodal(x,true);
 if(a=='del'){if(!confirm('Delete the inbound "'+x.name+'"?\n\n'+x.users+' user(s) lose this config.'+(x.b?' You can add the default inbounds back later.':'')))return}
 if(a=='tog'&&x.on&&x.users&&!confirm('Turn off "'+x.name+'"? '+x.users+' user(s) lose this config until you turn it on again.'))return;
 api('api/inbound/'+({tog:'toggle',up:'move',down:'move'}[a]||a),{id:x.id,name:x.name,dir:a}).then(()=>{toast(a=='del'?'Inbound deleted':a=='tog'?(x.on?'Turned off':'Turned on'):'Saved');IBH='';load()}).catch(x=>toast(x.message,1))});
@@ -5077,10 +5319,10 @@ $('#pcx').onclick=$('#pcc').onclick=()=>$('#md').hidden=true;if($('#pcr'))$('#pc
 if($('#pco'))$('#pco').onclick=async()=>{try{await api('api/fw-open',{port:x.port,proto:'tcp'});ibPort(id)}catch(e){toast(e.message,1)}}};
 f.onsubmit=e=>e.preventDefault();show(null);$('#md').hidden=false;
 try{const r=await api('api/ib-portcheck',{id});if(!$('#md').hidden&&$('#pcx'))show(r)}catch(e){toast(e.message,1);$('#md').hidden=true}}
-function ibmodal(x){const ed=!!x,b=x&&x.b,h4=D.h443&&D.h443.on;
-const DEF={name:'',proto:'vless',port:'',net:'xhttp',cdn:false,sec:'tls',sni:'',target:'',addr:'',host:'',path:'',fp:'chrome',alpn:'',on:true,xmode:'auto',svc:'',multi:true,obfs:false,obhost:'',obpath:'/',hb:0,hdrs:[],tfo:false,frag:{},minv:'',maxv:'',rsni:false,ech:false,flow:'',sids:[],snix:[],spx:'',sniff:{on:false,dest:['http','tls'],ro:false},ext:[],cmode:'panel',cfile:'',kfile:'',ccrt:'',ckey:''};
+function ibmodal(x,cl){const ed=!!x&&!cl,b=ed&&x.b,h4=D.h443&&D.h443.on;
+const DEF={name:'',proto:'vless',port:'',net:'xhttp',cdn:false,sec:'tls',sni:'',target:'',addr:'',host:'',path:'',fp:'chrome',alpn:'',on:true,xmode:'auto',svc:'',multi:true,obfs:false,obhost:'',obpath:'/',hb:0,hdrs:[],tfo:false,frag:{},minv:'',maxv:'',rsni:false,ech:false,flow:'',sids:[],snix:[],spx:'',sniff:{on:false,dest:['http','tls'],ro:false},ext:[],cmode:'panel',cfile:'',kfile:'',ccrt:'',ckey:'',venc:'',lfb:{},rw:{}};
 let S=JSON.parse(JSON.stringify(Object.assign({},DEF,x?Object.fromEntries(Object.keys(DEF).map(k=>[k,x[k]??DEF[k]])):{})));
-if(x&&x.b=='reality')S.sni=x.sni;S.fon=!!(S.frag&&S.frag.on);S.frag=Object.assign({packets:'tlshello',lengths:'100-200',delays:'10-20'},S.frag||{});if(x&&x.addr&&!S.ext.length)S.ext=[{addr:x.addr,port:'',remark:'Address'}];if(!['tcp','xhttp','ws','httpupgrade'].includes(S.net))S.net='xhttp';if(S.proto=='vmess')S.proto='vless';S.exon=S.ext.length>0;S.flowT=ed;
+if(x&&x.b=='reality')S.sni=x.sni;if(cl){const taken=new Set((D.ibs||[]).map(y=>+y.port));let p=+x.port>1024?+x.port+1:20101;while(taken.has(p)||p==80||p==443)p++;S.name=x.name+' copy';S.port=String(p);S.on=true;S.flowT=true}S.fon=!!(S.frag&&S.frag.on);S.frag=Object.assign({packets:'tlshello',lengths:'100-200',delays:'10-20'},S.frag||{});if(x&&x.addr&&!S.ext.length)S.ext=[{addr:x.addr,port:'',remark:'Address'}];if(!['tcp','xhttp','ws','httpupgrade'].includes(S.net))S.net='xhttp';if(S.proto=='vmess')S.proto='vless';S.exon=S.ext.length>0;S.lfb=Object.assign({on:false,after:1024,rate:100},S.lfb||{});S.rw=Object.assign({on:false,spares:[]},S.rw||{});S.flowT=ed;
 let tab=0,USED=null,BT=null,SCAN=null,FIND=null;const f=$('#mf');f.className='card wide ibx';
 api('api/inbound/ports',{}).then(r=>{USED=r.used}).catch(()=>{});
 const mainp=()=>S.net=='ws'?(D.set.wspath||'/vws'):(D.set.path||'/vless'),p4=()=>+S.port==80||+S.port==443,canR=()=>!S.cdn&&!['ws','httpupgrade'].includes(S.net),canF=()=>S.proto=='vless'&&S.net=='tcp'&&!S.obfs&&S.sec!='none'&&!S.cdn;
@@ -5104,7 +5346,7 @@ function alCur(){const ok=alOK();let a=(S.alpn?S.alpn.split(','):alD()).filter(v
 function pnote(){const p=+S.port;if(S.cdn)return 'Cloudflare ports: '+(S.sec=='tls'?'443, 2053, 2083, 2087, 2096, 8443':'80, 8080, 8880, 2052, 2082, 2086, 2095');if(p==443||p==80)return h4?'Goes through 443 mode (HAProxy): only plain VLESS XHTTP / WS and VLESS / Trojan TCP+TLS work here.':'Ports 80 and 443 need 443 mode (Settings → Network ports).';return 'Any free port.'+(h4?' 80 / 443 work in 443 mode for plain configs.':'')}
 function tBasic(){return row('Enabled',sw('on',S.on))+row('Remark',inp('name',S.name,''),'',"ib_name")+
 row('Protocol',sel('proto',[['vless','vless'],['trojan','trojan']],S.proto),'','ib_proto')+
-row('Port',inp('port',S.port,'','','sm'),pnote(),'ib_port')}
+row('Port',inp('port',S.port,'','','sm'),pnote(),'ib_port')+(S.proto=='vless'&&!b?row('Encryption',seg('venc',[['','None'],['x25519','X25519'],['mlkem','ML-KEM-768']],S.venc),'VLESS Encryption: VLESS encrypts by itself, also without TLS. Needs a new app (v2rayNG 1.10+, Xray 25.9+). X25519 = short link. ML-KEM-768 = post-quantum, but a very long link. Not on 80 / 443 (443 mode).'):'')}
 function tStream(){const hd=S.cdn?((D.cdn&&D.cdn.dom)||'CDN domain'):(D.set.host||D.cert.domain||D.addr||'default');let h=row('Transmission',sel('net',Object.entries(NETL),S.net),'','ib_net');
 if(S.net!='tcp')h+=row('Through CDN',sw('cdn',S.cdn),'Users connect to Cloudflare, Cloudflare connects to this server. Set the CDN domain in Settings → CDN.');
 const hp=(lab)=>row('Host',inp('host',S.host,'empty = '+hd),'','ib_host')+(S.net=='grpc'?'':row('Path',inp('path',p4()?'':S.path,mainp(),p4()),p4()?'On 80 / 443 (443 mode) the main path is used.':'Empty = '+mainp(),'ib_path'));
@@ -5133,12 +5375,17 @@ row('Target',`<div class="tgt">${inp('target',S.target,(S.sni||'www.microsoft.co
 (SCAN&&!SCAN.run?`<div class="ir"><span></span>${scanBox()}</div>`:'')+
 row('SNI',chips('sni',all,all.length?'add name':'Like: www.microsoft.com'),'Names the apps can use. The first one goes in the links. Scan fills them from the site certificate.')+
 row('Short IDs',chips('sids',S.sids,S.sids.length?'':'empty = panel default',1),'Up to 8, hex, even length. The first one goes in the links.')+
-row('SpiderX',`<div class="tgt nw">${inp('spx',S.spx,'Like: /abc (optional)')}<button type="button" class="cg" id="ibspx" title="Make a new one" aria-label="Make a new SpiderX">↻</button></div>`,'Optional path the app crawls on the target site.')+flow}
+rwRows()+row('Limit Fallback',sw('lfb_on',S.lfb.on),'Slows down people who connect without your key (scanners, probes), so nobody can use your server as a free proxy to the target site.')+(S.lfb.on?row('After (KB)',inp('lfb_after',S.lfb.after,'1024','','sm'),'Full speed for the first KB, then slow.','ib_lfb_after')+row('Speed (KB/s)',inp('lfb_rate',S.lfb.rate,'100','','sm'),'','ib_lfb_rate'):'')+row('SpiderX',`<div class="tgt nw">${inp('spx',S.spx,'Like: /abc (optional)')}<button type="button" class="cg" id="ibspx" title="Make a new one" aria-label="Make a new SpiderX">↻</button></div>`,'Optional path the app crawls on the target site.')+flow}
 return h}
 function certRows(){if(S.cmode=='panel'){S.cmode='path';S.cfile=D.cpath[0];S.kfile=D.cpath[1]}const m=S.cmode;let h=row('Certificate',seg('cmode',[['path','File Path'],['content','File Content']],m),'Set Cert from Panel = your panel certificate (renews by itself). Another file only for another domain.');
 if(m=='path')h+=row('Public Key',inp('cfile',S.cfile,'/root/cert/fullchain.pem'),'','ib_cfile')+row('Private Key',inp('kfile',S.kfile,'/root/cert/privkey.pem'),'','ib_kfile');
 if(m=='content')h+=row('Public Key',`<textarea id="ib_ccrt" data-k="ccrt" class="ita" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----">${X(S.ccrt)}</textarea>`,'','ib_ccrt')+row('Private Key',`<textarea id="ib_ckey" data-k="ckey" class="ita" spellcheck="false" placeholder="${x&&x.ckey_set&&!S.ckey?'Saved (hidden). Paste a new key to change it.':'-----BEGIN PRIVATE KEY-----'}">${X(S.ckey)}</textarea>`,'','ib_ckey');
 return h+row('',`<div style="display:flex;gap:8px;flex-wrap:wrap"><button type="button" class="btn pri" id="ibcp" style="white-space:nowrap">Set Cert from Panel</button><button type="button" class="btn cdl" id="ibcc">Clear</button></div>`)}
+function rwRows(){let h=row('Reality Watch',sw('rw_on',S.rw.on),'Keep Reality working: the panel checks the target every 10 minutes. After 3 failed checks in a row it switches to the first spare target that works and sends you a Telegram message. Users then refresh their subscription.');
+if(!S.rw.on)return h;h+=row('Spare targets',chips('spares',S.rw.spares,S.rw.spares.length?'add site':'Like: www.samsung.com'),'Big sites with TLS 1.3. Find Targets → "Spare" adds them here.');
+const st=ed?((D.rw&&D.rw[x.id])||{fresh:1}):null;if(st){const ago=st.last?Math.max(0,Math.round((Date.now()/1000-st.last)/60)):null;
+h+=`<div class="ir"><span></span><div class="rws ${st.ok?'ok':'no'}${st.fresh?' fr':''}"><b>${st.fresh?'Not checked yet':st.ok?'✓ Working':'✕ Not answering ('+(st.fails||0)+' of 3)'}</b> · ${X(st.cur||'')}${ago!=null?' · checked '+ago+' min ago':''}${(st.hist||[]).slice(-3).reverse().map(h_=>`<small>${new Date(h_[0]*1000).toLocaleString()} · ${X(h_[1])}</small>`).join('')}<div style="display:flex;gap:6px;margin-top:6px"><button type="button" class="btn sm" id="rwc">Check now</button><button type="button" class="btn sm" id="rws">Switch now</button></div></div></div>`}
+return h}
 function scanBox(){const r=SCAN;if(!r.ok)return `<div class="scb bad"><b>✕ Not good for Reality</b><div><span>Target</span><span>${X(r.target||'')}</span></div><p>${X(r.err||'No answer')}</p></div>`;
 const kv=(k,v)=>v?`<div><span>${k}</span><span>${X(v)}</span></div>`:'';
 return `<div class="scb"><b>${I('check',14)} Works for Reality</b>${kv('SNI used',r.sni)}${kv('TLS',r.tls.replace('TLSv',''))}${kv('ALPN',r.alpn||'none')}${kv('Cipher',r.cipher)}${kv('Certificate',r.cn)}${kv('Issuer',r.issuer)}${kv('Expires',r.exp?(r.exp+' ('+r.days+' days)'):'')}${kv('Latency',r.ms+' ms')}${r.h2?'':'<p>No HTTP/2. It works, but a site with h2 looks more normal.</p>'}</div>`}
@@ -5147,21 +5394,21 @@ function tSniff(){const sn=S.sniff;return row('Enabled',sw('sn_on',sn.on),'Reads
 function tAdv(){return row('External Proxy',sw('exon',S.exon),'Extra addresses for the same inbound, like Cloudflare IPs or another domain. Every line becomes its own link.')+
 (S.exon?`<div class="exl">${S.ext.map((e,i)=>`<div class="exr"><input data-ea="${i}" value="${X(e.addr)}" placeholder="Address (IP or domain)" autocapitalize="none" spellcheck="false" aria-label="Address"><input data-ep="${i}" value="${X(e.port||'')}" placeholder="${X(S.port||'port')}" inputmode="numeric" aria-label="Port"><input data-er="${i}" value="${X(e.remark||'')}" placeholder="Remark" aria-label="Remark"><button type="button" class="rm" data-edel="${i}" aria-label="Remove">${I('del',14)}</button></div>`).join('')}<button type="button" class="addb" id="ibeadd">${I('plus',13)}Add</button></div>`:'')}
 function draw(){fix();const T=['Basics','Stream','Security','Sniffing','Advanced'];const body=[tBasic,tStream,tSec,tSniff,tAdv][tab]();
-f.innerHTML=`<div class="ixh"><h2>${ed?'Edit '+X(x.name):'Add Inbound'}</h2><button type="button" class="ixc" id="mc2" aria-label="Close">×</button></div><div id="ibban" aria-live="polite"></div>
+f.innerHTML=`<div class="ixh"><h2>${ed?'Edit '+X(x.name):cl?'Clone '+X(x.name):'Add Inbound'}</h2><button type="button" class="ixc" id="mc2" aria-label="Close">×</button></div><div id="ibban" aria-live="polite"></div>
 <div class="ixt" role="tablist">${T.map((t,i)=>`<button type="button" role="tab" class="${i==tab?'on':''}" aria-selected="${i==tab}" data-t="${i}">${t}</button>`).join('')}</div><div class="ixb">${body}</div>
 <div class="err" id="me"></div><div class="mr"><button type="button" class="btn" id="mc">Close</button><button class="btn pri">${ed?'Save':'Create'}</button></div>${FIND?findPop():''}`;
 wire()}
 function findPop(){const F=FIND;return `<div class="fpo" role="dialog" aria-label="Reality Target Finder"><div class="fpc"><div class="ixh"><h2 style="font-size:16px">Reality Target Finder</h2><button type="button" class="ixc" id="fpx" aria-label="Close">×</button></div>
 <div class="tgt" style="margin:8px 0"><input id="fpe" placeholder="Extra domains (optional)" value="${X(F.extra||'')}" autocapitalize="none"><button type="button" class="btn sm pri" id="fps"${F.run?' disabled':''}>${F.run?'Checking...':'Scan'}</button></div>
-${F.run?'<p class="note">Checking...</p>':F.err?`<p class="err">${X(F.err)}</p>`:F.res?`<div class="fpt"><table><thead><tr><th>Target</th><th class="fst">Status</th><th>Latency</th><th></th></tr></thead><tbody>${F.res.map(r=>`<tr><td><b>${X(r.d)}</b><small class="m">${r.ok?'TLS 1.3 · '+(r.h2?'h2':'http/1.1'):X(r.err||'no TLS 1.3')}</small></td><td class="fst">${r.ok?'<span class="fok">Works</span>':'<span class="fno">No</span>'}</td><td>${r.ok?r.ms+' ms':'-'}</td><td>${r.ok?`<button type="button" class="btn sm pri" data-use="${X(r.d)}">Use</button>`:''}</td></tr>`).join('')}</tbody></table></div>`:''}</div></div>`}
+${F.run?'<p class="note">Checking...</p>':F.err?`<p class="err">${X(F.err)}</p>`:F.res?`<div class="fpt"><table><thead><tr><th>Target</th><th class="fst">Status</th><th>Latency</th><th></th></tr></thead><tbody>${F.res.map(r=>`<tr><td><b>${X(r.d)}</b><small class="m">${r.ok?'TLS 1.3 · '+(r.h2?'h2':'http/1.1'):X(r.err||'no TLS 1.3')}</small></td><td class="fst">${r.ok?'<span class="fok">Works</span>':'<span class="fno">No</span>'}</td><td>${r.ok?r.ms+' ms':'-'}</td><td>${r.ok?`<button type="button" class="btn sm pri" data-use="${X(r.d)}">Use</button>${S.rw.on?` <button type="button" class="btn sm" data-spare="${X(r.d)}"${S.rw.spares.includes(r.d)?' disabled':''}>Spare</button>`:''}`:''}</td></tr>`).join('')}</tbody></table></div>`:''}</div></div>`}
 function wire(){const q=s=>f.querySelectorAll(s);
 $('#mc').onclick=$('#mc2').onclick=()=>$('#md').hidden=true;
 q('[data-t]').forEach(z=>z.onclick=()=>{rd_();tab=+z.dataset.t;draw()});
-q('[data-sw]').forEach(z=>z.onclick=()=>{rd_();const k=z.dataset.sw,v=!z.classList.contains('on');if(k=='sn_on')S.sniff.on=v;else if(k=='sn_ro')S.sniff.ro=v;else{S[k]=v;if(k=='exon'&&v&&!S.ext.length)S.ext.push({addr:'',port:'',remark:''})}draw()});
+q('[data-sw]').forEach(z=>z.onclick=()=>{rd_();const k=z.dataset.sw,v=!z.classList.contains('on');if(k=='sn_on')S.sniff.on=v;else if(k=='sn_ro')S.sniff.ro=v;else if(k=='lfb_on')S.lfb.on=v;else if(k=='rw_on')S.rw.on=v;else{S[k]=v;if(k=='exon'&&v&&!S.ext.length)S.ext.push({addr:'',port:'',remark:''})}draw()});
 q('[data-seg]').forEach(z=>z.onclick=()=>{rd_();const k=z.dataset.seg;S[k]=z.dataset.v;if(k=='flow')S.flowT=true;if(k=='sec'){SCAN=null;if(S.sec=='reality'&&!S.sni)S.sni=D.set.rsni||''}draw()});
 q('select[data-k]').forEach(z=>z.onchange=()=>{rd_();if(z.dataset.k=='net'){S.alpn='';SCAN=null}draw()});
 q('[data-tg]').forEach(z=>z.onclick=()=>{rd_();const k=z.dataset.tg,v=z.dataset.v;if(k=='alpn'){let a=alCur();a=a.includes(v)?a.filter(y=>y!=v):a.concat(v);if(!a.length)return;S.alpn=['h2','http/1.1'].filter(y=>a.includes(y)).join(',')}else{const d=S.sniff.dest;S.sniff.dest=d.includes(v)?d.filter(y=>y!=v):d.concat(v)}draw()});
-q('[data-cdel]').forEach(z=>z.onclick=()=>{rd_();const k=z.dataset.cdel,i=+z.dataset.i;if(k=='sids')S.sids.splice(i,1);else{const all=[S.sni,...S.snix].filter(v=>v);all.splice(i,1);S.sni=all[0]||'';S.snix=all.slice(1)}draw()});
+q('[data-cdel]').forEach(z=>z.onclick=()=>{rd_();const k=z.dataset.cdel,i=+z.dataset.i;if(k=='sids')S.sids.splice(i,1);else if(k=='spares')S.rw.spares.splice(i,1);else{const all=[S.sni,...S.snix].filter(v=>v);all.splice(i,1);S.sni=all[0]||'';S.snix=all.slice(1)}draw()});
 q('[data-cadd]').forEach(z=>{z.onkeydown=e=>{if(e.key=='Enter'||e.key==','||e.key==' '){e.preventDefault();rd_();addChip(z.dataset.cadd,z.value);draw();const n=f.querySelector(`[data-cadd="${z.dataset.cadd}"]`);n&&n.focus()}};z.onblur=()=>{if(z.value.trim()){rd_();addChip(z.dataset.cadd,z.value);draw()}}});
 q('[data-cgen]').forEach(z=>z.onclick=()=>{rd_();if(S.sids.length<8)S.sids.push(hex([1,2,3,4,8][Math.floor(Math.random()*5)]));draw()});
 if($('#ibspx'))$('#ibspx').onclick=()=>{rd_();S.spx='/'+rnd(12);draw()};
@@ -5171,14 +5418,17 @@ if($('#ibscan'))$('#ibscan').onclick=()=>{rd_();scan()};
 if($('#ibcp'))$('#ibcp').onclick=()=>{rd_();S.cmode='path';S.cfile=D.cpath[0];S.kfile=D.cpath[1];S.ccrt=S.ckey='';draw()};if($('#ibcc'))$('#ibcc').onclick=()=>{rd_();S.cfile=S.kfile=S.ccrt=S.ckey='';draw()};
 if($('#ibfind'))$('#ibfind').onclick=()=>{rd_();FIND=FIND||{};draw();if(!FIND.res&&!FIND.run)find()};
 if($('#fpx'))$('#fpx').onclick=()=>{FIND=null;draw()};if($('#fps'))$('#fps').onclick=()=>{FIND.extra=$('#fpe').value;find()};
+q('[data-spare]').forEach(z=>z.onclick=()=>{addChip('spares',z.dataset.spare);draw()});
+if($('#rwc'))$('#rwc').onclick=async()=>{rd_();try{const r=await api('api/rwatch',{a:'check',id:x.id});D.rw=r.rw;toast('Checked')}catch(e){toast(e.message,1)}draw()};
+if($('#rws'))$('#rws').onclick=async()=>{if(!confirm('Switch to the first spare target that works now?'))return;rd_();try{const r=await api('api/rwatch',{a:'switch',id:x.id});D.rw=r.rw;toast('Done');await load();$('#md').hidden=true}catch(e){toast(e.message,1)}};
 q('[data-use]').forEach(z=>z.onclick=()=>{const d=z.dataset.use;S.target=d+':443';S.sni=d;S.snix=[];FIND=null;scan()});
 if($('#ib_port'))$('#ib_port').oninput=()=>{S.port=$('#ib_port').value.trim();clearTimeout(ibmodal.pt);ibmodal.pt=setTimeout(()=>{const u=pused();ban(u?u.t:'',u&&u.w)},350)};
 const fz=f.querySelector('.ixb input:not([disabled]),.ixb select');if(tab==0&&!ed&&fz)fz.focus()}
-function addChip(k,v){const L=v.split(/[\s,]+/).map(y=>y.trim().toLowerCase()).filter(y=>y);if(k=='sids')L.forEach(y=>{if(!S.sids.includes(y)&&S.sids.length<8)S.sids.push(y)});else L.forEach(y=>{if(y!=S.sni&&!S.snix.includes(y)){if(!S.sni)S.sni=y;else S.snix.push(y)}})}
+function addChip(k,v){const L=v.split(/[\s,]+/).map(y=>y.trim().toLowerCase()).filter(y=>y);if(k=='spares'){L.forEach(y=>{y=y.replace(/:443$/,'');if(!S.rw.spares.includes(y)&&S.rw.spares.length<10)S.rw.spares.push(y)});return}if(k=='sids')L.forEach(y=>{if(!S.sids.includes(y)&&S.sids.length<8)S.sids.push(y)});else L.forEach(y=>{if(y!=S.sni&&!S.snix.includes(y)){if(!S.sni)S.sni=y;else S.snix.push(y)}})}
 async function scan(){const t=S.target||(S.sni?S.sni+':443':'');if(!t){ban('Write a target first, like www.microsoft.com:443');return}SCAN={run:1};draw();
 try{const r=await api('api/rscan',{target:t,sni:S.sni&&!S.target?S.sni:(S.sni||t.split(':')[0])});SCAN=r;if(r.ok){const h=t.split(':')[0];if(!S.target)S.target=r.target;if(S.sni!=h){S.sni=h;S.snix=[]}const nm=(r.names||[]).filter(n=>!n.includes('*')&&n!=S.sni&&!S.snix.includes(n));S.snix=S.snix.concat(nm).slice(0,4)}}catch(e){SCAN={ok:false,target:t,err:e.message}}draw()}
 async function find(){FIND={run:1,extra:FIND&&FIND.extra||''};draw();try{const r=await api('api/rtargets',{extra:FIND.extra});FIND=Object.assign(FIND,{run:0,res:r.res})}catch(e){FIND=Object.assign(FIND,{run:0,err:e.message})}if(FIND)draw()}
-function rd_(){f.querySelectorAll('input[data-k],select[data-k],textarea[data-k]').forEach(z=>{if(z.disabled)return;const k=z.dataset.k,v=k=='name'?z.value:z.value.trim();if(k.startsWith('f_'))S.frag[k.slice(2)]=v;else if(k=='hb')S.hb=+v||0;else S[k]=v});
+function rd_(){f.querySelectorAll('input[data-k],select[data-k],textarea[data-k]').forEach(z=>{if(z.disabled)return;const k=z.dataset.k,v=k=='name'?z.value:z.value.trim();if(k.startsWith('f_'))S.frag[k.slice(2)]=v;else if(k.startsWith('lfb_'))S.lfb[k.slice(4)]=v;else if(k=='hb')S.hb=+v||0;else S[k]=v});
 f.querySelectorAll('[data-hk]').forEach(z=>S.hdrs[+z.dataset.hk][0]=z.value.trim());f.querySelectorAll('[data-hv]').forEach(z=>S.hdrs[+z.dataset.hv][1]=z.value.trim());
 f.querySelectorAll('[data-ea]').forEach(z=>S.ext[+z.dataset.ea].addr=z.value.trim());f.querySelectorAll('[data-ep]').forEach(z=>S.ext[+z.dataset.ep].port=z.value.trim());f.querySelectorAll('[data-er]').forEach(z=>S.ext[+z.dataset.er].remark=z.value.trim());
 f.querySelectorAll('[data-cadd]').forEach(z=>{if(z.value.trim()){addChip(z.dataset.cadd,z.value);z.value=''}})}
@@ -5190,8 +5440,8 @@ if(bad){if(tab!=0){tab=0;draw()}ban(bad);$('#me').textContent=bad;return}
 const bt=f.querySelector('.pri');bt.disabled=true;const n=S.net,ph=!['tcp','grpc'].includes(n);
 const d={name:S.name.trim(),proto:S.proto,port:S.port,net:n,cdn:S.cdn,sec:S.sec,sni:S.sec=='none'?'':S.sni,target:S.sec=='reality'?S.target:'',fp:S.fp,alpn:S.sec=='tls'?alCur().join(','):'',addr:'',host:n!='tcp'?S.host:'',path:ph&&!p4()?S.path:'',on:S.on,
 xmode:S.xmode,svc:S.svc,multi:S.multi,obfs:S.obfs,obhost:S.obhost,obpath:S.obpath,hb:S.hb,hdrs:S.hdrs.filter(h=>h[0]||h[1]),tfo:S.tfo,frag:S.fon?Object.assign({on:true},S.frag):{},
-minv:S.minv,maxv:S.maxv,rsni:S.rsni,ech:S.ech,flow:S.flow,sids:S.sids,snix:S.snix,spx:S.spx,sniff:S.sniff,cmode:S.sec=='tls'?S.cmode:'panel',cfile:S.cfile,kfile:S.kfile,ccrt:S.ccrt,ckey:S.ckey,ext:S.exon?S.ext.filter(e=>e.addr):[]};
-try{const rr=await api('api/inbound/'+(ed?'edit':'add'),ed?Object.assign(d,{id:x.id}):d);$('#md').hidden=true;toast(ed?'Inbound saved':'Inbound created');IBH='';await load();if(!ed&&rr.id&&d.on&&+d.port!=80&&+d.port!=443)ibPort(rr.id)}catch(z){ban(z.message);$('#me').textContent=z.message}bt.disabled=false};
+minv:S.minv,maxv:S.maxv,rsni:S.rsni,ech:S.ech,flow:S.flow,sids:S.sids,snix:S.snix,spx:S.spx,sniff:S.sniff,venc:S.proto=='vless'?S.venc:'',lfb:S.sec=='reality'&&S.lfb.on?S.lfb:{},rw:S.sec=='reality'?S.rw:{},cmode:S.sec=='tls'?S.cmode:'panel',cfile:S.cfile,kfile:S.kfile,ccrt:S.ccrt,ckey:S.ckey,ext:S.exon?S.ext.filter(e=>e.addr):[]};
+try{const rr=await api('api/inbound/'+(ed?'edit':'add'),ed?Object.assign(d,{id:x.id}):cl?Object.assign(d,{from:x.id}):d);$('#md').hidden=true;toast(ed?'Inbound saved':'Inbound created');IBH='';await load();if(!ed&&rr.id&&d.on&&+d.port!=80&&+d.port!=443)ibPort(rr.id)}catch(z){ban(z.message);$('#me').textContent=z.message}bt.disabled=false};
 $('#md').hidden=false;draw()}
 
 function showQR(t,v){$('#qrt').textContent=t;$('#qrn').textContent=/WireGuard/.test(t)?'Scan with the WireGuard app (+ → Scan from QR code)':'Scan with v2rayNG, NekoBox or Hiddify';try{$('#qrs').innerHTML=RXQR.svg(v,300)}catch(x){$('#qrs').innerHTML='<p class="note">'+X(x.message)+'</p>'}$('#qrm').hidden=false}
@@ -5264,7 +5514,7 @@ ${D.svc.filter(x=>x.unit.startsWith('rexui-ovpn')||x.unit=='squid').map(x=>kv(x.
 <label for="pn">New password</label><input id="pn" type="password" autocomplete="new-password">
 <div class="err" id="pe"></div><button class="btn pri">Change login</button>
 <div class="kv" style="margin-top:16px"><span>Two-factor login (2FA)</span><b class="${d.tfa?'ok':''}">${d.tfa?'On':'Off'}</b></div>
-<p class="note">With 2FA on, login also asks for a 6-digit code from Google Authenticator or Aegis on your phone. Lost the phone? Run menu → 4 (Panel login reset) on the server to reset the login and turn 2FA off.</p>
+<p class="note">With 2FA on, login also asks for a 6-digit code from Google Authenticator or Aegis on your phone. Lost the phone? Run menu → 4 (Reset Username & Password) on the server to reset the login and turn 2FA off.</p>
 <button type="button" class="btn ${d.tfa?'dng':''}" id="tfa">${I('shield',15)}${d.tfa?'Turn off 2FA':'Turn on 2FA'}</button></form>
 <form class="card" id="apf"><div class="lab">${I('palette',15)}Appearance</div><p class="note" style="margin-top:8px">Your brand is shown on the login page, in the panel and on your users' page.</p>
 <label for="apb">Brand name (empty = ReXUI)</label><input id="apb" value="${X(s.brand)}" maxlength="24" placeholder="ReXUI">
@@ -5289,6 +5539,7 @@ ${D.svc.filter(x=>x.unit.startsWith('rexui-ovpn')||x.unit=='squid').map(x=>kv(x.
 <label for="ac">Telegram chat ID</label><div style="display:flex;gap:8px"><input id="ac" value="${X(s.tgchat)}" inputmode="numeric"><button type="button" class="btn" id="afc" style="white-space:nowrap">Find my ID</button></div>
 <p class="note" style="margin-top:6px">Create a bot with @BotFather, paste its token, send /start to your bot, then tap Find my ID. You get a message on every panel login, after 5 wrong logins, and before your certificate expires.</p>
 <label class="ck"><input type="checkbox" id="ah" ${s.health?'checked':''}> Health alerts (CPU, RAM or disk above 90%, or a service stops; stopped services are restarted automatically)</label>
+<label class="ck"><input type="checkbox" id="ash" ${s.tgshare?'checked':''}> Sharing alerts (one account used from places far apart at the same time, see Online)</label>
 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><label class="ck"><input type="checkbox" id="ar" ${s.report?'checked':''}> Daily report every day at</label><select id="arh" style="width:auto;margin-top:12px;padding:6px 8px" aria-label="Report hour">${[...Array(24).keys()].map(h=>`<option value="${h}"${h==s.rhour?' selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('')}</select></div>
 <label class="ck"><input type="checkbox" id="abk" ${s.tgbackup?'checked':''}> Send the daily backup file to Telegram (it has passwords, keep the chat private)</label>
 <div class="err" id="ae"></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn pri">Save</button><button type="button" class="btn" id="aft">Send test message</button><button type="button" class="btn" id="afb">${I('save',15)}Send backup now</button></div></form>
@@ -5428,7 +5679,7 @@ $('#apf').onsubmit=async e=>{e.preventDefault();try{await api('api/appearance',{
 $('#rf').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('.pri');b.disabled=true;b.textContent='Saving...';
 try{await api('api/routing',{b25:$('#rb25').checked,btorrent:$('#rbt').checked,bads:$('#rba').checked,warp:$('#rw').value,wsites:$('#rs').value});$('#re').textContent='';toast('Routing saved');await load();st()}catch(x){$('#re').textContent=x.message}b.disabled=false;b.textContent='Save'};
 if($('#wr'))$('#wr').onclick=async()=>{if(!confirm('Remove the WARP account and turn WARP off?'))return;try{await api('api/warp-reset');toast('WARP removed');await load();st()}catch(x){$('#re').textContent=x.message}};
-const ab=()=>({autodel:$('#ad').value,tgtoken:$('#at').value,tgchat:$('#ac').value,health:$('#ah').checked,report:$('#ar').checked,rhour:$('#arh').value,tgbackup:$('#abk').checked});
+const ab=()=>({autodel:$('#ad').value,tgtoken:$('#at').value,tgchat:$('#ac').value,health:$('#ah').checked,report:$('#ar').checked,rhour:$('#arh').value,tgbackup:$('#abk').checked,tgshare:$('#ash').checked});
 $('#afb').onclick=async()=>{const b=$('#afb');b.disabled=true;try{await api('api/tg-backup');$('#ae').textContent='';toast('Backup sent to Telegram')}catch(x){$('#ae').textContent=x.message}b.disabled=false};
 const snp=()=>{const f=$('#sf').value.toUpperCase(),fl=/^[A-Z]{2}$/.test(f)?[...f].map(c=>String.fromCodePoint(0x1F1E6+c.charCodeAt(0)-65)).join(''):'';$('#snp').textContent=($('#sn').value||'{user}-{proto}').replace(/\{flag\}/g,fl).replace(/\{brand\}/g,BR.brand||'ReXUI').replace(/\{user\}/g,'ali').replace(/\{proto\}/g,'reality').replace(/\{type\}/g,'VLESS Reality').replace(/\s+/g,' ').trim()};
 $('#sn').oninput=$('#sf').oninput=snp;snp();
@@ -5870,18 +6121,36 @@ url(){ local H; H=$(myip); if [ -f /etc/tunnel/cert/info ]; then NAME=; . /etc/t
 on(){ systemctl is-active --quiet "$1" && echo -e "${G}ON${N}" || echo -e "${Y}OFF${N}"; }
 fw(){ if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then ufw allow "$1"/tcp >/dev/null; fi; }
 fwu(){ if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then ufw allow "$1"/udp >/dev/null; fi; }
+kv(){ printf "  ${D}%-16s${N}%b\n" "$1" "$2"; }
+hr(){ echo -e "${D}  ──────────────────────────────────────────────────${N}"; }
 info(){
-  . $CF; echo -e "${W}PANEL INFO${N}"
-  echo -e "Panel URL  : ${C}$(url)${N}"
-  echo    "Panel user : $(python3 $PY user)  (password is stored as a hash, use option 4 to set a new one)"
-  echo -e "Services   : Panel $(on tunnel-panel)$([ -x /usr/local/bin/hysteria ] && echo " | Hysteria2 $(on rexui-hy2)")$(command -v wg >/dev/null && echo " | WireGuard $(on rexui-wg)")$([ -x /usr/local/bin/dnstt-server ] && echo " | DNS $(on rexui-dns)") | Xray $(on xray) | stunnel $(on stunnel4) | WS $(on ws-ssh) | UDPGW $(on badudp)$([ -f /etc/systemd/system/rexui-ovpn@.service ] && echo " | OpenVPN $(on rexui-ovpn@rx1194) | Squid $(on squid)")"
-  R=$(timeout 4 bash -c "exec 3<>/dev/tcp/127.0.0.1/$WS_PORT; printf 'GET / HTTP/1.1\\r\\nHost: x\\r\\nUpgrade: websocket\\r\\n\\r\\n' >&3; head -c 12 <&3" 2>/dev/null)
-  if [ "$R" = "HTTP/1.1 101" ]; then echo -e "SSH WS test : ${G}OK on this server${N} (if phones still cannot connect to $WS_PORT, open it in your provider firewall)"; else echo -e "SSH WS test : ${Y}FAILED${N} (try: systemctl restart ws-ssh)"; fi
-  printf "%-14s: %s\n" "SSH" $SSH_PORT "SSL" $SSL_PORT "SSH WS" $WS_PORT "SSH WS TLS" $WSTLS_PORT "UDPGW" "127.0.0.1:$UDPGW_PORT" \
-    "V2Ray" "$(python3 -c 'import json;L=json.load(open("/etc/tunnel/inbounds.json"));print(", ".join("%s %s"%(x["name"],x["port"]) for x in L if x.get("on",True)) or "no inbounds yet (add them in the panel: Inbounds)")' 2>/dev/null || echo 'add inbounds in the panel')" "Panel" $PANEL_PORT
-  [ -f /etc/systemd/system/rexui-ovpn@.service ] && printf "%-14s: %s\n" "OpenVPN TCP" "${OVPN1_PORT:-1194}, ${OVPN2_PORT:-110}" "HTTP proxy" "${SQUID_PORT:-3128}"
-  [ -x /usr/local/bin/hysteria ] && printf "%-14s: %s\n" "Hysteria2 UDP" "${HY_PORT:-443} (hopping ${HY_HOP:-20000-30000})"
-  command -v wg >/dev/null && printf "%-14s: %s\n" "WireGuard UDP" "${WG_PORT:-51820}"
+  . $CF; local U H
+  U=$(url)
+  echo -e "${W}  ReXUI v2.0 · Current Settings${N}"; hr
+  kv "Panel user" "$(python3 $PY user) ${D}(hash only, option 4 sets a new one)${N}"
+  kv "Panel port" "$PANEL_PORT"
+  kv "Web path" "/$WEB_PATH/"
+  if [ -f /etc/tunnel/cert/info ]; then NAME=; SRC=; . /etc/tunnel/cert/info; kv "Certificate" "${NAME:-self-signed}"; fi
+  kv "443 mode" "$([ -f /etc/tunnel/h443.on ] && echo -e "${G}ON${N}" || echo OFF)"
+  echo; echo -e "${W}  Services${N}"; hr
+  kv "Panel" "$(on tunnel-panel)"; kv "Xray" "$(on xray)"; kv "stunnel" "$(on stunnel4)"; kv "SSH WS" "$(on ws-ssh)"; kv "UDPGW" "$(on badudp)"
+  [ -f /etc/tunnel/h443.on ] && kv "HAProxy" "$(on haproxy)"
+  [ -x /usr/local/bin/hysteria ] && kv "Hysteria2" "$(on rexui-hy2)"
+  command -v wg >/dev/null && kv "WireGuard" "$(on rexui-wg)"
+  [ -x /usr/local/bin/dnstt-server ] && kv "DNS tunnel" "$(on rexui-dns)"
+  [ -f /etc/systemd/system/rexui-ovpn@.service ] && { kv "OpenVPN" "$(on rexui-ovpn@rx1194)"; kv "Squid" "$(on squid)"; }
+  local RR; RR=$(timeout 4 bash -c "exec 3<>/dev/tcp/127.0.0.1/$WS_PORT; printf 'GET / HTTP/1.1\\r\\nHost: x\\r\\nUpgrade: websocket\\r\\n\\r\\n' >&3; head -c 12 <&3" 2>/dev/null)
+  if [ "$RR" = "HTTP/1.1 101" ]; then kv "SSH WS test" "${G}OK${N} ${D}(if phones fail, open $WS_PORT in your provider firewall)${N}"; else kv "SSH WS test" "${Y}FAILED${N} ${D}(try option 8)${N}"; fi
+  echo; echo -e "${W}  Ports${N}"; hr
+  kv "SSH" "$SSH_PORT"; kv "SSL" "$SSL_PORT"; kv "SSH WS" "$WS_PORT"; kv "SSH WS TLS" "$WSTLS_PORT"; kv "UDPGW" "127.0.0.1:$UDPGW_PORT"
+  [ -f /etc/systemd/system/rexui-ovpn@.service ] && { kv "OpenVPN TCP" "${OVPN1_PORT:-1194}, ${OVPN2_PORT:-110}"; kv "HTTP proxy" "${SQUID_PORT:-3128}"; }
+  [ -x /usr/local/bin/hysteria ] && kv "Hysteria2 UDP" "${HY_PORT:-443} (hopping ${HY_HOP:-20000-30000})"
+  command -v wg >/dev/null && kv "WireGuard UDP" "${WG_PORT:-51820}"
+  python3 -c 'import json;L=[x for x in json.load(open("/etc/tunnel/inbounds.json")) if x.get("on",True)]
+print("\n".join("%s\t%s"%(x["port"],x["name"]) for x in L) or "-\tno inbounds yet (panel → Inbounds)")' 2>/dev/null | while IFS=$'\t' read -r p n; do kv "V2Ray $p" "$n"; done
+  echo; echo -e "${W}  Access URL${N}"; hr
+  echo -e "  ${C}${U}${N}"
+  H=$(myip); [ -n "$H" ] && [[ $U != *"$H"* ]] && echo -e "  ${C}https://$H:$PANEL_PORT/$WEB_PATH/${N}"
 }
 apply(){
   . $CF
@@ -6123,17 +6392,22 @@ uninst(){
   exit 0
 }
 dot(){ systemctl is-active --quiet "$1" && printf "${G}●${N}%s" "$2" || printf "${R}●%s${N}" "$2"; }
+st(){ systemctl is-active --quiet "$1" && echo -e "${G}Running${N}" || echo -e "${R}Not running${N}"; }
 status(){
   local a b c d cpu ram on
   read -r _ a b c d _ < /proc/stat; local t1=$((a+b+c+d)) i1=$d
   sleep 0.3
   read -r _ a b c d _ < /proc/stat; local t2=$((a+b+c+d)) i2=$d
   cpu=$(( t2>t1 ? 100*((t2-t1)-(i2-i1))/(t2-t1) : 0 ))
-  ram=$(free -m | awk '/^Mem:/{print $2-$7}')
+  ram=$(free -m | awk '/^Mem:/{print $2-$7"M / "$2"M"}')
   on=$(cat /run/rexui-online 2>/dev/null || echo -)
   local cc=$G; [ $cpu -ge 70 ] && cc=$Y; [ $cpu -ge 90 ] && cc=$R
-  echo -e "${W}ReXUI v1.9${N}  $(dot xray Xray) $(dot tunnel-panel Panel)$([ -f /etc/tunnel/h443.on ] && echo " $(dot haproxy HAProxy)")"
-  echo -e "${D}CPU${N} ${cc}${cpu}%${N}  ${D}RAM${N} ${ram}M  ${D}Online${N} ${W}${on}${N}"
+  echo -e "  Panel state     : $(st tunnel-panel)"
+  echo -e "  Xray state      : $(st xray)"
+  [ -f /etc/tunnel/h443.on ] && echo -e "  HAProxy state   : $(st haproxy)"
+  echo -e "  Start on boot   : $(systemctl is-enabled --quiet tunnel-panel && echo -e "${G}Yes${N}" || echo -e "${Y}No${N}")"
+  echo -e "  CPU / RAM       : ${cc}${cpu}%${N} / ${ram}"
+  echo -e "  Online users    : ${W}${on}${N}"
 }
 lastline(){ journalctl -u "$1" --since "24 hours ago" --no-pager -o short-iso 2>/dev/null | grep -iE "$2" | grep -viE 'PROXY protocol|deprecated|please migrate' | tail -1 | sed -E 's/^[0-9-]+T([0-9:]{5})[^ ]* [^ ]+ [^:]+: /\1 /; s#[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9:.]+ ##' | cut -c1-70; }
 logs(){
@@ -6155,20 +6429,24 @@ logs(){
   esac
 }
 pause(){ echo; read -n1 -s -r -p "$(echo -e "${C} Press any key to go back to the menu ${N}")"; echo; }
+B='\033[1;34m'
+mt(){ printf "${B}│${N} ${W}%-49s${N}${B}│${N}\n" "$1"; }
+mi(){ printf "${B}│${N}  ${G}%2s.${N} %-44s${B}│${N}\n" "$1" "$2"; }
+ms(){ echo -e "${B}├──────────────────────────────────────────────────┤${N}"; }
 while true; do
-  clear; status
-  cat <<T
-
-1) Update        9) Backup/Restore
-2) Uninstall     10) Server check
-3) Panel info    11) Performance
-4) Login reset   12) 443 mode
-5) Panel restart 13) Speed test
-6) Port change   14) Logs
-7) Service rest. 15) Firewall check
-8) SSL cert      0) Exit
-T
-  BACK=; read -rp "$(echo -e "${G}Option:${N} ")" o; clear
+  clear
+  echo -e "${B}╔══════════════════════════════════════════════════╗${N}"
+  printf "${B}║${N}  ${W}%-30s${N}${D}%18s${N}${B}║${N}\n" "ReXUI Panel Management Script" "v2.0 "
+  echo -e "${B}╚══════════════════════════════════════════════════╝${N}"
+  echo -e "${B}┌──────────────────────────────────────────────────┐${N}"
+  mi 0 "Exit Script"; ms
+  mt "Install & Update"; mi 1 "Update"; mi 2 "Uninstall"; ms
+  mt "Panel"; mi 3 "View Current Settings"; mi 4 "Reset Username & Password"; mi 5 "Restart Panel"; mi 6 "Change Ports"; mi 7 "SSL Certificate Management"; ms
+  mt "Services"; mi 8 "Restart Services"; mi 9 "Check Logs"; mi 10 "Server Check"; mi 11 "Firewall Check"; ms
+  mt "Tools"; mi 12 "Backup & Restore"; mi 13 "Performance"; mi 14 "443 Mode (one port)"; mi 15 "Speed Test"
+  echo -e "${B}└──────────────────────────────────────────────────┘${N}"
+  echo; status; echo
+  BACK=; read -rp "$(echo -e "  Please enter your selection ${W}[0-15]${N}: ")" o; clear
   case $o in
     1) updm;;
     2) uninst;;
@@ -6177,15 +6455,15 @@ T
        python3 $PY setlogin "$u" "$p" && systemctl restart tunnel-panel && echo -e "${G}Login changed${N}";;
     5) systemctl restart tunnel-panel && echo -e "${G}Panel restarted${N}";;
     6) ports; BACK=1;;
-    7) srv;;
-    8) $LIB/cert.sh;;
-    9) bkp;;
+    7) $LIB/cert.sh;;
+    8) srv;;
+    9) logs;;
     10) python3 $PY check;;
-    11) perfm;;
-    12) h443m;;
-    13) spdt;;
-    14) logs;;
-    15) python3 $PY fwcheck;;
+    11) python3 $PY fwcheck;;
+    12) bkp;;
+    13) perfm;;
+    14) h443m;;
+    15) spdt;;
     0) exit 0;;
     *) BACK=1;;
   esac
@@ -6230,7 +6508,7 @@ echo "V2Ray     : add your inbounds in the panel (Inbounds), then allow their po
 echo "OpenVPN TCP $OVPN1_PORT, $OVPN2_PORT | HTTP proxy $SQUID_PORT | Hysteria2 UDP $HY_PORT (hopping $HY_HOP) | WireGuard UDP $WG_PORT"
 echo "WS test   : ${R:-fail}"
 echo "Panel     : https://$PH:$PANEL_PORT/$WEB_PATH/"
-if [ -n "$NEWPASS" ]; then echo "Login     : admin / $NEWPASS  (save this now)"; else echo "Login     : unchanged (change it with menu -> 3)"; fi
+if [ -n "$NEWPASS" ]; then echo "Login     : admin / $NEWPASS  (save this now)"; else echo "Login     : unchanged (change it with menu -> 4)"; fi
 echo "Menu      : menu"
 echo "Project   : https://github.com/chaliraza777/ReXUI"
 echo "Allow these TCP ports in your provider firewall: $SSL_PORT $WS_PORT $WSTLS_PORT $OVPN1_PORT $OVPN2_PORT $SQUID_PORT $PANEL_PORT 80"

@@ -6,7 +6,7 @@
 
 SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP, WS, HTTPUpgrade · TLS, Reality, ECH · CDN) · OpenVPN (TCP + HTTP proxy) · Hysteria2 (UDP) · WireGuard · DNS tunnel + V2Ray · 443 mode (HAProxy)
 
-![version](https://img.shields.io/badge/version-1.9-1677ff) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
+![version](https://img.shields.io/badge/version-2.0-1677ff) ![license](https://img.shields.io/badge/license-GPL--3.0-16a34a) ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-x86__64%20%7C%20arm64-6b7385)
 
 </div>
 
@@ -14,7 +14,20 @@ SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP
 
 <p align="center"><img src="screenshots/dashboard-dark.png" alt="ReXUI dashboard (dark)" width="100%"></p>
 
-## What's new in 1.9
+## What's new in 2.0
+
+- **Quick renew:** +7 / +30 / +90 days and +10 / +50 / +100 GB buttons in Edit user, one tap and saved
+- **Online map:** a world map on the Online page shows where users connect from (city, country, network). Lines when one account is used from two places far apart (**sharing alert**, also on Telegram if you turn it on)
+- **VLESS Encryption (post-quantum):** X25519 or ML-KEM-768 on any VLESS inbound, keys made by the panel, works even without TLS
+- **Reality Watch:** the panel checks your Reality target every 10 minutes. After 3 fails in a row it moves to a spare target that passes and tells you on Telegram
+- **Clone inbound:** copy any inbound with one button (new port, same settings)
+- **Limit Fallback (Reality):** slows down probes and scanners that are not your users
+- **Users page:** Add V2Ray user comes first, then Trial, Inbounds, Payload, DNS, Bulk and Select. Configs in a 2-column grid with scrollable boxes, QR opens the user details at the subscription
+- **Terminal menu like 3X-UI:** boxed menu in groups (Install & Update, Panel, Services, Tools), Panel state / Xray state / Start on boot / CPU / RAM / users online at the bottom, and **View Current Settings** with all details and the access URL at the end
+- **Safe upgrade:** old users and inbounds are updated by themselves, links stay the same
+
+<details>
+<summary><b>What was new in 1.9</b></summary>
 
 - **New Add Inbound, like 3X-UI:** 5 tabs (Basics, Stream, Security, Sniffing, Advanced), labels on the left, blue design, no Address box, Path editable
 - **More inbound types:** HTTPUpgrade, XHTTP modes (auto, packet-up, stream-up, stream-one), **Vision flow**, TCP **HTTP obfuscation**, WS heartbeat and headers, TCP Fast Open, fragment (TCP mask)
@@ -24,7 +37,10 @@ SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP
 - **1-click all protocols:** 7 inbounds on free ports in one tap, and **Remove 1-click** removes only those (your own inbounds stay)
 - **Port check:** after you make an inbound (or with the shield button) the panel checks that Xray listens, the server firewall, and that the port is open **from the internet** (3 countries)
 - **JSON subscription:** a second link with full configs for v2rayNG / v2rayN, with TLS fragment and noise (Settings → Xray). In user details every config has **Show JSON / Copy JSON**
+- **Users table:** ✏️ Edit and QR buttons on every row. Edit: name (not for SSH / OpenVPN), data, days left (0 = no expiry), devices, monthly reset, inbounds, plus Reset usage, Disable, Clone, Share and Delete. User details are cleaner, configs in 2 columns. QR: this month's usage and every config as a big QR with Copy, Show JSON and Copy JSON
 - Light theme is the default now (dark and black are one tap away)
+
+</details>
 
 <details>
 <summary><b>What was new in 1.8</b></summary>
@@ -67,30 +83,32 @@ SSH · SSL · WebSocket · UDPGW · V2Ray inbounds (VLESS / Trojan · TCP, XHTTP
 | Inbounds | Add inbound |
 |---|---|
 | <img src="screenshots/inbounds.png" alt="Inbounds"> | <img src="screenshots/add-inbound.png" alt="Add inbound: TLS"> |
-| **Reality scan** | |
-| <img src="screenshots/inbound-reality.png" alt="Reality scan"> | |
-| **V2Ray users (live speed, online dot)** | **Add V2Ray user (attach inbounds)** |
-| <img src="screenshots/users.png" alt="V2Ray users"> | <img src="screenshots/add-v2ray-user.png" alt="Add V2Ray user"> |
-| **User details** | **Dashboard (light)** |
-| <img src="screenshots/user-details.png" alt="User details"> | <img src="screenshots/dashboard-light.png" alt="Dashboard light"> |
-| **SSH users** | **UDP users (Hysteria2)** |
-| <img src="screenshots/ssh-users.png" alt="SSH users"> | <img src="screenshots/udp-users.png" alt="UDP users"> |
-| **OpenVPN user (.ovpn + bug host)** | **WireGuard user (QR + .conf)** |
-| <img src="screenshots/openvpn-user.png" alt="OpenVPN user"> | <img src="screenshots/wireguard-user.png" alt="WireGuard user"> |
-| **Who is online** | **Settings: General** |
-| <img src="screenshots/online.png" alt="Online users"> | <img src="screenshots/settings-general.png" alt="Settings general"> |
-| **DNS tunnel settings** | **CDN mode (Cloudflare)** |
-| <img src="screenshots/dns-settings.png" alt="DNS settings"> | <img src="screenshots/cdn.png" alt="CDN mode"> |
-| **Payload builder** | **Server check** |
-| <img src="screenshots/payloads.png" alt="Payload builder"> | <img src="screenshots/server-check.png" alt="Server check"> |
-| **Ports and 443 mode** | **Login** |
-| <img src="screenshots/ports.png" alt="Port manager"> | <img src="screenshots/login.jpg" alt="Login page"> |
-| **Terminal menu** | |
-| <img src="screenshots/terminal-menu.png" alt="Terminal menu" width="360"> | |
+| **Reality scan** | **VLESS Encryption** |
+| <img src="screenshots/inbound-reality.png" alt="Reality scan"> | <img src="screenshots/vless-encryption.png" alt="VLESS Encryption"> |
+| **Reality Watch** | **Online map** |
+| <img src="screenshots/reality-watch.png" alt="Reality Watch"> | <img src="screenshots/online-map.png" alt="Online map"> |
+| **V2Ray users (live speed, online dot)** | **Quick renew** |
+| <img src="screenshots/users.png" alt="V2Ray users"> | <img src="screenshots/quick-renew.png" alt="Quick renew"> |
+| **Add V2Ray user (attach inbounds)** | **User details** |
+| <img src="screenshots/add-v2ray-user.png" alt="Add V2Ray user"> | <img src="screenshots/user-details.png" alt="User details"> |
+| **User QR and configs** | **SSH users** |
+| <img src="screenshots/user-qr.png" alt="User QR"> | <img src="screenshots/ssh-users.png" alt="SSH users"> |
+| **UDP users (Hysteria2)** | **OpenVPN user (.ovpn + bug host)** |
+| <img src="screenshots/udp-users.png" alt="UDP users"> | <img src="screenshots/openvpn-user.png" alt="OpenVPN user"> |
+| **WireGuard user (QR + .conf)** | **DNS tunnel settings** |
+| <img src="screenshots/wireguard-user.png" alt="WireGuard user"> | <img src="screenshots/dns-settings.png" alt="DNS settings"> |
+| **CDN mode (Cloudflare)** | **Payload builder** |
+| <img src="screenshots/cdn.png" alt="CDN mode"> | <img src="screenshots/payloads.png" alt="Payload builder"> |
+| **Server check** | **Ports and 443 mode** |
+| <img src="screenshots/server-check.png" alt="Server check"> | <img src="screenshots/ports.png" alt="Port manager"> |
 
-| Phone: dashboard | Phone: users | Phone: inbounds | User's own page |
-|---|---|---|---|
-| <img src="screenshots/mobile-dashboard.png" alt="Phone dashboard"> | <img src="screenshots/mobile-users.png" alt="Phone users"> | <img src="screenshots/mobile-inbounds.png" alt="Phone inbounds"> | <img src="screenshots/mobile-user-page.png" alt="User page"> |
+**Terminal menu and View Current Settings**
+
+<img src="screenshots/terminal-menu.png" alt="Terminal menu" width="100%">
+
+| Phone: dashboard | Phone: users | User's own page |
+|---|---|---|
+| <img src="screenshots/mobile-dashboard.png" alt="Phone dashboard"> | <img src="screenshots/mobile-users.png" alt="Phone users"> | <img src="screenshots/mobile-user-page.png" alt="User page"> |
 
 <sub>Screenshots use demo data.</sub>
 
@@ -256,10 +274,18 @@ Keep the panel record and the DNS tunnel records **grey**.
 menu
 ```
 
-A short status on top (Xray, Panel, HAProxy, CPU, RAM, users online), then:
+A boxed menu like 3X-UI, with the state of the panel and Xray at the bottom:
 
-| | | |
-|---|---|---|
+| Group | Options |
+|---|---|
+| Install & Update | 1 Update (ReXUI, Xray, geo files, roll back) · 2 Uninstall |
+| Panel | 3 View Current Settings · 4 Reset Username & Password (also turns off 2FA) · 5 Restart Panel · 6 Change Ports · 7 SSL Certificate Management |
+| Services | 8 Restart Services · 9 Check Logs · 10 Server Check · 11 Firewall Check |
+| Tools | 12 Backup & Restore · 13 Performance · 14 443 Mode · 15 Speed Test |
+
+**View Current Settings** shows the panel user, port, path, certificate, every service (ON / OFF), every port and inbound, and the **access URL** at the end. Every action waits for a key before the menu comes back. Inside a sub menu, 0 goes back.
+
+---|---|---|
 | 1 Update (ReXUI, Xray, geo files, roll back) | 6 Port change (all protocols) | 11 Performance mode |
 | 2 Uninstall | 7 Service restart | 12 443 mode on / off |
 | 3 Panel info | 8 SSL certificate | 13 Speed test (Ookla) |
